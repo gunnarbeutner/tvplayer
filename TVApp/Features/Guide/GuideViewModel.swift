@@ -22,11 +22,35 @@ final class GuideViewModel: ObservableObject {
 
     private static let refreshInterval: TimeInterval = 120
 
-    init(now: Date = Date()) {
+    init(
+        now: Date = Date(),
+        configuration: TVHeadendConfiguration? = nil,
+        cachedSnapshot: PersistedGuideSnapshot? = nil
+    ) {
         let timeline = GuideTimeline.surrounding(now)
         self.now = now
         self.timeline = timeline
         channels = []
+
+        guard let cachedSnapshot else { return }
+        if let configuration, configuration.isComplete,
+           cachedSnapshot.serverIdentifier != configuration.guideSnapshotIdentifier {
+            return
+        }
+
+        let restoredChannels = cachedSnapshot.restoredChannels(for: timeline)
+        let hasCurrentOrFutureProgramme = restoredChannels.lazy
+            .flatMap(\.programs)
+            .contains { $0.end > now }
+        guard hasCurrentOrFutureProgramme else { return }
+
+        channels = restoredChannels
+        hasUsableGuide = true
+        loadState = .loaded(
+            serverName: cachedSnapshot.serverName,
+            channelCount: restoredChannels.count
+        )
+        activeSnapshotIdentifier = cachedSnapshot.serverIdentifier
     }
 
     func tick(at date: Date = Date()) {
@@ -42,6 +66,9 @@ final class GuideViewModel: ObservableObject {
         now = date
 
         guard configuration.isComplete else {
+            // mDNS may restore configuration just after the first frame. Keep
+            // showing a usable local snapshot during that brief interval.
+            guard !hasUsableGuide else { return }
             timeline = refreshedTimeline
             channels = []
             hasUsableGuide = false

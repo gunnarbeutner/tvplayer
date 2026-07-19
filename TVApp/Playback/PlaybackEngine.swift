@@ -205,11 +205,13 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     func skipForward(by seconds: TimeInterval) -> Bool {
         refreshPlaybackInformation()
 
+        if activeRequest?.kind.isLive == true, liveInputStream != nil {
+            seekLiveBuffer(toDelay: max(0, liveDelaySeconds - seconds))
+            return false
+        }
+
         if isSeekable {
             seek(to: elapsedSeconds + seconds)
-            if activeRequest?.kind.isLive == true {
-                accumulatedLiveDelay = max(0, accumulatedLiveDelay - seconds)
-            }
             return false
         }
 
@@ -229,12 +231,14 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     }
 
     func skipBackward(by seconds: TimeInterval) {
+        refreshPlaybackInformation()
+        if activeRequest?.kind.isLive == true, liveInputStream != nil {
+            seekLiveBuffer(toDelay: liveDelaySeconds + seconds)
+            return
+        }
+
         guard isSeekable else { return }
         seek(to: elapsedSeconds - seconds)
-        if activeRequest?.kind.isLive == true {
-            accumulatedLiveDelay += seconds
-            timeshiftBeganAt = bufferStartedAt ?? Date()
-        }
     }
 
     func seek(to seconds: TimeInterval) {
@@ -319,7 +323,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
             timeshiftWindowSeconds = updatedWindow
         }
 
-        let updatedSeekable = mediaPlayer.isSeekable
+        let hasRetainedLiveBuffer = liveInputStream.map { $0.retainedByteCount > 188 } ?? false
+        let updatedSeekable = mediaPlayer.isSeekable || hasRetainedLiveBuffer
         if isSeekable != updatedSeekable { isSeekable = updatedSeekable }
         let updatedCanPause = mediaPlayer.canPause
         if canPause != updatedCanPause { canPause = updatedCanPause }
@@ -501,6 +506,24 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         audioDelayMilliseconds = 0
         subtitleDelayMilliseconds = 0
         catchUpRemaining = nil
+    }
+
+    private func seekLiveBuffer(toDelay requestedDelay: TimeInterval, at date: Date = Date()) {
+        guard let liveInputStream else { return }
+        let requestedDate = date.addingTimeInterval(-max(0, requestedDelay))
+        guard let selectedDate = liveInputStream.seek(to: requestedDate) else { return }
+
+        let actualDelay = max(0, date.timeIntervalSince(selectedDate))
+        let currentPauseDuration = pauseBeganAt.map { max(0, date.timeIntervalSince($0)) } ?? 0
+        accumulatedLiveDelay = max(0, actualDelay - currentPauseDuration)
+        timeshiftBeganAt = actualDelay > 0.75 ? (bufferStartedAt ?? selectedDate) : nil
+        catchUpRemaining = nil
+        mediaPlayer.rate = 1
+        playbackRate = 1
+        refreshPlaybackInformation(at: date)
+        logger.info(
+            "Requested live delay \(requestedDelay, privacy: .public)s; buffer selected \(actualDelay, privacy: .public)s behind live"
+        )
     }
 
     private func resetPlaybackMetrics() {

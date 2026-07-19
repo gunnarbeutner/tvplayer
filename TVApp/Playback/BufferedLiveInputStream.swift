@@ -9,6 +9,11 @@ import OSLog
 /// writing the MPEG-TS feed while VLC's reader is paused, then the blocking
 /// `read` implementation supplies every buffered byte when playback resumes.
 final class BufferedLiveInputStream: InputStream, URLSessionDataDelegate, @unchecked Sendable {
+    private struct OffsetSample {
+        let offset: Int64
+        let date: Date
+    }
+
     /// Roughly 40 minutes at 6.8 Mbit/s. Keep this divisible by the 188-byte
     /// MPEG-TS packet size so wrap-around preserves packet alignment.
     private static let maximumBufferBytes: Int64 = (2 * 1_024 * 1_024 * 1_024 / 188) * 188
@@ -25,6 +30,7 @@ final class BufferedLiveInputStream: InputStream, URLSessionDataDelegate, @unche
     private var writeOffset: Int64 = 0
     private var readOffset: Int64 = 0
     private var retentionFloor: Int64 = 0
+    private var offsetSamples: [OffsetSample] = []
     private var reachedEnd = false
     private var stopped = false
     private(set) var startedAt = Date()
@@ -80,10 +86,7 @@ final class BufferedLiveInputStream: InputStream, URLSessionDataDelegate, @unche
 
     var retainedStartDate: Date {
         condition.withLock {
-            guard writeOffset > 0 else { return startedAt }
-            let retainedFraction = Double(writeOffset - oldestAvailableOffset) / Double(writeOffset)
-            let retainedDuration = Date().timeIntervalSince(startedAt) * retainedFraction
-            return Date().addingTimeInterval(-retainedDuration)
+            estimatedDate(for: oldestAvailableOffset) ?? startedAt
         }
     }
 
@@ -93,6 +96,53 @@ final class BufferedLiveInputStream: InputStream, URLSessionDataDelegate, @unche
 
     var bytesConsumed: Int64 {
         condition.withLock { readOffset }
+    }
+
+    /// Moves VLC's next read to the point in the retained transport stream that
+    /// arrived at `date`. Unlike VLC's media-time seeking, this maps directly to
+    /// the byte offsets owned by our rolling live buffer.
+    ///
+    /// Returns the arrival date represented by the selected byte offset. The
+    /// caller uses it to keep the timeline aligned with the seek that was
+    /// actually possible after clamping to the retained window.
+    func seek(to date: Date) -> Date? {
+        condition.withLock {
+            pruneOffsetSamples()
+            guard let first = offsetSamples.first, let last = offsetSamples.last else {
+                return nil
+            }
+
+            let clampedDate = min(max(date, first.date), last.date)
+            let upperIndex = offsetSamples.partitioningIndex { $0.date >= clampedDate }
+            let lower: OffsetSample
+            let upper: OffsetSample
+            if upperIndex == 0 {
+                lower = first
+                upper = first
+            } else if upperIndex == offsetSamples.count {
+                lower = last
+                upper = last
+            } else {
+                lower = offsetSamples[upperIndex - 1]
+                upper = offsetSamples[upperIndex]
+            }
+
+            let dateSpan = upper.date.timeIntervalSince(lower.date)
+            let fraction = dateSpan > 0
+                ? clampedDate.timeIntervalSince(lower.date) / dateSpan
+                : 0
+            let interpolatedOffset = lower.offset
+                + Int64(Double(upper.offset - lower.offset) * fraction)
+            let packetAlignedOffset = interpolatedOffset - (interpolatedOffset % 188)
+            readOffset = min(max(packetAlignedOffset, oldestAvailableOffset), writeOffset)
+            condition.broadcast()
+
+            let selectedDate = estimatedDate(for: readOffset) ?? clampedDate
+            logger.info(
+                "Moved live-buffer read position to \(selectedDate.formatted(date: .omitted, time: .standard), privacy: .public) at byte \(self.readOffset, privacy: .public)"
+            )
+            return selectedDate
+        }
     }
 
     /// Drops prewarm data before VLC has started consuming it. A short tail is
@@ -132,6 +182,7 @@ final class BufferedLiveInputStream: InputStream, URLSessionDataDelegate, @unche
             self.session = session
             self.task = task
             startedAt = Date()
+            offsetSamples = [OffsetSample(offset: writeOffset, date: startedAt)]
             currentStatus = .open
         }
         logger.info("Starting disk-backed live buffer from \(self.sourceURL.host ?? "unknown host", privacy: .public)")
@@ -276,11 +327,18 @@ final class BufferedLiveInputStream: InputStream, URLSessionDataDelegate, @unche
 
         if bytesWritten == data.count {
             writeOffset += Int64(bytesWritten)
+            let receivedAt = Date()
+            if offsetSamples.last.map({ receivedAt.timeIntervalSince($0.date) >= 0.25 }) ?? true {
+                offsetSamples.append(OffsetSample(offset: writeOffset, date: receivedAt))
+            } else if !offsetSamples.isEmpty {
+                offsetSamples[offsetSamples.count - 1] = OffsetSample(offset: writeOffset, date: receivedAt)
+            }
             if readOffset < oldestAvailableOffset {
                 let firstWholePacket = ((oldestAvailableOffset + 187) / 188) * 188
                 readOffset = min(firstWholePacket, writeOffset)
                 logger.warning("Live playback fell beyond the rolling buffer and advanced to its oldest retained packet")
             }
+            pruneOffsetSamples()
             condition.broadcast()
         } else {
             currentError = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
@@ -319,8 +377,50 @@ final class BufferedLiveInputStream: InputStream, URLSessionDataDelegate, @unche
         max(retentionFloor, max(writeOffset - Self.maximumBufferBytes, 0))
     }
 
+    private func pruneOffsetSamples() {
+        let oldestOffset = oldestAvailableOffset
+        guard offsetSamples.count > 2 else { return }
+        let firstRetained = offsetSamples.partitioningIndex { $0.offset >= oldestOffset }
+        // Keep one sample immediately before the floor for interpolation.
+        let removalCount = max(0, firstRetained - 1)
+        if removalCount > 0 {
+            offsetSamples.removeFirst(removalCount)
+        }
+    }
+
+    private func estimatedDate(for offset: Int64) -> Date? {
+        guard let first = offsetSamples.first, let last = offsetSamples.last else { return nil }
+        if offset <= first.offset { return first.date }
+        if offset >= last.offset { return last.date }
+
+        let upperIndex = offsetSamples.partitioningIndex { $0.offset >= offset }
+        guard upperIndex > 0, upperIndex < offsetSamples.count else { return nil }
+        let lower = offsetSamples[upperIndex - 1]
+        let upper = offsetSamples[upperIndex]
+        let byteSpan = upper.offset - lower.offset
+        guard byteSpan > 0 else { return lower.date }
+        let fraction = Double(offset - lower.offset) / Double(byteSpan)
+        return lower.date.addingTimeInterval(upper.date.timeIntervalSince(lower.date) * fraction)
+    }
+
     deinit {
         close()
+    }
+}
+
+private extension Array {
+    func partitioningIndex(where predicate: (Element) -> Bool) -> Int {
+        var lowerBound = 0
+        var upperBound = count
+        while lowerBound < upperBound {
+            let middle = lowerBound + (upperBound - lowerBound) / 2
+            if predicate(self[middle]) {
+                upperBound = middle
+            } else {
+                lowerBound = middle + 1
+            }
+        }
+        return lowerBound
     }
 }
 

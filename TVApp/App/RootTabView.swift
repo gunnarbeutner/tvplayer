@@ -9,10 +9,26 @@ enum AppTab: Hashable {
 
 struct RootTabView: View {
     @State private var selection: AppTab = .guide
-    @StateObject private var settings = ServerSettingsStore()
-    @StateObject private var guide = GuideViewModel()
+    @StateObject private var settings: ServerSettingsStore
+    @StateObject private var guide: GuideViewModel
     @StateObject private var recordings = RecordingStore()
     @StateObject private var playback = PlaybackCoordinator()
+
+    init() {
+        let settings = ServerSettingsStore()
+        let configuration = settings.configuration
+        let cachedSnapshot = configuration.isComplete
+            ? GuideSnapshotStore.loadSynchronously(serverIdentifier: configuration.guideSnapshotIdentifier)
+            : GuideSnapshotStore.loadLatestSynchronously()
+
+        _settings = StateObject(wrappedValue: settings)
+        _guide = StateObject(
+            wrappedValue: GuideViewModel(
+                configuration: configuration,
+                cachedSnapshot: cachedSnapshot
+            )
+        )
+    }
 
     var body: some View {
         ZStack {

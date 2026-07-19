@@ -70,6 +70,7 @@ struct PlaybackView: View {
                             canSeek: engine.isSeekable,
                             seekBackward: { engine.skipBackward(by: $0); noteActivity() },
                             seekForward: { skipForward(by: $0) },
+                            togglePlayback: toggleTimelinePlayback,
                             showPanel: showPanel
                         )
                     } else {
@@ -81,6 +82,7 @@ struct PlaybackView: View {
                             canSeek: engine.isSeekable,
                             seekBackward: { engine.skipBackward(by: $0); noteActivity() },
                             seekForward: { skipForward(by: $0) },
+                            togglePlayback: toggleTimelinePlayback,
                             showPanel: showPanel
                         )
                     }
@@ -155,10 +157,7 @@ struct PlaybackView: View {
             if engine.state == .playing || engine.state == .preparing { engine.pause() }
         }
         .onPlayPauseCommand {
-            let wasPlaying = engine.mediaPlayer.isPlaying
-            engine.togglePlayPause()
-            if !wasPlaying { requestVideoReattachment() }
-            showTimeline()
+            toggleTimelinePlayback()
         }
         .onMoveCommand { direction in
             switch direction {
@@ -267,9 +266,19 @@ struct PlaybackView: View {
         noteActivity()
     }
 
+    private func toggleTimelinePlayback() {
+        let wasPlaying = engine.mediaPlayer.isPlaying
+        engine.togglePlayPause()
+        if !wasPlaying { requestVideoReattachment() }
+        showTimeline()
+    }
+
     private func showPanel() {
         wakeSurfaceFocused = false
         automaticallyHiddenAt = nil
+        if chromeMode != .panel {
+            selectedTab = .details
+        }
         withAnimation(.easeOut(duration: 0.18)) { chromeMode = .panel }
         noteActivity()
     }
@@ -337,6 +346,7 @@ private struct RecordingPlaybackTimeline: View {
     let canSeek: Bool
     let seekBackward: (TimeInterval) -> Void
     let seekForward: (TimeInterval) -> Void
+    let togglePlayback: () -> Void
     let showPanel: () -> Void
 
     @FocusState private var isFocused: Bool
@@ -350,60 +360,59 @@ private struct RecordingPlaybackTimeline: View {
     }
 
     var body: some View {
-        Button(action: {}) {
-            VStack(spacing: 12) {
-                HStack {
-                    Text(recording.title)
-                        .font(.title2.bold())
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                    Spacer()
-                    Text(recording.channelName)
-                        .font(.headline)
-                        .foregroundStyle(.white.opacity(0.82))
-                }
-
-                GeometryReader { geometry in
-                    let width = geometry.size.width
-                    let availableWidth = width * CGFloat(availableDuration / totalDuration)
-                    let playhead = width * CGFloat(min(max(0, elapsedSeconds / totalDuration), 1))
-
-                    ZStack(alignment: .topLeading) {
-                        RoundedRectangle(cornerRadius: 5)
-                            .fill(.white.opacity(isFocused ? 0.24 : 0.16))
-                            .frame(height: 16)
-                        RoundedRectangle(cornerRadius: 5)
-                            .fill(AppTheme.accent.opacity(0.82))
-                            .frame(width: max(0, availableWidth), height: 16)
-                        Rectangle()
-                            .fill(.white)
-                            .frame(width: 3, height: 31)
-                            .offset(x: min(max(0, playhead - 1.5), width - 3))
-                        Text(clock(recording.start.addingTimeInterval(elapsedSeconds)))
-                            .font(.callout.bold().monospacedDigit())
-                            .foregroundStyle(.white)
-                            .fixedSize()
-                            .position(x: min(max(54, playhead), width - 54), y: 38)
-                    }
-                }
-                .frame(height: 52)
-
-                HStack {
-                    Text("\(clock(recording.start))–\(clock(recording.end))")
-                    Spacer()
-                    if recording.state == .recording {
-                        Text("Recording · available through \(clock(recording.start.addingTimeInterval(availableDuration)))")
-                            .foregroundStyle(.red)
-                    }
-                }
-                .font(.callout.monospacedDigit())
-                .foregroundStyle(.white.opacity(0.76))
+        VStack(spacing: 12) {
+            HStack {
+                Text(recording.title)
+                    .font(.title2.bold())
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Spacer()
+                Text(recording.channelName)
+                    .font(.headline)
+                    .foregroundStyle(.white.opacity(0.82))
             }
+
+            GeometryReader { geometry in
+                let width = geometry.size.width
+                let availableWidth = width * CGFloat(availableDuration / totalDuration)
+                let playhead = width * CGFloat(min(max(0, elapsedSeconds / totalDuration), 1))
+
+                ZStack(alignment: .topLeading) {
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(.white.opacity(isFocused ? 0.24 : 0.16))
+                        .frame(height: 16)
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(AppTheme.accent.opacity(0.82))
+                        .frame(width: max(0, availableWidth), height: 16)
+                    Rectangle()
+                        .fill(.white)
+                        .frame(width: 3, height: 31)
+                        .offset(x: min(max(0, playhead - 1.5), width - 3))
+                    Text(clock(recording.start.addingTimeInterval(elapsedSeconds)))
+                        .font(.callout.bold().monospacedDigit())
+                        .foregroundStyle(.white)
+                        .fixedSize()
+                        .position(x: min(max(54, playhead), width - 54), y: 38)
+                }
+            }
+            .frame(height: 52)
+
+            HStack {
+                Text("\(clock(recording.start))–\(clock(recording.end))")
+                Spacer()
+                if recording.state == .recording {
+                    Text("Recording · available through \(clock(recording.start.addingTimeInterval(availableDuration)))")
+                        .foregroundStyle(.red)
+                }
+            }
+            .font(.callout.monospacedDigit())
+            .foregroundStyle(.white.opacity(0.76))
         }
-        .buttonStyle(.plain)
+        .contentShape(Rectangle())
         .focusable()
         .focused($isFocused)
         .focusEffectDisabled()
+        .onTapGesture(perform: togglePlayback)
         .onMoveCommand { direction in
             if direction == .down {
                 showPanel()
@@ -441,6 +450,7 @@ private struct ProgrammePlaybackTimeline: View {
     let canSeek: Bool
     let seekBackward: (TimeInterval) -> Void
     let seekForward: (TimeInterval) -> Void
+    let togglePlayback: () -> Void
     let showPanel: () -> Void
 
     @FocusState private var isFocused: Bool
@@ -468,47 +478,46 @@ private struct ProgrammePlaybackTimeline: View {
             channel.programs.first { $0.start >= current.end && $0.id != current.id }
         }
 
-        return Button(action: {}) {
-            VStack(spacing: 12) {
-                HStack(alignment: .firstTextBaseline, spacing: 30) {
-                    Text(program?.title ?? channel.name)
-                        .font(.title2.bold())
-                        .foregroundStyle(.white)
+        return VStack(spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 30) {
+                Text(program?.title ?? channel.name)
+                    .font(.title2.bold())
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Spacer()
+                if let next {
+                    Text("Next: \(next.title)")
+                        .font(.headline)
+                        .foregroundStyle(.white.opacity(0.82))
                         .lineLimit(1)
-                    Spacer()
-                    if let next {
-                        Text("Next: \(next.title)")
-                            .font(.headline)
-                            .foregroundStyle(.white.opacity(0.82))
-                            .lineLimit(1)
-                    }
-                }
-
-                if let program {
-                    TimelineBar(
-                        program: program,
-                        playbackDate: playbackDate,
-                        availableStart: max(program.start, bufferStartedAt ?? liveDate),
-                        availableEnd: min(program.end, liveDate),
-                        isFocused: isFocused
-                    )
-
-                    HStack {
-                        Text("\(clock(program.start))–\(clock(program.end))")
-                        Spacer()
-                        if let next { Text("Next · \(clock(next.start))") }
-                    }
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.76))
-                } else {
-                    Capsule().fill(.white.opacity(0.25)).frame(height: 14)
                 }
             }
+
+            if let program {
+                TimelineBar(
+                    program: program,
+                    playbackDate: playbackDate,
+                    availableStart: max(program.start, bufferStartedAt ?? liveDate),
+                    availableEnd: min(program.end, liveDate),
+                    isFocused: isFocused
+                )
+
+                HStack {
+                    Text("\(clock(program.start))–\(clock(program.end))")
+                    Spacer()
+                    if let next { Text("Next · \(clock(next.start))") }
+                }
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.white.opacity(0.76))
+            } else {
+                Capsule().fill(.white.opacity(0.25)).frame(height: 14)
+            }
         }
-        .buttonStyle(.plain)
+        .contentShape(Rectangle())
         .focusable()
         .focused($isFocused)
         .focusEffectDisabled()
+        .onTapGesture(perform: togglePlayback)
         .onMoveCommand { direction in
             if direction == .down {
                 showPanel()

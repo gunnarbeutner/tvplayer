@@ -39,11 +39,24 @@ struct GuideView: View {
             AppTheme.background.ignoresSafeArea()
 
             if model.isColdLoading {
-                GuideLoadingSkeleton(
-                    channels: model.channels,
-                    timeline: model.timeline
-                )
-                .opacity(showLoadingSkeleton ? 1 : 0)
+                ZStack {
+                    // Keep a complete loading surface behind the delayed
+                    // skeleton. Previously the skeleton began transparent,
+                    // exposing only the black app background between mDNS
+                    // configuration and the first renderable guide snapshot.
+                    TVSourceStateView(
+                        state: .loading,
+                        openSettings: onOpenSettings,
+                        retry: {}
+                    )
+                    .opacity(showLoadingSkeleton ? 0 : 1)
+
+                    GuideLoadingSkeleton(
+                        channels: model.channels,
+                        timeline: model.timeline
+                    )
+                    .opacity(showLoadingSkeleton ? 1 : 0)
+                }
             } else if !model.hasUsableGuide {
                 TVSourceStateView(
                     state: model.loadState,

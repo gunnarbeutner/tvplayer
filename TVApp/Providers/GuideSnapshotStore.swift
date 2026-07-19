@@ -69,25 +69,47 @@ actor GuideSnapshotStore {
 
     private let fileURL: URL
 
+    private static var defaultFileURL: URL {
+        let cacheDirectory = FileManager.default.urls(
+            for: .cachesDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.temporaryDirectory
+        return cacheDirectory
+            .appendingPathComponent("TVPlayer", isDirectory: true)
+            .appendingPathComponent("guide-snapshot-v1.json")
+    }
+
     init(fileURL: URL? = nil) {
         if let fileURL {
             self.fileURL = fileURL
         } else {
-            let cacheDirectory = FileManager.default.urls(
-                for: .cachesDirectory,
-                in: .userDomainMask
-            ).first ?? FileManager.default.temporaryDirectory
-            self.fileURL = cacheDirectory
-                .appendingPathComponent("TVPlayer", isDirectory: true)
-                .appendingPathComponent("guide-snapshot-v1.json")
+            self.fileURL = Self.defaultFileURL
         }
     }
 
+    /// Used once during app construction so the first SwiftUI frame can be a
+    /// real guide instead of a transient connection screen. Subsequent reads
+    /// and all writes stay on the actor.
+    nonisolated static func loadSynchronously(serverIdentifier: String) -> PersistedGuideSnapshot? {
+        decodeSnapshot(at: defaultFileURL, serverIdentifier: serverIdentifier)
+    }
+
+    nonisolated static func loadLatestSynchronously() -> PersistedGuideSnapshot? {
+        decodeSnapshot(at: defaultFileURL, serverIdentifier: nil)
+    }
+
     func load(serverIdentifier: String) -> PersistedGuideSnapshot? {
+        Self.decodeSnapshot(at: fileURL, serverIdentifier: serverIdentifier)
+    }
+
+    private nonisolated static func decodeSnapshot(
+        at fileURL: URL,
+        serverIdentifier: String?
+    ) -> PersistedGuideSnapshot? {
         guard let data = try? Data(contentsOf: fileURL),
               let snapshot = try? JSONDecoder().decode(PersistedGuideSnapshot.self, from: data),
               snapshot.version == PersistedGuideSnapshot.currentVersion,
-              snapshot.serverIdentifier == serverIdentifier
+              serverIdentifier.map({ snapshot.serverIdentifier == $0 }) ?? true
         else { return nil }
         return snapshot
     }

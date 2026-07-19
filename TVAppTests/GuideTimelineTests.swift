@@ -131,6 +131,99 @@ final class GuideTimelineTests: XCTestCase {
         XCTAssertNil(mismatchedSnapshot)
     }
 
+    @MainActor
+    func testGuideModelBootstrapsWithCurrentCachedGuide() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let configuration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://tvheadend.local:9981"),
+            username: "viewer",
+            password: "secret",
+            streamProfile: "pass",
+            guideCacheURL: URL(string: "http://guide.local:49382/guide.json"),
+            xmltvURL: nil
+        )
+        let channel = GuideChannel(
+            id: "channel-1",
+            number: 1,
+            name: "Cached channel",
+            monogram: "CC",
+            tint: .orange,
+            iconURL: nil,
+            programs: [
+                GuideProgram(
+                    id: "current",
+                    channelID: "channel-1",
+                    title: "Cached current programme",
+                    subtitle: nil,
+                    overview: "",
+                    start: now.addingTimeInterval(-300),
+                    end: now.addingTimeInterval(1_500)
+                ),
+            ]
+        )
+        let snapshot = PersistedGuideSnapshot(
+            serverIdentifier: configuration.guideSnapshotIdentifier,
+            serverName: "Cached TVHeadend",
+            savedAt: now,
+            channels: [channel]
+        )
+
+        let model = GuideViewModel(
+            now: now,
+            configuration: configuration,
+            cachedSnapshot: snapshot
+        )
+
+        XCTAssertTrue(model.hasUsableGuide)
+        XCTAssertEqual(model.channels.first?.programs.first?.id, "current")
+        XCTAssertEqual(model.loadState, .loaded(serverName: "Cached TVHeadend", channelCount: 1))
+    }
+
+    @MainActor
+    func testGuideModelKeepsCachedGuideWhileDiscoveryRestoresConfiguration() async {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let channel = GuideChannel(
+            id: "channel-1",
+            number: 1,
+            name: "Cached channel",
+            monogram: "CC",
+            tint: .orange,
+            iconURL: nil,
+            programs: [
+                GuideProgram(
+                    id: "current",
+                    channelID: "channel-1",
+                    title: "Cached current programme",
+                    subtitle: nil,
+                    overview: "",
+                    start: now.addingTimeInterval(-300),
+                    end: now.addingTimeInterval(1_500)
+                ),
+            ]
+        )
+        let snapshot = PersistedGuideSnapshot(
+            serverIdentifier: "http://tvheadend.local:9981|viewer||",
+            serverName: "Cached TVHeadend",
+            savedAt: now,
+            channels: [channel]
+        )
+        let model = GuideViewModel(now: now, cachedSnapshot: snapshot)
+        let incompleteConfiguration = TVHeadendConfiguration(
+            baseURL: nil,
+            username: "",
+            password: "",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil
+        )
+
+        await model.load(configuration: incompleteConfiguration, at: now)
+
+        XCTAssertTrue(model.hasUsableGuide)
+        XCTAssertEqual(model.channels.first?.programs.first?.id, "current")
+        XCTAssertEqual(model.loadState, .loaded(serverName: "Cached TVHeadend", channelCount: 1))
+    }
+
     func testOffsetsAreClampedToTimeline() {
         let start = Date(timeIntervalSince1970: 10_000)
         let timeline = GuideTimeline(start: start, end: start.addingTimeInterval(3_600))
