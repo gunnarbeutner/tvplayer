@@ -10,22 +10,28 @@ struct GuideView: View {
     @EnvironmentObject private var playback: PlaybackCoordinator
     @EnvironmentObject private var recordings: RecordingStore
     @Namespace private var guideFocusScope
-    @FocusState private var focusedProgramID: GuideProgram.ID?
+    @State private var focusedProgramID: GuideProgram.ID?
     @State private var recenterRequest = UUID()
+    @State private var focusRestoreRequest = UUID()
     @State private var detail: ProgrammeDetailPresentation?
     @State private var needsInitialFocus = true
     @State private var showLoadingSkeleton = false
 
     private var presentedProgram: GuideProgram? {
-        model.program(withID: focusedProgramID) ?? model.firstCurrentProgram
+        model.program(withID: focusedProgramID)
+            ?? model.channels.lazy.flatMap(\.programs).first { $0.isAiring(at: Date()) }
     }
 
     private var preferredFocusProgramID: GuideProgram.ID? {
-        PlaybackFocusSelection.programID(
+        let currentDate = Date()
+        return PlaybackFocusSelection.programID(
             in: model.channels,
             selection: playback.navigationSelection,
-            at: model.now
-        ) ?? model.preferredInitialProgram?.id
+            at: currentDate
+        ) ?? GuideFocusSelection.initialProgram(
+            in: model.channels.first?.programs ?? [],
+            at: currentDate
+        )?.id
     }
 
     var body: some View {
@@ -66,15 +72,30 @@ struct GuideView: View {
                         focusScope: guideFocusScope,
                         focusedProgramID: $focusedProgramID,
                         recenterRequest: recenterRequest,
+                        focusRestoreRequest: focusRestoreRequest,
+                        recordingsFingerprint: recordings.recordings.hashValue,
                         recordingState: { recordings.scheduledRecording(for: $0)?.state },
                         onActivate: { program in
                             guard let channel = model.channel(containing: program) else { return }
                             detail = ProgrammeDetailPresentation(program: program, channel: channel)
+                        },
+                        onPlay: { program in
+                            guard let channel = model.channel(containing: program) else { return }
+                            playback.start(
+                                channel: channel,
+                                program: program,
+                                configuration: settings.configuration
+                            )
                         }
                     )
                 }
             }
         }
+        // The tab bar already reserves its own top region. The remaining
+        // guide is an edge-to-edge television surface; keeping tvOS's large
+        // horizontal and bottom content margins here wastes almost a full
+        // programme column and one row.
+        .ignoresSafeArea(.container, edges: [.horizontal, .bottom])
         .fullScreenCover(item: $detail) { presentation in
             ProgrammeDetailView(presentation: presentation)
         }
@@ -92,7 +113,7 @@ struct GuideView: View {
             guard selected else { return }
             requestInitialFocus()
         }
-        .onChange(of: model.preferredInitialProgram?.id) { _, _ in
+        .onChange(of: preferredFocusProgramID) { _, _ in
             guard isSelected, needsInitialFocus else { return }
             applyInitialFocusIfAvailable()
         }
@@ -161,7 +182,12 @@ struct GuideView: View {
         Task { @MainActor in
             await Task.yield()
             guard isSelected else { return }
+            guideFocusLogger.debug("restorePlaybackFocus: \(programID, privacy: .public), previous=\(String(describing: focusedProgramID), privacy: .public)")
             focusedProgramID = programID
+            // The played programme is usually the one that was already
+            // focused, so the binding may not change. Force the grid to
+            // re-request UIKit focus regardless.
+            focusRestoreRequest = UUID()
         }
     }
 }

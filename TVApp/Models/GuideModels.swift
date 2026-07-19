@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 
-struct GuideChannel: Identifiable, Sendable {
+struct GuideChannel: Identifiable, Equatable, Sendable {
     let id: String
     let number: Int
     let name: String

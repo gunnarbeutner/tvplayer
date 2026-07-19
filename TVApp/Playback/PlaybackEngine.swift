@@ -525,13 +525,22 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
 
 struct VLCVideoSurface: UIViewRepresentable {
     let mediaPlayer: VLCMediaPlayer
+    let attachmentRevision: Int
+
+    init(mediaPlayer: VLCMediaPlayer, attachmentRevision: Int = 0) {
+        self.mediaPlayer = mediaPlayer
+        self.attachmentRevision = attachmentRevision
+    }
 
     func makeUIView(context: Context) -> UIView {
-        VLCVideoContainerView(mediaPlayer: mediaPlayer)
+        VLCVideoContainerView(
+            mediaPlayer: mediaPlayer,
+            attachmentRevision: attachmentRevision
+        )
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
-        (uiView as? VLCVideoContainerView)?.attachIfVisible()
+        (uiView as? VLCVideoContainerView)?.updateAttachment(revision: attachmentRevision)
     }
 
     static func dismantleUIView(_ uiView: UIView, coordinator: ()) {
@@ -541,9 +550,11 @@ struct VLCVideoSurface: UIViewRepresentable {
 
 private final class VLCVideoContainerView: UIView {
     private weak var mediaPlayer: VLCMediaPlayer?
+    private var attachmentRevision: Int
 
-    init(mediaPlayer: VLCMediaPlayer) {
+    init(mediaPlayer: VLCMediaPlayer, attachmentRevision: Int) {
         self.mediaPlayer = mediaPlayer
+        self.attachmentRevision = attachmentRevision
         super.init(frame: .zero)
         backgroundColor = .black
     }
@@ -562,13 +573,22 @@ private final class VLCVideoContainerView: UIView {
         }
     }
 
-    func attachIfVisible() {
+    func updateAttachment(revision: Int) {
+        let mustReattach = revision != attachmentRevision
+        attachmentRevision = revision
+        attachIfVisible(force: mustReattach)
+    }
+
+    func attachIfVisible(force: Bool = false) {
         guard window != nil, let mediaPlayer else { return }
-        if let current = mediaPlayer.drawable as? UIView, current === self { return }
+        if !force, let current = mediaPlayer.drawable as? UIView, current === self { return }
 
         // VLC can retain the previous full-screen cover's UIView after that
         // cover has disappeared. Clearing first forces the video output to
         // bind to this newly visible surface instead of continuing headlessly.
+        // A retained player may already point at this UIView while its video
+        // output remains detached, so resumed sessions can explicitly force
+        // the nil/self transition through attachmentRevision.
         mediaPlayer.drawable = nil
         mediaPlayer.drawable = self
     }

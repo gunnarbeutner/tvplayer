@@ -2,6 +2,28 @@ import XCTest
 @testable import TVApp
 
 final class GuideTimelineTests: XCTestCase {
+    @MainActor
+    func testChannelWithoutEPGReceivesTimelinePlaceholder() throws {
+        let timeline = GuideTimeline(
+            start: Date(timeIntervalSince1970: 10_000),
+            end: Date(timeIntervalSince1970: 31_600)
+        )
+
+        let programs = TVHeadendClient.programsFillingPastGap(
+            [],
+            channelID: "news",
+            timeline: timeline,
+            now: Date(timeIntervalSince1970: 20_000)
+        )
+        let placeholder = try XCTUnwrap(programs.first)
+
+        XCTAssertEqual(programs.count, 1)
+        XCTAssertEqual(placeholder.title, "No programme information")
+        XCTAssertEqual(placeholder.start, timeline.start)
+        XCTAssertEqual(placeholder.end, timeline.end)
+        XCTAssertTrue(placeholder.isAiring(at: Date(timeIntervalSince1970: 20_000)))
+    }
+
     func testDiscoveredSettingsParseBonjourTXTRecord() throws {
         let fields = [
             "version": Data("1".utf8),

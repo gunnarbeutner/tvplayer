@@ -56,9 +56,11 @@ struct PersistedGuideChannel: Codable, Sendable {
         name = channel.name
         monogram = channel.monogram
         iconURL = channel.iconURL
-        // "Earlier programme" is synthesized for a particular timeline and
-        // must be regenerated rather than surviving into a later launch.
-        programs = channel.programs.filter { !$0.id.hasPrefix("earlier-") }
+        // Timeline-sized placeholders are regenerated for each guide window
+        // rather than surviving into a later launch.
+        programs = channel.programs.filter {
+            !$0.id.hasPrefix("earlier-") && !$0.id.hasPrefix("unavailable-")
+        }
     }
 }
 

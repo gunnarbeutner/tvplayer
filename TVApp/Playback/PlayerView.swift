@@ -26,16 +26,25 @@ struct PlaybackView: View {
     @State private var profiles: [TVHeadendStreamProfile] = []
     @State private var hasStartedCurrentPresentation = false
     @State private var isRefreshingGrowingRecording = false
+    @State private var videoAttachmentRevision = 0
     @FocusState private var wakeSurfaceFocused: Bool
 
     let presentation: PlaybackPresentation
+    var showsVideoSurface = true
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            if showsVideoSurface {
+                Color.black.ignoresSafeArea()
 
-            VLCVideoSurface(mediaPlayer: engine.mediaPlayer)
-                .ignoresSafeArea()
+                VLCVideoSurface(
+                    mediaPlayer: engine.mediaPlayer,
+                    attachmentRevision: videoAttachmentRevision
+                )
+                    .ignoresSafeArea()
+            } else {
+                Color.clear.ignoresSafeArea()
+            }
 
             if chromeMode == .hidden {
                 Color.clear
@@ -109,6 +118,7 @@ struct PlaybackView: View {
                 await startPlayback(with: presentation.request)
             } else if engine.state == .paused || engine.state == .preparing {
                 engine.play()
+                requestVideoReattachment()
             }
         }
         .task {
@@ -145,7 +155,9 @@ struct PlaybackView: View {
             if engine.state == .playing || engine.state == .preparing { engine.pause() }
         }
         .onPlayPauseCommand {
+            let wasPlaying = engine.mediaPlayer.isPlaying
             engine.togglePlayPause()
+            if !wasPlaying { requestVideoReattachment() }
             showTimeline()
         }
         .onMoveCommand { direction in
@@ -206,11 +218,16 @@ struct PlaybackView: View {
         do {
             try await engine.prepare(request)
             engine.play()
+            requestVideoReattachment()
             guard await engine.waitForPlaybackStart() else { return }
             showTimeline()
         } catch {
             engine.reportFailure(error.localizedDescription)
         }
+    }
+
+    private func requestVideoReattachment() {
+        videoAttachmentRevision &+= 1
     }
 
     private func refreshGrowingRecording() async {

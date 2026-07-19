@@ -576,13 +576,26 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
         return String(line[start..<end])
     }
 
-    private static func programsFillingPastGap(
+    static func programsFillingPastGap(
         _ programs: [GuideProgram],
         channelID: String,
         timeline: GuideTimeline,
         now: Date = Date()
     ) -> [GuideProgram] {
         let sorted = programs.sorted { $0.start < $1.start }
+
+        if sorted.isEmpty {
+            return [GuideProgram(
+                id: "unavailable-\(channelID)-\(Int(timeline.start.timeIntervalSince1970))",
+                channelID: channelID,
+                title: "No programme information",
+                subtitle: "Guide data unavailable",
+                overview: "No programme metadata is currently available for this channel.",
+                start: timeline.start,
+                end: timeline.end
+            )]
+        }
+
         guard timeline.start < now else { return sorted }
 
         let firstStart = sorted.first?.start ?? now

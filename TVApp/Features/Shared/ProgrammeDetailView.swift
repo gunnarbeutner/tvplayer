@@ -121,11 +121,7 @@ struct ProgrammeDetailView: View {
 
                     HStack(spacing: 20) {
                         Button {
-                            playback.start(
-                                channel: channel,
-                                program: program,
-                                configuration: settings.configuration
-                            )
+                            watchLive()
                         } label: {
                             Label("Watch Live", systemImage: "play.fill")
                         }
@@ -136,11 +132,7 @@ struct ProgrammeDetailView: View {
                             if let existingRecording {
                                 if existingRecording.state == .recording {
                                     Button {
-                                        playback.start(
-                                            recording: existingRecording,
-                                            channel: channel,
-                                            configuration: settings.configuration
-                                        )
+                                        playFromBeginning(existingRecording)
                                     } label: {
                                         Label("Play from Beginning", systemImage: "backward.end.fill")
                                     }
@@ -208,11 +200,7 @@ struct ProgrammeDetailView: View {
             .padding(80)
         }
         .onPlayPauseCommand {
-            playback.start(
-                channel: channel,
-                program: program,
-                configuration: settings.configuration
-            )
+            watchLive()
         }
         .onExitCommand { dismiss() }
         .confirmationDialog(
@@ -258,5 +246,23 @@ struct ProgrammeDetailView: View {
         .onDisappear {
             playback.endPrewarming(channelID: channel.id)
         }
+    }
+
+    private func watchLive() {
+        playback.start(
+            channel: channel,
+            program: program,
+            configuration: settings.configuration
+        )
+        dismiss()
+    }
+
+    private func playFromBeginning(_ recording: TVRecording) {
+        playback.start(
+            recording: recording,
+            channel: channel,
+            configuration: settings.configuration
+        )
+        dismiss()
     }
 }

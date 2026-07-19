@@ -181,6 +181,18 @@ final class GuideGridLayoutTests: XCTestCase {
         )
     }
 
+    func testTimelineSpanningProgrammeAtRestingEdgeDoesNotTriggerFocusCorrection() {
+        // A programme clamped to the timeline's leading edge while the grid
+        // already rests at that edge needs no correction. Issuing one anyway
+        // resets the vertical offset and scrolls the focused row off-screen.
+        XCTAssertNil(
+            GuideGridChromeLayout.correctedHorizontalOffset(
+                currentOffset: 0,
+                programmeOffset: 0
+            )
+        )
+    }
+
     func testVisibleProgrammeDoesNotTriggerFocusCorrection() {
         XCTAssertNil(
             GuideGridChromeLayout.correctedHorizontalOffset(
@@ -205,6 +217,148 @@ final class GuideGridLayoutTests: XCTestCase {
         )
     }
 
+    func testMovingDownSelectsCurrentProgrammeOnNextChannel() throws {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let first = channel(
+            id: "first",
+            programs: [
+                GuideProgram(
+                    id: "long-current",
+                    channelID: "first",
+                    title: "Long current",
+                    subtitle: nil,
+                    overview: "",
+                    start: now.addingTimeInterval(-7_200),
+                    end: now.addingTimeInterval(7_200)
+                )
+            ]
+        )
+        let second = channel(
+            id: "second",
+            programs: [
+                GuideProgram(
+                    id: "second-current",
+                    channelID: "second",
+                    title: "Current",
+                    subtitle: nil,
+                    overview: "",
+                    start: now.addingTimeInterval(-1_800),
+                    end: now.addingTimeInterval(1_800)
+                ),
+                GuideProgram(
+                    id: "second-next",
+                    channelID: "second",
+                    title: "Next",
+                    subtitle: nil,
+                    overview: "",
+                    start: now.addingTimeInterval(1_800),
+                    end: now.addingTimeInterval(5_400)
+                )
+            ]
+        )
+
+        XCTAssertEqual(
+            GuideGridNavigation.destinationProgram(
+                in: [first, second],
+                timeline: timeline(around: now),
+                from: "long-current",
+                direction: .down,
+                at: now
+            )?.id,
+            "second-current"
+        )
+    }
+
+    func testMovingDownNeverWrapsFromLastChannelToFirst() throws {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let first = channel(
+            id: "first",
+            programs: [program(id: "first-current", channelID: "first", around: now)]
+        )
+        let last = channel(
+            id: "last",
+            programs: [program(id: "last-current", channelID: "last", around: now)]
+        )
+
+        XCTAssertNil(
+            GuideGridNavigation.destinationProgram(
+                in: [first, last],
+                timeline: timeline(around: now),
+                from: "last-current",
+                direction: .down,
+                at: now
+            )
+        )
+    }
+
+    func testVerticalNavigationPreservesFutureProgrammeTime() throws {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let selected = GuideProgram(
+            id: "selected",
+            channelID: "first",
+            title: "Selected",
+            subtitle: nil,
+            overview: "",
+            start: now.addingTimeInterval(3_600),
+            end: now.addingTimeInterval(7_200)
+        )
+        let overlapping = GuideProgram(
+            id: "overlapping",
+            channelID: "second",
+            title: "Overlapping",
+            subtitle: nil,
+            overview: "",
+            start: now.addingTimeInterval(4_500),
+            end: now.addingTimeInterval(8_100)
+        )
+
+        XCTAssertEqual(
+            GuideGridNavigation.destinationProgram(
+                in: [
+                    channel(id: "first", programs: [selected]),
+                    channel(id: "second", programs: [overlapping])
+                ],
+                timeline: timeline(around: now),
+                from: selected.id,
+                direction: .down,
+                at: now
+            )?.id,
+            overlapping.id
+        )
+    }
+
+    func testLongCurrentProgrammeFocusTargetIsAnchoredAtNow() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let timeline = timeline(around: now)
+        let longProgram = GuideProgram(
+            id: "overnight",
+            channelID: "channel",
+            title: "Overnight",
+            subtitle: nil,
+            overview: "",
+            start: now.addingTimeInterval(-3_600),
+            end: now.addingTimeInterval(28_800)
+        )
+        let programmeOffset = timeline.xOffset(for: longProgram.start)
+        let cardWidth = timeline.width(
+            for: DateInterval(start: longProgram.start, end: timeline.end)
+        )
+        let frame = GuideProgramFocusLayout.targetFrame(
+            cardWidth: cardWidth,
+            programmeOffset: programmeOffset,
+            program: longProgram,
+            timeline: timeline,
+            now: now
+        )
+
+        XCTAssertEqual(frame.width, GuideProgramFocusLayout.maximumTargetWidth)
+        XCTAssertEqual(
+            frame.midX,
+            timeline.xOffset(for: now) - programmeOffset,
+            accuracy: 0.001
+        )
+    }
+
     private func channel(id: String, programs: [GuideProgram]) -> GuideChannel {
         GuideChannel(
             id: id,
@@ -226,6 +380,13 @@ final class GuideGridLayoutTests: XCTestCase {
             overview: "",
             start: date.addingTimeInterval(-300),
             end: date.addingTimeInterval(1_500)
+        )
+    }
+
+    private func timeline(around date: Date) -> GuideTimeline {
+        GuideTimeline(
+            start: date.addingTimeInterval(-10_800),
+            end: date.addingTimeInterval(10_800)
         )
     }
 }

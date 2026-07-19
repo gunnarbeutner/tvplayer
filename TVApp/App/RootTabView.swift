@@ -15,51 +15,42 @@ struct RootTabView: View {
     @StateObject private var playback = PlaybackCoordinator()
 
     var body: some View {
-        TabView(selection: $selection) {
-            ChannelsView(
-                isSelected: selection == .channels,
-                onOpenSettings: { selection = .settings }
+        ZStack {
+            // The player is a sibling layer rather than a full-screen cover,
+            // so the tab content underneath stays mounted and focusable.
+            // Disable it while the player is up; otherwise remote presses
+            // keep driving the invisible guide instead of the player chrome.
+            tabs
+                .disabled(playback.isPlayerPresented)
+
+            // Keep VLC's drawable mounted while the guide is visible. A new
+            // UIView on each full-screen presentation can leave VLC's audio
+            // output running while its video output remains bound to the
+            // dismissed surface.
+            PersistentPlaybackSurface(
+                engine: playback.engine,
+                isPresented: playback.isPlayerPresented
             )
-                .tabItem {
-                    Label("Channels", systemImage: "play.rectangle.on.rectangle")
-                }
-                .tag(AppTab.channels)
+                .zIndex(playback.isPlayerPresented ? 10 : -1)
 
-            GuideView(
-                isSelected: selection == .guide,
-                onOpenSettings: { selection = .settings }
-            )
-                .tabItem {
-                    Label("Guide", systemImage: "rectangle.grid.2x2")
-                }
-                .tag(AppTab.guide)
-
-            RecordingsView(onOpenSettings: { selection = .settings })
-                .tabItem {
-                    Label("Recordings", systemImage: "record.circle")
-                }
-                .tag(AppTab.recordings)
-
-            SettingsView()
-                .tabItem {
-                    Label("Settings", systemImage: "gearshape")
-                }
-                .tag(AppTab.settings)
+            if playback.isPlayerPresented, let presentation = playback.presentation {
+                PlaybackView(
+                    engine: playback.engine,
+                    presentation: presentation,
+                    showsVideoSurface: false
+                )
+                .environmentObject(playback)
+                .environmentObject(settings)
+                .zIndex(11)
+            }
         }
         .tint(AppTheme.accent)
         .environmentObject(settings)
         .environmentObject(guide)
         .environmentObject(recordings)
         .environmentObject(playback)
-        .fullScreenCover(
-            isPresented: $playback.isPlayerPresented,
-            onDismiss: { playback.playerDidDismiss() }
-        ) {
-            if let presentation = playback.presentation {
-                PlaybackView(engine: playback.engine, presentation: presentation)
-                    .environmentObject(playback)
-                    .environmentObject(settings)
-            }
+        .onChange(of: playback.isPlayerPresented) { wasPresented, isPresented in
+            if wasPresented && !isPresented { playback.playerDidDismiss() }
         }
         .alert(
             "Playback unavailable",
@@ -110,6 +101,63 @@ struct RootTabView: View {
                 async let refreshedGuide: Void = guide.load(configuration: settings.configuration)
                 async let refreshedRecordings: Void = recordings.load(configuration: settings.configuration)
                 _ = await (refreshedGuide, refreshedRecordings)
+            }
+        }
+    }
+
+    private var tabs: some View {
+        TabView(selection: $selection) {
+            ChannelsView(
+                isSelected: selection == .channels,
+                onOpenSettings: { selection = .settings }
+            )
+                .tabItem {
+                    Label("Channels", systemImage: "play.rectangle.on.rectangle")
+                }
+                .tag(AppTab.channels)
+
+            GuideView(
+                isSelected: selection == .guide,
+                onOpenSettings: { selection = .settings }
+            )
+                .tabItem {
+                    Label("Guide", systemImage: "rectangle.grid.2x2")
+                }
+                .tag(AppTab.guide)
+
+            RecordingsView(onOpenSettings: { selection = .settings })
+                .tabItem {
+                    Label("Recordings", systemImage: "record.circle")
+                }
+                .tag(AppTab.recordings)
+
+            SettingsView()
+                .tabItem {
+                    Label("Settings", systemImage: "gearshape")
+                }
+                .tag(AppTab.settings)
+        }
+    }
+}
+
+private struct PersistentPlaybackSurface: View {
+    @ObservedObject var engine: VLCPlaybackEngine
+    let isPresented: Bool
+    @State private var attachmentRevision = 0
+
+    var body: some View {
+        VLCVideoSurface(
+            mediaPlayer: engine.mediaPlayer,
+            attachmentRevision: attachmentRevision
+        )
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+        .onChange(of: isPresented) { _, presented in
+            if presented { attachmentRevision &+= 1 }
+        }
+        .onChange(of: engine.state) { _, state in
+            if state == .preparing || state == .playing {
+                attachmentRevision &+= 1
             }
         }
     }
