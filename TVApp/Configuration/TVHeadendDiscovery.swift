@@ -7,6 +7,7 @@ struct DiscoveredTVHeadendSettings: Equatable {
     let username: String
     let password: String
     let streamProfile: String
+    let guideCacheURL: URL?
     let xmltvURL: URL?
 
     init?(txtRecordData: Data) {
@@ -33,6 +34,9 @@ struct DiscoveredTVHeadendSettings: Equatable {
         else { return nil }
 
         let profile = value("profile") ?? "pass"
+        let guideText = value("guide") ?? ""
+        let guideCacheURL = guideText.isEmpty ? nil : Self.httpURL(from: guideText)
+        if !guideText.isEmpty, guideCacheURL == nil { return nil }
         let xmltvText = value("xmltv") ?? ""
         let xmltvURL = xmltvText.isEmpty ? nil : Self.httpURL(from: xmltvText)
         if !xmltvText.isEmpty, xmltvURL == nil { return nil }
@@ -41,6 +45,7 @@ struct DiscoveredTVHeadendSettings: Equatable {
         self.username = username
         self.password = password
         streamProfile = profile.isEmpty ? "pass" : profile
+        self.guideCacheURL = guideCacheURL
         self.xmltvURL = xmltvURL
     }
 

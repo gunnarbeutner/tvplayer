@@ -9,9 +9,9 @@ The application bundle identifier is `de.beutner.TVPlayer`.
 ## Features
 
 - Channels, Guide, Recordings, and Settings tabs, with Guide selected by default
-- TVheadend channels, channel icons, and EPG data loaded directly from the server
+- TVheadend channels, channel icons, and EPG data loaded directly or through the persistent rich guide cache
 - No bundled demo guide: Channels and Guide require a configured, reachable TVheadend server
-- Optional XMLTV guide override; the override URL is empty by default
+- Optional rich JSON guide cache with an external XMLTV fallback; both URLs are empty by default
 - High-contrast timeline guide with clear focus styling and programme details
 - Subtle auditory confirmation when focus moves between channels or programmes
 - Background guide refresh and lazy row rendering for responsive tab and focus navigation
@@ -32,7 +32,7 @@ The application bundle identifier is `de.beutner.TVPlayer`.
 - In-progress recording playback starts at the beginning and exposes Watch Live as a separate action
 - TVheadend password storage in the tvOS Keychain
 - First-run TVheadend configuration discovery over `_tvplayer._tcp` Bonjour/mDNS
-- An optional always-on discovery container that caches expired EPG events and publishes its XMLTV URL over mDNS
+- An optional always-on discovery container that preserves native EPG metadata and publishes its JSON guide URL over mDNS
 - A connection indicator in Settings verifies the configured credentials
 
 ## Requirements
@@ -72,21 +72,22 @@ Open Settings in the app and enter:
 - Server URL, for example `http://tvheadend.local:9981`
 - Username and password
 - Stream profile, normally `pass`
-- Optional XMLTV URL
+- Optional rich guide-cache URL
+- Optional external XMLTV fallback URL
 
 The password is written to the app's own Keychain access group rather than
 project files or user defaults. Server settings used during development can
 also be passed through process environment variables; they should not be added
 to tracked files.
 
-If no server URL has previously been saved or supplied through the environment,
-TVPlayer also browses for `_tvplayer._tcp` on the local network. The optional
+TVPlayer browses for `_tvplayer._tcp` when it needs initial server settings or
+when an existing configuration is missing its rich guide URL. The optional
 [Discovery container](Discovery/README.md) publishes a complete configuration
 from environment variables. It also polls TVheadend's EPG, retains expired
-events in a persistent volume, and advertises its generated XMLTV endpoint on
-configurable port `49382` by default. A discovered password is copied into the
-Keychain, the other fields are saved as app preferences, and the normal
-connection test and guide load run automatically.
+events and native event metadata in a persistent volume, and advertises its
+JSON endpoint on configurable port `49382` by default. A discovered password is
+copied into the Keychain, the other fields are saved as app preferences, and
+the normal connection test and guide load run automatically.
 
 Because mDNS TXT records are unencrypted and visible to devices on the local
 network, use discovery only on a trusted LAN and give its TVheadend account the

@@ -13,6 +13,7 @@ final class ServerSettingsStore: ObservableObject {
         static let baseURL = "tvheadend.baseURL"
         static let username = "tvheadend.username"
         static let streamProfile = "tvheadend.streamProfile"
+        static let guideCacheURL = "tvheadend.guideCacheURL"
         static let xmltvURL = "tvheadend.xmltvURL"
     }
 
@@ -26,6 +27,7 @@ final class ServerSettingsStore: ObservableObject {
         didSet { invalidateConnectionStatus() }
     }
     @Published var streamProfile: String
+    @Published var guideCacheURLText: String
     @Published var xmltvURLText: String
     @Published private(set) var revision = 0
     @Published private(set) var connectionStatus: ServerConnectionStatus = .notTested
@@ -43,6 +45,7 @@ final class ServerSettingsStore: ObservableObject {
         username = environment["TVPLAYER_TVH_USERNAME"] ?? defaults.string(forKey: Key.username) ?? ""
         password = environment["TVPLAYER_TVH_PASSWORD"] ?? keychain.read()
         streamProfile = environment["TVPLAYER_TVH_PROFILE"] ?? defaults.string(forKey: Key.streamProfile) ?? "pass"
+        guideCacheURLText = environment["TVPLAYER_GUIDE_URL"] ?? defaults.string(forKey: Key.guideCacheURL) ?? ""
         xmltvURLText = environment["TVPLAYER_XMLTV_URL"] ?? defaults.string(forKey: Key.xmltvURL) ?? ""
 
         // Device deployments can provide configuration at launch without putting
@@ -57,6 +60,9 @@ final class ServerSettingsStore: ObservableObject {
         if environment["TVPLAYER_TVH_PROFILE"] != nil {
             defaults.set(streamProfile, forKey: Key.streamProfile)
         }
+        if environment["TVPLAYER_GUIDE_URL"] != nil {
+            defaults.set(guideCacheURLText, forKey: Key.guideCacheURL)
+        }
         if environment["TVPLAYER_XMLTV_URL"] != nil {
             if xmltvURLText.isEmpty {
                 defaults.removeObject(forKey: Key.xmltvURL)
@@ -69,8 +75,10 @@ final class ServerSettingsStore: ObservableObject {
         }
 
         let persistedURL = defaults.string(forKey: Key.baseURL) ?? ""
-        if environment["TVPLAYER_TVH_URL"] == nil,
-           persistedURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let hasGuidePreference = environment["TVPLAYER_GUIDE_URL"] != nil
+            || defaults.object(forKey: Key.guideCacheURL) != nil
+        if persistedURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !hasGuidePreference {
             let discovery = TVHeadendDiscovery { [weak self] discovered in
                 self?.adopt(discovered)
             }
@@ -85,6 +93,7 @@ final class ServerSettingsStore: ObservableObject {
             username: username.trimmingCharacters(in: .whitespacesAndNewlines),
             password: password,
             streamProfile: normalizedProfile,
+            guideCacheURL: Self.optionalHTTPURL(from: guideCacheURLText),
             xmltvURL: Self.optionalHTTPURL(from: xmltvURLText)
         )
     }
@@ -92,6 +101,12 @@ final class ServerSettingsStore: ObservableObject {
     func validatedDraft() throws -> TVHeadendConfiguration {
         guard let baseURL = Self.httpURL(from: baseURLText) else {
             throw ConfigurationError.invalidServerURL
+        }
+
+        let trimmedGuideCache = guideCacheURLText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let guideCacheURL = Self.optionalHTTPURL(from: trimmedGuideCache)
+        if !trimmedGuideCache.isEmpty, guideCacheURL == nil {
+            throw ConfigurationError.invalidGuideCacheURL
         }
 
         let trimmedXMLTV = xmltvURLText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -105,6 +120,7 @@ final class ServerSettingsStore: ObservableObject {
             username: username.trimmingCharacters(in: .whitespacesAndNewlines),
             password: password,
             streamProfile: normalizedProfile,
+            guideCacheURL: guideCacheURL,
             xmltvURL: xmltvURL
         )
     }
@@ -114,6 +130,7 @@ final class ServerSettingsStore: ObservableObject {
         defaults.set(configuration.baseURL?.absoluteString, forKey: Key.baseURL)
         defaults.set(configuration.username, forKey: Key.username)
         defaults.set(configuration.streamProfile, forKey: Key.streamProfile)
+        defaults.set(configuration.guideCacheURL?.absoluteString ?? "", forKey: Key.guideCacheURL)
 
         if let xmltvURL = configuration.xmltvURL {
             defaults.set(xmltvURL.absoluteString, forKey: Key.xmltvURL)
@@ -146,9 +163,26 @@ final class ServerSettingsStore: ObservableObject {
     }
 
     private func adopt(_ discovered: DiscoveredTVHeadendSettings) {
-        guard baseURLText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        if let configuredURL = Self.httpURL(from: baseURLText) {
+            guard Self.sameServer(configuredURL, discovered.baseURL) else { return }
+
+            var changed = false
+            if guideCacheURLText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               let guideCacheURL = discovered.guideCacheURL {
+                guideCacheURLText = guideCacheURL.absoluteString
+                defaults.set(guideCacheURLText, forKey: Key.guideCacheURL)
+                changed = true
+            }
+            if xmltvURLText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               let xmltvURL = discovered.xmltvURL {
+                xmltvURLText = xmltvURL.absoluteString
+                defaults.set(xmltvURLText, forKey: Key.xmltvURL)
+                changed = true
+            }
+
             discovery?.stop()
             discovery = nil
+            if changed { revision += 1 }
             return
         }
 
@@ -161,11 +195,13 @@ final class ServerSettingsStore: ObservableObject {
             username = discovered.username
             password = discovered.password
             streamProfile = discovered.streamProfile
+            guideCacheURLText = discovered.guideCacheURL?.absoluteString ?? ""
             xmltvURLText = discovered.xmltvURL?.absoluteString ?? ""
 
             defaults.set(baseURLText, forKey: Key.baseURL)
             defaults.set(username, forKey: Key.username)
             defaults.set(streamProfile, forKey: Key.streamProfile)
+            defaults.set(guideCacheURLText, forKey: Key.guideCacheURL)
             if xmltvURLText.isEmpty {
                 defaults.removeObject(forKey: Key.xmltvURL)
             } else {
@@ -202,5 +238,12 @@ final class ServerSettingsStore: ObservableObject {
               url.host != nil
         else { return nil }
         return url
+    }
+
+    private static func sameServer(_ lhs: URL, _ rhs: URL) -> Bool {
+        func normalized(_ url: URL) -> String {
+            url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        }
+        return normalized(lhs) == normalized(rhs)
     }
 }

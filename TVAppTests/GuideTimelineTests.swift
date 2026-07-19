@@ -9,6 +9,7 @@ final class GuideTimelineTests: XCTestCase {
             "username": Data("viewer".utf8),
             "password": Data("secret".utf8),
             "profile": Data("pass".utf8),
+            "guide": Data("http://guide.example:49382/guide.json".utf8),
             "xmltv": Data("https://guide.example/guide.xml".utf8),
         ]
 
@@ -18,6 +19,7 @@ final class GuideTimelineTests: XCTestCase {
         XCTAssertEqual(discovered.username, "viewer")
         XCTAssertEqual(discovered.password, "secret")
         XCTAssertEqual(discovered.streamProfile, "pass")
+        XCTAssertEqual(discovered.guideCacheURL?.absoluteString, "http://guide.example:49382/guide.json")
         XCTAssertEqual(discovered.xmltvURL?.absoluteString, "https://guide.example/guide.xml")
     }
 
@@ -30,6 +32,12 @@ final class GuideTimelineTests: XCTestCase {
         XCTAssertNil(DiscoveredTVHeadendSettings(fields: [
             "url": Data("http://tvheadend.local:9981".utf8),
             "username": Data("viewer".utf8),
+        ]))
+        XCTAssertNil(DiscoveredTVHeadendSettings(fields: [
+            "url": Data("http://tvheadend.local:9981".utf8),
+            "username": Data("viewer".utf8),
+            "password": Data("secret".utf8),
+            "guide": Data("ftp://guide.example/guide.json".utf8),
         ]))
     }
 
@@ -101,6 +109,7 @@ final class GuideTimelineTests: XCTestCase {
             username: "test",
             password: "secret",
             streamProfile: "pass",
+            guideCacheURL: nil,
             xmltvURL: nil
         )
 
@@ -212,6 +221,60 @@ final class GuideTimelineTests: XCTestCase {
 
         XCTAssertEqual(event.eventID, 42)
         XCTAssertEqual(event.seriesLink, "crid://example.test/series/7")
+    }
+
+    func testRichGuideDocumentRetainsEpisodeRatingsAndRecordingState() throws {
+        let json = """
+        {
+          "version": 1,
+          "lastRefresh": 1784473380,
+          "channels": [],
+          "events": [
+            {
+              "eventId": 42,
+              "channelUuid": "channel-uuid",
+              "episodeUri": "crid://example.test/episode/2",
+              "serieslinkUri": "crid://example.test/series/7",
+              "title": "Example Show",
+              "summary": "An example episode.",
+              "start": 1784473380,
+              "stop": 1784476980,
+              "seasonNumber": 3,
+              "episodeNumber": "2",
+              "genre": [16, 17],
+              "categories": ["Drama", "Mystery"],
+              "ageRating": 12,
+              "ratingLabel": "FSK 12",
+              "starRating": 4,
+              "hd": 1,
+              "subtitled": true,
+              "dvrUuid": "recording-uuid",
+              "dvrState": "scheduled"
+            }
+          ]
+        }
+        """
+
+        let document = try JSONDecoder().decode(
+            TVPlayerGuideCacheDocument.self,
+            from: Data(json.utf8)
+        )
+        let event = try XCTUnwrap(document.events.first)
+
+        XCTAssertEqual(document.version, 1)
+        XCTAssertEqual(event.eventID, 42)
+        XCTAssertEqual(event.episodeURI, "crid://example.test/episode/2")
+        XCTAssertEqual(event.seasonNumber, "3")
+        XCTAssertEqual(event.episodeNumber, "2")
+        XCTAssertEqual(event.genres, [16, 17])
+        XCTAssertEqual(event.categories, ["Drama", "Mystery"])
+        XCTAssertEqual(event.ageRating, "12")
+        XCTAssertEqual(event.ratingLabel, "FSK 12")
+        XCTAssertEqual(event.starRating, "4")
+        XCTAssertTrue(event.isHD)
+        XCTAssertTrue(event.isSubtitled)
+        XCTAssertEqual(event.dvrUUID, "recording-uuid")
+        XCTAssertEqual(event.dvrState, "scheduled")
     }
 
     private func dvrEntry(

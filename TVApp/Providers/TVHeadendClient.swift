@@ -27,7 +27,12 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
         guard !channelGrid.entries.isEmpty else { throw TVProviderError.noChannels }
 
         let programmesByChannel: [String: [GuideProgram]]
-        if let xmltvURL = configuration.xmltvURL {
+        if let guideCacheURL = configuration.guideCacheURL {
+            let data = try await fetchData(at: guideCacheURL)
+            let document = try JSONDecoder().decode(TVPlayerGuideCacheDocument.self, from: data)
+            guard document.version == 1 else { throw TVProviderError.invalidResponse }
+            programmesByChannel = Self.mapEPG(document.events, timeline: timeline)
+        } else if let xmltvURL = configuration.xmltvURL {
             let data = try await fetchData(at: xmltvURL)
             let document = try XMLTVParser.parse(data)
             programmesByChannel = Self.mapXMLTV(document, to: channelGrid.entries, timeline: timeline)
@@ -354,9 +359,32 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
                 channelID: channelID,
                 title: title,
                 subtitle: event.subtitle,
-                overview: event.description ?? event.summary ?? event.subtitle ?? "No programme description available.",
+                overview: event.description
+                    ?? event.summary
+                    ?? event.extraText
+                    ?? event.subtitle
+                    ?? "No programme description available.",
                 start: start,
-                end: end
+                end: end,
+                metadata: GuideProgramMetadata(
+                    episodeURI: event.episodeURI,
+                    seasonNumber: event.seasonNumber,
+                    episodeNumber: event.episodeNumber,
+                    partNumber: event.partNumber,
+                    genres: event.genres,
+                    categories: event.categories,
+                    ageRating: event.ageRating,
+                    ratingLabel: event.ratingLabel,
+                    ratingLabelIcon: event.ratingLabelIcon,
+                    starRating: event.starRating,
+                    imageURL: event.imageURL,
+                    isHD: event.isHD,
+                    isWidescreen: event.isWidescreen,
+                    isSubtitled: event.isSubtitled,
+                    isNew: event.isNew,
+                    dvrUUID: event.dvrUUID,
+                    dvrState: event.dvrState
+                )
             )
         }
         return Dictionary(grouping: programs, by: \GuideProgram.channelID)

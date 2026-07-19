@@ -65,16 +65,17 @@ def advertised_address(host: str) -> ipaddress.IPv4Address:
 def guide_handler(cache: GuideCache) -> type[BaseHTTPRequestHandler]:
     class GuideRequestHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            if self.path == "/guide.xml":
-                body = cache.xmltv()
+            path = self.path.partition("?")[0]
+            if path == "/guide.json":
+                body = cache.json_guide()
                 self.send_response(200)
-                self.send_header("Content-Type", "application/xml; charset=utf-8")
+                self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "public, max-age=30")
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            if self.path == "/healthz":
+            if path == "/healthz":
                 body = (json.dumps(cache.status(), separators=(",", ":")) + "\n").encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -118,12 +119,7 @@ def main() -> int:
 
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         address = advertised_address(parsed.hostname)
-        xmltv = os.environ.get("TVPLAYER_XMLTV_URL", "").strip()
-        if not xmltv:
-            xmltv = f"http://{address}:{guide_port}/guide.xml"
-        parsed_xmltv = urlparse(xmltv)
-        if parsed_xmltv.scheme not in {"http", "https"} or not parsed_xmltv.hostname:
-            raise ValueError("TVPLAYER_XMLTV_URL must be empty or an absolute HTTP/HTTPS URL")
+        guide = f"http://{address}:{guide_port}/guide.json"
 
         cache = GuideCache(
             base_url=url,
@@ -155,9 +151,8 @@ def main() -> int:
             "username": txt_property("username", username),
             "password": txt_property("password", password),
             "profile": txt_property("profile", profile),
+            "guide": txt_property("guide", guide),
         }
-        if xmltv:
-            properties["xmltv"] = txt_property("xmltv", xmltv)
 
         server_name = f"{socket.gethostname().split('.')[0]}.local."
         info = ServiceInfo(
@@ -209,7 +204,7 @@ def main() -> int:
     try:
         zeroconf.register_service(info, allow_name_change=True)
         print(
-            f"Advertising {url} and cached guide {xmltv} as {info.name} "
+            f"Advertising {url} and rich guide {guide} as {info.name} "
             "on _tvplayer._tcp.local. "
             "(credentials omitted from logs)",
             flush=True,

@@ -55,8 +55,15 @@ struct SettingsView: View {
                     }
 
                     SettingsField(
-                        title: "XMLTV URL override (optional)",
-                        hint: "Leave empty to use TVHeadend’s EPG. This affects guide metadata only."
+                        title: "Rich guide cache URL (optional)",
+                        hint: "Preferred when set. Discovery normally configures this automatically."
+                    ) {
+                        TextField("http://tvheadend.local:49382/guide.json", text: $settings.guideCacheURLText)
+                    }
+
+                    SettingsField(
+                        title: "XMLTV URL fallback (optional)",
+                        hint: "Used only when no rich guide cache is configured. Leave both empty to use TVHeadend directly."
                     ) {
                         TextField("https://example.net/guide.xml", text: $settings.xmltvURLText)
                     }

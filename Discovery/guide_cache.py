@@ -7,13 +7,13 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 class GuideCache:
+    CACHE_VERSION = 2
+
     def __init__(
         self,
         *,
@@ -77,39 +77,20 @@ class GuideCache:
             self._save_locked()
             return len(self._channels), len(self._events)
 
-    def xmltv(self) -> bytes:
+    def json_guide(self) -> bytes:
         with self._lock:
             channels = sorted(self._channels.values(), key=lambda item: item["name"].casefold())
             events = sorted(
                 self._events.values(),
-                key=lambda item: (item["start"], item["channel"], item["title"]),
+                key=lambda item: (item["start"], item["channelUuid"], item["title"]),
             )
-
-        root = ET.Element("tv", {"generator-info-name": "TV Player Guide Cache"})
-        for channel in channels:
-            node = ET.SubElement(root, "channel", {"id": channel["id"]})
-            ET.SubElement(node, "display-name").text = channel["name"]
-            if channel.get("icon"):
-                ET.SubElement(node, "icon", {"src": channel["icon"]})
-
-        for event in events:
-            node = ET.SubElement(
-                root,
-                "programme",
-                {
-                    "channel": event["channel"],
-                    "start": self._xmltv_date(event["start"]),
-                    "stop": self._xmltv_date(event["stop"]),
-                },
-            )
-            ET.SubElement(node, "title").text = event["title"]
-            if event.get("subtitle"):
-                ET.SubElement(node, "sub-title").text = event["subtitle"]
-            if event.get("description"):
-                ET.SubElement(node, "desc").text = event["description"]
-
-        ET.indent(root, space="  ")
-        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+            payload = {
+                "version": 1,
+                "lastRefresh": self._last_refresh,
+                "channels": channels,
+                "events": events,
+            }
+        return (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -146,7 +127,12 @@ class GuideCache:
         icon = self._text(source.get("icon_public_url"))
         if icon:
             icon = urllib.parse.urljoin(f"{self.base_url}/", icon.lstrip("/"))
-        return {"id": identifier, "name": name, "icon": icon}
+        return {
+            "id": identifier,
+            "name": name,
+            "number": source.get("number"),
+            "icon": icon,
+        }
 
     def _normalize_event(self, source: dict[str, Any]) -> dict[str, Any] | None:
         channel = self._text(source.get("channelUuid"))
@@ -159,16 +145,26 @@ class GuideCache:
         if not channel or not title or stop <= start:
             return None
 
-        return {
-            "event_id": source.get("eventId"),
-            "channel": channel,
-            "title": title,
-            "subtitle": self._text(source.get("subtitle")),
-            "description": self._text(source.get("description"))
-            or self._text(source.get("summary")),
-            "start": start,
-            "stop": stop,
-        }
+        # Retain every native TVheadend field so newer metadata can flow to
+        # clients without requiring a cache schema migration. Canonical fields
+        # are overlaid to normalize localized string dictionaries and IDs.
+        normalized = dict(source)
+        normalized.update(
+            {
+                "eventId": source.get("eventId"),
+                "channelUuid": channel,
+                "title": title,
+                "subtitle": self._text(source.get("subtitle")),
+                "summary": self._text(source.get("summary")),
+                "description": self._text(source.get("description")),
+                "extraText": self._text(source.get("extraText")),
+                "episodeUri": self._text(source.get("episodeUri")),
+                "serieslinkUri": self._text(source.get("serieslinkUri")),
+                "start": start,
+                "stop": stop,
+            }
+        )
+        return normalized
 
     def _event_key(self, source: dict[str, Any]) -> str:
         if source.get("eventId") is not None:
@@ -193,14 +189,10 @@ class GuideCache:
                     return text
         return None
 
-    @staticmethod
-    def _xmltv_date(timestamp: int) -> str:
-        return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y%m%d%H%M%S +0000")
-
     def _load(self) -> None:
         try:
             payload = json.loads(self.cache_path.read_text(encoding="utf-8"))
-            if payload.get("version") != 1:
+            if payload.get("version") != self.CACHE_VERSION:
                 return
             self._channels = {
                 channel["id"]: channel
@@ -219,7 +211,7 @@ class GuideCache:
     def _save_locked(self) -> None:
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "version": 1,
+            "version": self.CACHE_VERSION,
             "last_refresh": self._last_refresh,
             "channels": list(self._channels.values()),
             "events": [dict(event, key=key) for key, event in self._events.items()],

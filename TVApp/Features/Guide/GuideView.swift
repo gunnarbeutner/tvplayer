@@ -230,11 +230,28 @@ private struct GuideInformationPanel: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            Text(program?.overview ?? "Move focus into the guide to see programme information.")
-                .font(.callout)
-                .foregroundStyle(.white.opacity(0.82))
-                .lineLimit(3)
-                .frame(width: 400, alignment: .leading)
+            Group {
+                if let status {
+                    Text(status.0)
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(4)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                        .frame(width: 400, alignment: .leading)
+                        .background(status.1.opacity(0.22), in: RoundedRectangle(cornerRadius: 12))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12)
+                                .strokeBorder(status.1.opacity(0.9), lineWidth: 2)
+                        }
+                } else {
+                    Text(program?.overview ?? "Move focus into the guide to see programme information.")
+                        .font(.callout)
+                        .foregroundStyle(.white.opacity(0.82))
+                        .lineLimit(3)
+                        .frame(width: 400, alignment: .leading)
+                }
+            }
 
         }
         .padding(.horizontal, 72)
@@ -246,18 +263,6 @@ private struct GuideInformationPanel: View {
                 startPoint: .leading,
                 endPoint: .trailing
             )
-        }
-        .overlay(alignment: .topTrailing) {
-            if let status {
-                Text(status.0)
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(status.1)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.trailing)
-                    .frame(maxWidth: 360, alignment: .trailing)
-                    .padding(.top, 16)
-                    .padding(.trailing, 72)
-            }
         }
         .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.divider).frame(height: 1) }
         .accessibilityElement(children: .combine)

@@ -4,7 +4,6 @@ import io
 import json
 import tempfile
 import unittest
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from guide_cache import GuideCache
@@ -22,7 +21,7 @@ class FakeOpener:
 
 
 class GuideCacheTests(unittest.TestCase):
-    def test_finished_programmes_remain_in_xmltv_until_retention_expires(self) -> None:
+    def test_finished_programmes_remain_in_json_until_retention_expires(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "guide-cache.json")
             now = 100_000
@@ -62,19 +61,19 @@ class GuideCacheTests(unittest.TestCase):
             )
 
             cache.refresh(now=now)
-            root = ET.fromstring(cache.xmltv())
+            document = json.loads(cache.json_guide())
 
-            self.assertEqual(root.findtext("./channel/display-name"), "Test & One")
+            self.assertEqual(document["channels"][0]["name"], "Test & One")
             self.assertEqual(
-                [programme.findtext("title") for programme in root.findall("programme")],
+                [programme["title"] for programme in document["events"]],
                 ["Earlier <Show>", "Current Show"],
             )
 
             opener.events = [opener.events[1]]
             cache.refresh(now=now + 3_601)
-            root = ET.fromstring(cache.xmltv())
+            document = json.loads(cache.json_guide())
             self.assertEqual(
-                [programme.findtext("title") for programme in root.findall("programme")],
+                [programme["title"] for programme in document["events"]],
                 ["Current Show"],
             )
 
@@ -112,7 +111,57 @@ class GuideCacheTests(unittest.TestCase):
             )
 
             self.assertEqual(restored.status()["events"], 1)
-            self.assertIn(b"Persisted Show", restored.xmltv())
+            self.assertIn(b"Persisted Show", restored.json_guide())
+
+    def test_json_guide_preserves_native_recording_and_episode_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            now = 100_000
+            cache = GuideCache(
+                base_url="http://tvheadend.test:9981",
+                username="viewer",
+                password="secret",
+                cache_path=str(Path(directory) / "guide-cache.json"),
+                opener=FakeOpener(
+                    channels=[{"uuid": "channel-1", "name": "Test", "number": 7}],
+                    events=[
+                        {
+                            "eventId": 42,
+                            "channelUuid": "channel-1",
+                            "title": {"ger": "Beispiel"},
+                            "subtitle": "Folge zwei",
+                            "summary": "Zusammenfassung",
+                            "start": now - 300,
+                            "stop": now + 1_500,
+                            "episodeUri": "crid://example/episode/2",
+                            "serieslinkUri": "crid://example/series/1",
+                            "seasonNumber": 3,
+                            "episodeNumber": 2,
+                            "genre": [16, 17],
+                            "ageRating": 12,
+                            "ratingLabel": "FSK 12",
+                            "hd": 1,
+                            "subtitled": 1,
+                            "dvrUuid": "recording-uuid",
+                            "dvrState": "scheduled",
+                            "futureMetadata": {"value": "retained"},
+                        }
+                    ],
+                ),
+            )
+
+            cache.refresh(now=now)
+            document = json.loads(cache.json_guide())
+
+            self.assertEqual(document["version"], 1)
+            self.assertEqual(document["channels"][0]["number"], 7)
+            event = document["events"][0]
+            self.assertEqual(event["eventId"], 42)
+            self.assertEqual(event["title"], "Beispiel")
+            self.assertEqual(event["serieslinkUri"], "crid://example/series/1")
+            self.assertEqual(event["seasonNumber"], 3)
+            self.assertEqual(event["genre"], [16, 17])
+            self.assertEqual(event["dvrState"], "scheduled")
+            self.assertEqual(event["futureMetadata"], {"value": "retained"})
 
 
 if __name__ == "__main__":

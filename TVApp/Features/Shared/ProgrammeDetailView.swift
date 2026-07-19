@@ -26,6 +26,27 @@ struct ProgrammeDetailView: View {
     private var recordAllActionKey: String? {
         program.map { "series:\($0.id)" }
     }
+    private var metadataLabels: [String] {
+        guard let metadata = program?.metadata else { return [] }
+        var labels: [String] = []
+
+        if let season = metadata.seasonNumber, let episode = metadata.episodeNumber {
+            labels.append("Season \(season) · Episode \(episode)")
+        } else if let episode = metadata.episodeNumber {
+            labels.append("Episode \(episode)")
+        }
+        if let part = metadata.partNumber { labels.append("Part \(part)") }
+        labels.append(contentsOf: metadata.categories.prefix(2))
+        if metadata.isNew { labels.append("New") }
+        if metadata.isHD { labels.append("HD") }
+        if metadata.isWidescreen { labels.append("Widescreen") }
+        if metadata.isSubtitled { labels.append("Subtitles") }
+        if let rating = metadata.ratingLabel ?? metadata.ageRating {
+            labels.append(rating)
+        }
+        if let stars = metadata.starRating { labels.append("★ \(stars)") }
+        return labels
+    }
 
     private enum RecordingConfirmation: String, Identifiable {
         case cancel = "Cancel Recording"
@@ -73,6 +94,20 @@ struct ProgrammeDetailView: View {
                         )
                         .font(.headline.monospacedDigit())
                         .foregroundStyle(AppTheme.secondaryText)
+
+                        if !metadataLabels.isEmpty {
+                            HStack(spacing: 10) {
+                                ForEach(metadataLabels, id: \.self) { label in
+                                    Text(label)
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.white.opacity(0.9))
+                                        .padding(.horizontal, 11)
+                                        .padding(.vertical, 6)
+                                        .background(AppTheme.surfaceRaised, in: Capsule())
+                                }
+                            }
+                            .lineLimit(1)
+                        }
 
                         Text(program.overview)
                             .font(.title3)

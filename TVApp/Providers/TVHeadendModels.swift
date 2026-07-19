@@ -18,6 +18,12 @@ struct TVHeadendGrid<Element: Decodable & Sendable>: Decodable, Sendable {
     let total: Int?
 }
 
+struct TVPlayerGuideCacheDocument: Decodable, Sendable {
+    let version: Int
+    let lastRefresh: Double?
+    let events: [TVHeadendEPGEvent]
+}
+
 struct TVHeadendChannel: Decodable, Sendable {
     let uuid: String
     let number: Double?
@@ -35,19 +41,120 @@ struct TVHeadendChannel: Decodable, Sendable {
 struct TVHeadendEPGEvent: Codable, Sendable {
     let eventID: Int64?
     let channelUUID: String?
+    let episodeURI: String?
     let seriesLink: String?
     let title: String?
     let subtitle: String?
     let summary: String?
     let description: String?
+    let extraText: String?
     let start: Int64
     let stop: Int64
+    let seasonNumber: String?
+    let episodeNumber: String?
+    let partNumber: String?
+    let genres: [Int]
+    let categories: [String]
+    let ageRating: String?
+    let ratingLabel: String?
+    let ratingLabelIcon: String?
+    let starRating: String?
+    let imageURL: String?
+    let isHD: Bool
+    let isWidescreen: Bool
+    let isSubtitled: Bool
+    let isNew: Bool
+    let dvrUUID: String?
+    let dvrState: String?
 
     enum CodingKeys: String, CodingKey {
-        case title, subtitle, summary, description, start, stop
+        case title, subtitle, summary, description, extraText, start, stop
+        case seasonNumber, episodeNumber, partNumber, categories, category
+        case genre, ageRating, ratingLabel, ratingLabelIcon, starRating, image
+        case hd, widescreen, subtitled, new
+        case dvrUUID = "dvrUuid"
+        case dvrState
+        case cat1, cat2, cat3
         case eventID = "eventId"
         case channelUUID = "channelUuid"
+        case episodeURI = "episodeUri"
         case seriesLink = "serieslinkUri"
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        eventID = values.flexibleInt64(forKey: .eventID)
+        channelUUID = values.flexibleString(forKey: .channelUUID)
+        episodeURI = values.flexibleString(forKey: .episodeURI)
+        seriesLink = values.flexibleString(forKey: .seriesLink)
+        title = values.flexibleString(forKey: .title)
+        subtitle = values.flexibleString(forKey: .subtitle)
+        summary = values.flexibleString(forKey: .summary)
+        description = values.flexibleString(forKey: .description)
+        extraText = values.flexibleString(forKey: .extraText)
+        start = values.flexibleInt64(forKey: .start) ?? 0
+        stop = values.flexibleInt64(forKey: .stop) ?? start
+        seasonNumber = values.flexibleString(forKey: .seasonNumber)
+        episodeNumber = values.flexibleString(forKey: .episodeNumber)
+        partNumber = values.flexibleString(forKey: .partNumber)
+        var decodedGenres = (try? values.decodeIfPresent([Int].self, forKey: .genre)) ?? []
+        if decodedGenres.isEmpty, let genre = values.flexibleInt64(forKey: .genre) {
+            decodedGenres = [Int(genre)]
+        }
+        genres = decodedGenres
+
+        var decodedCategories = (try? values.decodeIfPresent([String].self, forKey: .categories)) ?? []
+        decodedCategories += (try? values.decodeIfPresent([String].self, forKey: .category)) ?? []
+        if let category = values.flexibleString(forKey: .category) {
+            decodedCategories.append(category)
+        }
+        decodedCategories += [CodingKeys.cat1, .cat2, .cat3].compactMap {
+            values.flexibleString(forKey: $0)
+        }
+        categories = Array(Set(decodedCategories)).sorted()
+
+        ageRating = values.flexibleString(forKey: .ageRating)
+        ratingLabel = values.flexibleString(forKey: .ratingLabel)
+        ratingLabelIcon = values.flexibleString(forKey: .ratingLabelIcon)
+        starRating = values.flexibleString(forKey: .starRating)
+        imageURL = values.flexibleString(forKey: .image)
+        isHD = values.flexibleBool(forKey: .hd)
+        isWidescreen = values.flexibleBool(forKey: .widescreen)
+        isSubtitled = values.flexibleBool(forKey: .subtitled)
+        isNew = values.flexibleBool(forKey: .new)
+        dvrUUID = values.flexibleString(forKey: .dvrUUID)
+        dvrState = values.flexibleString(forKey: .dvrState)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encodeIfPresent(eventID, forKey: .eventID)
+        try values.encodeIfPresent(channelUUID, forKey: .channelUUID)
+        try values.encodeIfPresent(episodeURI, forKey: .episodeURI)
+        try values.encodeIfPresent(seriesLink, forKey: .seriesLink)
+        try values.encodeIfPresent(title, forKey: .title)
+        try values.encodeIfPresent(subtitle, forKey: .subtitle)
+        try values.encodeIfPresent(summary, forKey: .summary)
+        try values.encodeIfPresent(description, forKey: .description)
+        try values.encodeIfPresent(extraText, forKey: .extraText)
+        try values.encode(start, forKey: .start)
+        try values.encode(stop, forKey: .stop)
+        try values.encodeIfPresent(seasonNumber, forKey: .seasonNumber)
+        try values.encodeIfPresent(episodeNumber, forKey: .episodeNumber)
+        try values.encodeIfPresent(partNumber, forKey: .partNumber)
+        if !genres.isEmpty { try values.encode(genres, forKey: .genre) }
+        if !categories.isEmpty { try values.encode(categories, forKey: .categories) }
+        try values.encodeIfPresent(ageRating, forKey: .ageRating)
+        try values.encodeIfPresent(ratingLabel, forKey: .ratingLabel)
+        try values.encodeIfPresent(ratingLabelIcon, forKey: .ratingLabelIcon)
+        try values.encodeIfPresent(starRating, forKey: .starRating)
+        try values.encodeIfPresent(imageURL, forKey: .image)
+        if isHD { try values.encode(true, forKey: .hd) }
+        if isWidescreen { try values.encode(true, forKey: .widescreen) }
+        if isSubtitled { try values.encode(true, forKey: .subtitled) }
+        if isNew { try values.encode(true, forKey: .new) }
+        try values.encodeIfPresent(dvrUUID, forKey: .dvrUUID)
+        try values.encodeIfPresent(dvrState, forKey: .dvrState)
     }
 }
 
@@ -194,5 +301,21 @@ private extension KeyedDecodingContainer {
         if let value = try? decodeIfPresent(Double.self, forKey: key) { return Int64(value) }
         if let value = try? decodeIfPresent(String.self, forKey: key) { return Int64(value) }
         return nil
+    }
+
+    func flexibleString(forKey key: Key) -> String? {
+        if let value = try? decodeIfPresent(String.self, forKey: key) { return value }
+        if let value = try? decodeIfPresent(Int64.self, forKey: key) { return String(value) }
+        if let value = try? decodeIfPresent(Double.self, forKey: key) { return String(value) }
+        return nil
+    }
+
+    func flexibleBool(forKey key: Key) -> Bool {
+        if let value = try? decodeIfPresent(Bool.self, forKey: key) { return value }
+        if let value = flexibleInt64(forKey: key) { return value != 0 }
+        if let value = flexibleString(forKey: key)?.lowercased() {
+            return value == "true" || value == "yes" || value == "on"
+        }
+        return false
     }
 }

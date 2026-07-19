@@ -5,6 +5,7 @@ struct TVHeadendConfiguration: Equatable, Sendable {
     let username: String
     let password: String
     let streamProfile: String
+    let guideCacheURL: URL?
     let xmltvURL: URL?
 
     var isComplete: Bool {
@@ -14,6 +15,7 @@ struct TVHeadendConfiguration: Equatable, Sendable {
 
 enum ConfigurationError: LocalizedError {
     case invalidServerURL
+    case invalidGuideCacheURL
     case invalidXMLTVURL
     case keychain(String)
 
@@ -21,6 +23,8 @@ enum ConfigurationError: LocalizedError {
         switch self {
         case .invalidServerURL:
             return "Enter a valid HTTP or HTTPS TVHeadend URL."
+        case .invalidGuideCacheURL:
+            return "The guide cache must be a valid HTTP or HTTPS URL."
         case .invalidXMLTVURL:
             return "The XMLTV override must be a valid HTTP or HTTPS URL."
         case let .keychain(message):

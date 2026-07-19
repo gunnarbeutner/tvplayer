@@ -11,6 +11,46 @@ struct GuideChannel: Identifiable {
     let programs: [GuideProgram]
 }
 
+struct GuideProgramMetadata: Hashable {
+    let episodeURI: String?
+    let seasonNumber: String?
+    let episodeNumber: String?
+    let partNumber: String?
+    let genres: [Int]
+    let categories: [String]
+    let ageRating: String?
+    let ratingLabel: String?
+    let ratingLabelIcon: String?
+    let starRating: String?
+    let imageURL: String?
+    let isHD: Bool
+    let isWidescreen: Bool
+    let isSubtitled: Bool
+    let isNew: Bool
+    let dvrUUID: String?
+    let dvrState: String?
+
+    static let empty = GuideProgramMetadata(
+        episodeURI: nil,
+        seasonNumber: nil,
+        episodeNumber: nil,
+        partNumber: nil,
+        genres: [],
+        categories: [],
+        ageRating: nil,
+        ratingLabel: nil,
+        ratingLabelIcon: nil,
+        starRating: nil,
+        imageURL: nil,
+        isHD: false,
+        isWidescreen: false,
+        isSubtitled: false,
+        isNew: false,
+        dvrUUID: nil,
+        dvrState: nil
+    )
+}
+
 struct GuideProgram: Identifiable, Hashable {
     enum Phase: Equatable {
         case past
@@ -29,6 +69,7 @@ struct GuideProgram: Identifiable, Hashable {
     let overview: String
     let start: Date
     let end: Date
+    let metadata: GuideProgramMetadata
 
     init(
         id: String,
@@ -39,7 +80,8 @@ struct GuideProgram: Identifiable, Hashable {
         subtitle: String?,
         overview: String,
         start: Date,
-        end: Date
+        end: Date,
+        metadata: GuideProgramMetadata = .empty
     ) {
         self.id = id
         self.providerEventID = providerEventID
@@ -50,6 +92,7 @@ struct GuideProgram: Identifiable, Hashable {
         self.overview = overview
         self.start = start
         self.end = end
+        self.metadata = metadata
     }
 
     var duration: TimeInterval {
