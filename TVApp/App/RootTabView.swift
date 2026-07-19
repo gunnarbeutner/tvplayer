@@ -22,7 +22,10 @@ struct RootTabView: View {
                 }
                 .tag(AppTab.channels)
 
-            GuideView(onOpenSettings: { selection = .settings })
+            GuideView(
+                isSelected: selection == .guide,
+                onOpenSettings: { selection = .settings }
+            )
                 .tabItem {
                     Label("Guide", systemImage: "rectangle.grid.2x2")
                 }

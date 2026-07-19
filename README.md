@@ -32,6 +32,7 @@ The application bundle identifier is `de.beutner.TVPlayer`.
 - In-progress recording playback starts at the beginning and exposes Watch Live as a separate action
 - TVheadend password storage in the tvOS Keychain
 - First-run TVheadend configuration discovery over `_tvplayer._tcp` Bonjour/mDNS
+- An optional always-on discovery container that caches expired EPG events and publishes its XMLTV URL over mDNS
 - A connection indicator in Settings verifies the configured credentials
 
 ## Requirements
@@ -81,9 +82,11 @@ to tracked files.
 If no server URL has previously been saved or supplied through the environment,
 TVPlayer also browses for `_tvplayer._tcp` on the local network. The optional
 [Discovery container](Discovery/README.md) publishes a complete configuration
-from environment variables. A discovered password is copied into the Keychain,
-the other fields are saved as app preferences, and the normal connection test
-and guide load run automatically.
+from environment variables. It also polls TVheadend's EPG, retains expired
+events in a persistent volume, and advertises its generated XMLTV endpoint on
+configurable port `49382` by default. A discovered password is copied into the
+Keychain, the other fields are saved as app preferences, and the normal
+connection test and guide load run automatically.
 
 Because mDNS TXT records are unencrypted and visible to devices on the local
 network, use discovery only on a trusted LAN and give its TVheadend account the

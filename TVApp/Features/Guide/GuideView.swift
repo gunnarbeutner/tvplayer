@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct GuideView: View {
+    let isSelected: Bool
     let onOpenSettings: () -> Void
 
     @Environment(\.scenePhase) private var scenePhase
@@ -8,9 +9,11 @@ struct GuideView: View {
     @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var playback: PlaybackCoordinator
     @EnvironmentObject private var recordings: RecordingStore
+    @Namespace private var guideFocusScope
     @FocusState private var focusedProgramID: GuideProgram.ID?
     @State private var recenterRequest = UUID()
     @State private var detail: ProgrammeDetailPresentation?
+    @State private var needsInitialFocus = true
 
     private var presentedProgram: GuideProgram? {
         model.program(withID: focusedProgramID) ?? model.firstCurrentProgram
@@ -44,6 +47,8 @@ struct GuideView: View {
                         channels: model.channels,
                         timeline: model.timeline,
                         now: model.now,
+                        preferredProgramID: model.preferredInitialProgram?.id,
+                        focusScope: guideFocusScope,
                         focusedProgramID: $focusedProgramID,
                         recenterRequest: recenterRequest,
                         recordingState: { recordings.scheduledRecording(for: $0)?.state },
@@ -65,6 +70,17 @@ struct GuideView: View {
                 recenterRequest = UUID()
             }
         }
+        .onAppear {
+            requestInitialFocus()
+        }
+        .onChange(of: isSelected) { _, selected in
+            guard selected else { return }
+            requestInitialFocus()
+        }
+        .onChange(of: model.preferredInitialProgram?.id) { _, _ in
+            guard isSelected, needsInitialFocus else { return }
+            applyInitialFocusIfAvailable()
+        }
         .onPlayPauseCommand {
             guard let program = presentedProgram,
                   let channel = model.channel(containing: program)
@@ -81,6 +97,24 @@ struct GuideView: View {
                 guard !Task.isCancelled else { return }
                 model.tick()
             }
+        }
+    }
+
+    private func requestInitialFocus() {
+        needsInitialFocus = true
+        applyInitialFocusIfAvailable()
+    }
+
+    private func applyInitialFocusIfAvailable() {
+        guard let programID = model.preferredInitialProgram?.id else { return }
+
+        Task { @MainActor in
+            // The guide's focusable cards need one layout pass before tvOS can
+            // accept a programmatic focus assignment.
+            await Task.yield()
+            guard isSelected, needsInitialFocus else { return }
+            focusedProgramID = programID
+            needsInitialFocus = false
         }
     }
 }

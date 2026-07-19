@@ -88,4 +88,30 @@ final class GuideViewModel: ObservableObject {
     var firstCurrentProgram: GuideProgram? {
         channels.lazy.flatMap(\.programs).first { $0.isAiring(at: now) }
     }
+
+    var preferredInitialProgram: GuideProgram? {
+        GuideFocusSelection.initialProgram(
+            in: channels.first?.programs ?? [],
+            at: now
+        )
+    }
+}
+
+enum GuideFocusSelection {
+    static func initialProgram(in programs: [GuideProgram], at date: Date) -> GuideProgram? {
+        if let current = programs.first(where: { $0.isAiring(at: date) }) {
+            return current
+        }
+
+        if let next = programs
+            .filter({ $0.phase(at: date) == .future })
+            .min(by: { $0.start < $1.start }) {
+            return next
+        }
+
+        // A channel without current or future EPG data may only contain the
+        // locally generated history placeholder. Prefer real metadata if any
+        // remains, and otherwise allow normal focus resolution to take over.
+        return programs.first { !$0.id.hasPrefix("earlier-") }
+    }
 }

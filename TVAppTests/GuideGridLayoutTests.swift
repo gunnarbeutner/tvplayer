@@ -3,6 +3,60 @@ import XCTest
 @testable import TVApp
 
 final class GuideGridLayoutTests: XCTestCase {
+    func testInitialFocusSelectsCurrentProgrammeInsteadOfEarlierPlaceholder() throws {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let earlier = GuideProgram(
+            id: "earlier-channel-1",
+            channelID: "channel-1",
+            title: "Earlier programme",
+            subtitle: nil,
+            overview: "",
+            start: now.addingTimeInterval(-3_600),
+            end: now.addingTimeInterval(-1_800)
+        )
+        let current = GuideProgram(
+            id: "current",
+            channelID: "channel-1",
+            title: "Current programme",
+            subtitle: nil,
+            overview: "",
+            start: now.addingTimeInterval(-300),
+            end: now.addingTimeInterval(1_500)
+        )
+
+        XCTAssertEqual(
+            GuideFocusSelection.initialProgram(in: [earlier, current], at: now)?.id,
+            "current"
+        )
+    }
+
+    func testInitialFocusFallsBackToNextProgramme() throws {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let earlier = GuideProgram(
+            id: "earlier-channel-1",
+            channelID: "channel-1",
+            title: "Earlier programme",
+            subtitle: nil,
+            overview: "",
+            start: now.addingTimeInterval(-3_600),
+            end: now.addingTimeInterval(-1_800)
+        )
+        let next = GuideProgram(
+            id: "next",
+            channelID: "channel-1",
+            title: "Next programme",
+            subtitle: nil,
+            overview: "",
+            start: now.addingTimeInterval(600),
+            end: now.addingTimeInterval(2_400)
+        )
+
+        XCTAssertEqual(
+            GuideFocusSelection.initialProgram(in: [earlier, next], at: now)?.id,
+            "next"
+        )
+    }
+
     func testPinnedChannelColumnDoesNotInheritHorizontalScrollOffset() {
         let initialOffset = CGPoint(x: 280, y: 94)
         let farFutureOffset = CGPoint(x: 1_800, y: 94)

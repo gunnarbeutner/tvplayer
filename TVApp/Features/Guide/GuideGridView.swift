@@ -44,6 +44,8 @@ struct GuideGridView: View {
     let channels: [GuideChannel]
     let timeline: GuideTimeline
     let now: Date
+    let preferredProgramID: GuideProgram.ID?
+    let focusScope: Namespace.ID
     let focusedProgramID: FocusState<GuideProgram.ID?>.Binding
     let recenterRequest: UUID
     let recordingState: (GuideProgram) -> TVRecordingState?
@@ -70,6 +72,9 @@ struct GuideGridView: View {
             .frame(width: contentWidth, height: contentHeight, alignment: .topLeading)
         }
         .scrollPosition($scrollPosition)
+        // A scoped preferred target overrides the focus engine's geometric
+        // choice when moving down into the guide from the tab bar.
+        .focusScope(focusScope)
         .onScrollGeometryChange(for: CGPoint.self) { geometry in
             // ScrollGeometry reports the leading resting position as the
             // negative safe-area inset on tvOS. Normalize it so zero always
@@ -148,6 +153,7 @@ struct GuideGridView: View {
                         .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         .focusable()
                         .focused(focusedProgramID, equals: program.id)
+                        .prefersDefaultFocus(program.id == preferredProgramID, in: focusScope)
                         .focusEffectDisabled()
                         .onTapGesture { onActivate(program) }
                         .frame(width: cardWidth, height: GuideGridMetrics.rowHeight - 10)

@@ -99,6 +99,20 @@ struct ProgrammeDetailView: View {
 
                         if let program, program.phase(at: Date()) != .past {
                             if let existingRecording {
+                                if existingRecording.state == .recording {
+                                    Button {
+                                        playback.start(
+                                            recording: existingRecording,
+                                            channel: channel,
+                                            configuration: settings.configuration
+                                        )
+                                    } label: {
+                                        Label("Play from Beginning", systemImage: "backward.end.fill")
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(AppTheme.surfaceRaised)
+                                }
+
                                 Button {
                                     confirmRecordingAction = existingRecording.state == .recording ? .stop : .cancel
                                 } label: {
