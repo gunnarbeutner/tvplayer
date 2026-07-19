@@ -1,0 +1,24 @@
+# Generated Xcode project and build products
+.build/
+DerivedData/
+TVApp.xcodeproj/
+
+# Per-user Xcode state
+*.xcuserstate
+xcuserdata/
+*.swp
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+Config/Local.xcconfig
+Config/Secrets.xcconfig
+*.secrets.json
+
+# Dependency manager output
+Pods/
+TVApp.xcworkspace/
+
+# macOS
+.DS_Store

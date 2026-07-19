@@ -1,0 +1,51 @@
+name: TVApp
+options:
+  bundleIdPrefix: de.beutner
+  deploymentTarget:
+    tvOS: "26.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    DEVELOPMENT_TEAM: Z5JV9S33V5
+
+targets:
+  TVApp:
+    type: application
+    platform: tvOS
+    sources:
+      - path: TVApp
+    dependencies:
+      - framework: .build/VLCKit/TVVLCKit.xcframework
+        embed: true
+    info:
+      path: TVApp/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: TV Guide
+        NSLocalNetworkUsageDescription: TV Guide connects to your TVHeadend server on the local network.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+        UILaunchScreen: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer
+        PRODUCT_NAME: TVApp
+        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+    scheme:
+      testTargets:
+        - TVAppTests
+
+  TVAppTests:
+    type: bundle.unit-test
+    platform: tvOS
+    sources:
+      - path: TVAppTests
+    dependencies:
+      - target: TVApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer.tests
+        GENERATE_INFOPLIST_FILE: true
