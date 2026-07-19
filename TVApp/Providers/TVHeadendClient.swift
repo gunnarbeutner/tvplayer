@@ -83,10 +83,10 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
     /// canonical numeric `channelid` stream path and a short-lived credential.
     /// VLC can then open the stream without having to implement TVHeadend's
     /// Digest authentication flow itself.
-    func canonicalLiveStreamURL(channelID: String) async throws -> URL {
+    func canonicalLiveStreamURL(channelID: String, profile: String? = nil) async throws -> URL {
         let playlistURL = try endpointURL(
             path: "/playlist/ticket/channels",
-            queryItems: [URLQueryItem(name: "profile", value: configuration.streamProfile)]
+            queryItems: [URLQueryItem(name: "profile", value: profile ?? configuration.streamProfile)]
         )
         let data = try await fetchData(at: playlistURL)
         guard let playlist = String(data: data, encoding: .utf8),
@@ -95,9 +95,159 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
         return streamURL
     }
 
+    func streamProfiles() async throws -> [TVHeadendStreamProfile] {
+        let result: TVHeadendGrid<TVHeadendStreamProfile> = try await get(path: "/api/profile/list")
+        return result.entries.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
     func serverVersion() async throws -> String {
         let info: TVHeadendServerInfo = try await get(path: "/api/serverinfo")
         return [info.name, info.version].compactMap { $0 }.joined(separator: " ")
+    }
+
+    func fetchRecordings() async throws -> TVRecordingSnapshot {
+        guard configuration.isComplete else { throw TVProviderError.incompleteConfiguration }
+
+        // TVheadend's convenience grids are not exhaustive. In particular,
+        // some versions omit completedError and completedRerecord entries from
+        // grid_failed as well as from the finished grid. The complete grid is
+        // the only reliable source for everything the user has scheduled.
+        async let recordingGrid: TVHeadendGrid<TVHeadendDVREntry> = get(
+            path: "/api/dvr/entry/grid",
+            queryItems: Self.fullGridQuery
+        )
+        async let autorecGrid: TVHeadendGrid<TVHeadendAutorecEntry> = get(
+            path: "/api/dvr/autorec/grid",
+            queryItems: Self.fullGridQuery
+        )
+
+        let (recordingEntries, autorecs) = try await (
+            recordingGrid,
+            autorecGrid
+        )
+
+        let now = Date()
+        let recordings = recordingEntries.entries.map {
+            Self.recording(from: $0, state: Self.recordingState(for: $0, at: now))
+        }
+        .filter { $0.state != .removed }
+        .sorted {
+            if $0.state == $1.state { return $0.start > $1.start }
+            return Self.recordingStateOrder($0.state) < Self.recordingStateOrder($1.state)
+        }
+        let rules = autorecs.entries.map {
+            TVRecordingRule(
+                id: $0.uuid,
+                name: $0.name ?? $0.title ?? "Record All",
+                titlePattern: $0.title ?? "",
+                channelID: $0.channelUUID,
+                channelName: $0.channelName,
+                seriesLink: $0.seriesLink,
+                enabled: $0.enabled ?? true
+            )
+        }
+        .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+
+        return TVRecordingSnapshot(entries: recordings, rules: rules)
+    }
+
+    func recordOnce(_ program: GuideProgram) async throws {
+        if let eventID = program.providerEventID {
+            try await postForm(
+                path: "/api/dvr/entry/create_by_event",
+                parameters: [
+                    "event_id": String(eventID),
+                    // Empty means the requesting user's default DVR profile.
+                    "config_uuid": "",
+                ]
+            )
+            return
+        }
+
+        let configuration: [String: Any] = [
+            "enabled": true,
+            "start": Int64(program.start.timeIntervalSince1970),
+            "stop": Int64(program.end.timeIntervalSince1970),
+            "channel": program.channelID,
+            "disp_title": program.title,
+            "disp_subtitle": program.subtitle ?? "",
+            "disp_extratext": program.overview,
+            "description": ["und": program.overview],
+            // Empty means the requesting user's default DVR profile.
+            "config_name": "",
+        ]
+        try await postJSONConfiguration(path: "/api/dvr/entry/create", configuration: configuration)
+    }
+
+    func recordAll(_ program: GuideProgram) async throws {
+        if program.seriesLink?.isEmpty == false, let eventID = program.providerEventID {
+            do {
+                try await postForm(
+                    path: "/api/dvr/autorec/create_by_series",
+                    parameters: [
+                        "event_id": String(eventID),
+                        "config_uuid": "",
+                    ]
+                )
+                return
+            } catch let TVProviderError.httpStatus(status) where status == 400 || status == 404 {
+                // Some grabbers expose a series URI that the installed
+                // TVheadend version cannot turn into an autorec. Preserve the
+                // user action with the exact-title/channel fallback below.
+            }
+        }
+
+        let escapedTitle = NSRegularExpression.escapedPattern(for: program.title)
+        let configuration: [String: Any] = [
+            "enabled": true,
+            "name": program.title,
+            "title": "^\(escapedTitle)$",
+            "channel": program.channelID,
+            "config_name": "",
+        ]
+        try await postJSONConfiguration(path: "/api/dvr/autorec/create", configuration: configuration)
+    }
+
+    func cancelRecording(id: String) async throws {
+        try await postForm(path: "/api/dvr/entry/cancel", parameters: ["uuid": Self.uuidList(id)])
+    }
+
+    func stopRecording(id: String) async throws {
+        try await postForm(path: "/api/dvr/entry/stop", parameters: ["uuid": Self.uuidList(id)])
+    }
+
+    func deleteRecording(id: String) async throws {
+        try await postForm(path: "/api/dvr/entry/remove", parameters: ["uuid": Self.uuidList(id)])
+    }
+
+    func deleteRecordingRule(id: String) async throws {
+        try await postForm(path: "/api/idnode/delete", parameters: ["uuid": Self.uuidList(id)])
+    }
+
+    func recordingStreamURL(recordingID: String) async throws -> URL {
+        do {
+            let data = try await fetchData(
+                at: endpointURL(path: "/play/ticket/dvrfile/\(recordingID)")
+            )
+            if let url = Self.firstMediaURL(in: data) { return url }
+        } catch let TVProviderError.httpStatus(status) where status == 400 || status == 404 {
+            // Older TVheadend versions only expose the aggregate playlist.
+        }
+
+        let data = try await fetchData(at: endpointURL(path: "/playlist/ticket/recordings"))
+        guard let playlist = String(data: data, encoding: .utf8) else {
+            throw TVProviderError.invalidResponse
+        }
+        let recordingPath = "/dvrfile/\(recordingID)"
+        for rawLine in playlist.split(whereSeparator: \.isNewline) {
+            let line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.hasPrefix("#"),
+                  let url = URL(string: line),
+                  url.path.contains(recordingPath)
+            else { continue }
+            return url
+        }
+        throw TVProviderError.channelNotInPlaylist
     }
 
     func urlSession(
@@ -137,6 +287,31 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
         return try JSONDecoder().decode(Value.self, from: data)
     }
 
+    private func postJSONConfiguration(path: String, configuration: [String: Any]) async throws {
+        let data = try JSONSerialization.data(withJSONObject: configuration)
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw TVProviderError.invalidResponse
+        }
+        try await postForm(path: path, parameters: ["conf": json])
+    }
+
+    private func postForm(path: String, parameters: [String: String]) async throws {
+        var request = URLRequest(url: try endpointURL(path: path))
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        var components = URLComponents()
+        components.queryItems = parameters
+            .sorted { $0.key < $1.key }
+            .map { URLQueryItem(name: $0.key, value: $0.value) }
+        request.httpBody = components.percentEncodedQuery?.data(using: .utf8)
+
+        let (_, response) = try await session.data(for: request)
+        guard let response = response as? HTTPURLResponse else { throw TVProviderError.invalidResponse }
+        guard (200..<300).contains(response.statusCode) else {
+            throw TVProviderError.httpStatus(response.statusCode)
+        }
+    }
+
     private func fetchData(at url: URL) async throws -> Data {
         let (data, response) = try await session.data(from: url)
         guard let response = response as? HTTPURLResponse else { throw TVProviderError.invalidResponse }
@@ -174,6 +349,8 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
             let id = event.eventID.map { String($0) } ?? "\(channelID)-\(event.start)"
             return GuideProgram(
                 id: id,
+                providerEventID: event.eventID,
+                seriesLink: event.seriesLink,
                 channelID: channelID,
                 title: title,
                 subtitle: event.subtitle,
@@ -242,6 +419,91 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
         return nil
     }
 
+    private static func firstMediaURL(in data: Data) -> URL? {
+        guard let playlist = String(data: data, encoding: .utf8) else { return nil }
+        for rawLine in playlist.split(whereSeparator: \.isNewline) {
+            let line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !line.hasPrefix("#"), let url = URL(string: line) { return url }
+        }
+        return nil
+    }
+
+    private static func uuidList(_ id: String) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: [id]),
+              let result = String(data: data, encoding: .utf8)
+        else { return "[\"\(id)\"]" }
+        return result
+    }
+
+    private static let fullGridQuery = [
+        URLQueryItem(name: "start", value: "0"),
+        URLQueryItem(name: "limit", value: "10000"),
+    ]
+
+    private static func recording(from entry: TVHeadendDVREntry, state: TVRecordingState) -> TVRecording {
+        TVRecording(
+            id: entry.uuid,
+            eventID: entry.eventID,
+            title: entry.displayTitle?.nonEmpty ?? "Untitled recording",
+            subtitle: entry.displaySubtitle?.nonEmpty,
+            overview: entry.displayDescription?.nonEmpty ?? "No recording description available.",
+            channelID: entry.channelUUID?.nonEmpty,
+            channelName: entry.channelName?.nonEmpty ?? "Unknown channel",
+            start: Date(timeIntervalSince1970: TimeInterval(entry.start)),
+            end: Date(timeIntervalSince1970: TimeInterval(entry.stop)),
+            state: state,
+            statusText: entry.status?.nonEmpty,
+            fileSize: entry.fileSize,
+            errorCount: entry.errors,
+            dataErrorCount: entry.dataErrors,
+            autorecID: entry.autorecUUID?.nonEmpty,
+            streamPath: entry.url?.nonEmpty
+        )
+    }
+
+    static func recordingState(for entry: TVHeadendDVREntry, at now: Date) -> TVRecordingState {
+        let scheduleStatus = entry.scheduleStatus?.lowercased() ?? ""
+        let status = entry.status?.lowercased() ?? ""
+
+        if scheduleStatus.contains("removed") {
+            return .removed
+        }
+        if scheduleStatus.contains("completed") {
+            let failedCompletion = scheduleStatus.contains("error")
+                || scheduleStatus.contains("rerecord")
+                || status.contains("missing")
+                || status.contains("missed")
+                || status.contains("failed")
+            return failedCompletion ? .failed : .completed
+        }
+        if scheduleStatus.contains("recording") || status == "recording" {
+            return .recording
+        }
+        if scheduleStatus.contains("scheduled") || entry.start > Int64(now.timeIntervalSince1970) {
+            return .upcoming
+        }
+        if scheduleStatus.contains("error")
+            || scheduleStatus.contains("failed")
+            || status.contains("missing")
+            || status.contains("missed")
+            || status.contains("failed") {
+            return .failed
+        }
+
+        let hasRecordingFile = entry.fileSize > 0 || entry.url?.nonEmpty != nil
+        return hasRecordingFile ? .completed : .failed
+    }
+
+    private static func recordingStateOrder(_ state: TVRecordingState) -> Int {
+        switch state {
+        case .recording: 0
+        case .upcoming: 1
+        case .completed: 2
+        case .failed: 3
+        case .removed: 4
+        }
+    }
+
     private static func attribute(named name: String, in line: String) -> String? {
         let marker = "\(name)=\""
         guard let start = line.range(of: marker)?.upperBound,
@@ -296,4 +558,8 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
         if let absolute = URL(string: value), absolute.scheme != nil { return absolute }
         return baseURL?.appending(path: value.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
     }
+}
+
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
 }

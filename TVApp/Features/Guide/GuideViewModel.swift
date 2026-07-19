@@ -1,7 +1,6 @@
 import Foundation
 
 enum GuideLoadState: Equatable {
-    case preview
     case needsConfiguration
     case loading
     case loaded(serverName: String, channelCount: Int)
@@ -13,7 +12,7 @@ final class GuideViewModel: ObservableObject {
     @Published private(set) var now: Date
     @Published private(set) var timeline: GuideTimeline
     @Published private(set) var channels: [GuideChannel]
-    @Published private(set) var loadState: GuideLoadState = .preview
+    @Published private(set) var loadState: GuideLoadState = .needsConfiguration
 
     private var lastConfiguration: TVHeadendConfiguration?
     private var lastLoadedAt: Date?
@@ -25,20 +24,11 @@ final class GuideViewModel: ObservableObject {
         let timeline = GuideTimeline.surrounding(now)
         self.now = now
         self.timeline = timeline
-        channels = SampleGuideData.channels(for: timeline)
+        channels = []
     }
 
     func tick(at date: Date = Date()) {
         now = date
-    }
-
-    func refreshWindow(at date: Date = Date()) {
-        let refreshedTimeline = GuideTimeline.surrounding(date)
-        now = date
-        timeline = refreshedTimeline
-        if case .preview = loadState {
-            channels = SampleGuideData.channels(for: refreshedTimeline)
-        }
     }
 
     func load(
@@ -51,7 +41,7 @@ final class GuideViewModel: ObservableObject {
 
         guard configuration.isComplete else {
             timeline = refreshedTimeline
-            channels = SampleGuideData.channels(for: refreshedTimeline)
+            channels = []
             loadState = .needsConfiguration
             lastConfiguration = nil
             lastLoadedAt = nil
@@ -81,9 +71,6 @@ final class GuideViewModel: ObservableObject {
         } catch is CancellationError {
             return
         } catch {
-            if channels.isEmpty {
-                channels = SampleGuideData.channels(for: refreshedTimeline)
-            }
             loadState = .failed(error.localizedDescription)
         }
     }

@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct ChannelsView: View {
+    let onOpenSettings: () -> Void
+
     @EnvironmentObject private var model: GuideViewModel
     @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var playback: PlaybackCoordinator
@@ -16,46 +18,58 @@ struct ChannelsView: View {
         ZStack {
             AppTheme.background.ignoresSafeArea()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 28) {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("CHANNELS")
-                            .font(.caption.bold())
-                            .tracking(2.2)
-                            .foregroundStyle(AppTheme.accent)
-                        Text("Watch live TV")
-                            .font(.largeTitle.bold())
+            if model.channels.isEmpty {
+                TVSourceStateView(
+                    state: model.loadState,
+                    openSettings: onOpenSettings,
+                    retry: {
+                        Task {
+                            await model.load(configuration: settings.configuration, force: true)
+                        }
                     }
+                )
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 28) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("CHANNELS")
+                                .font(.caption.bold())
+                                .tracking(2.2)
+                                .foregroundStyle(AppTheme.accent)
+                            Text("Watch live TV")
+                                .font(.largeTitle.bold())
+                        }
 
-                    LazyVGrid(columns: columns, alignment: .leading, spacing: 30) {
-                        ForEach(model.channels) { channel in
-                            ChannelCard(
-                                channel: channel,
-                                currentProgram: currentProgram(for: channel),
-                                isFocused: focusedChannelID == channel.id
-                            )
-                            .contentShape(RoundedRectangle(cornerRadius: 14))
-                            .focusable()
-                            .focused($focusedChannelID, equals: channel.id)
-                            .focusEffectDisabled()
-                            .onTapGesture {
-                                detail = ProgrammeDetailPresentation(
-                                    program: currentProgram(for: channel),
-                                    channel: channel
+                        LazyVGrid(columns: columns, alignment: .leading, spacing: 30) {
+                            ForEach(model.channels) { channel in
+                                ChannelCard(
+                                    channel: channel,
+                                    currentProgram: currentProgram(for: channel),
+                                    isFocused: focusedChannelID == channel.id
                                 )
-                            }
-                            .accessibilityAddTraits(.isButton)
-                            .accessibilityAction {
-                                detail = ProgrammeDetailPresentation(
-                                    program: currentProgram(for: channel),
-                                    channel: channel
-                                )
+                                .contentShape(RoundedRectangle(cornerRadius: 14))
+                                .focusable()
+                                .focused($focusedChannelID, equals: channel.id)
+                                .focusEffectDisabled()
+                                .onTapGesture {
+                                    detail = ProgrammeDetailPresentation(
+                                        program: currentProgram(for: channel),
+                                        channel: channel
+                                    )
+                                }
+                                .accessibilityAddTraits(.isButton)
+                                .accessibilityAction {
+                                    detail = ProgrammeDetailPresentation(
+                                        program: currentProgram(for: channel),
+                                        channel: channel
+                                    )
+                                }
                             }
                         }
                     }
+                    .padding(.horizontal, 72)
+                    .padding(.vertical, 34)
                 }
-                .padding(.horizontal, 72)
-                .padding(.vertical, 34)
             }
         }
         .fullScreenCover(item: $detail) { presentation in
@@ -68,6 +82,10 @@ struct ChannelsView: View {
                 program: currentProgram(for: channel),
                 configuration: settings.configuration
             )
+        }
+        .onChange(of: focusedChannelID) { oldValue, newValue in
+            guard let newValue, newValue != oldValue else { return }
+            NavigationSoundPlayer.shared.play()
         }
     }
 

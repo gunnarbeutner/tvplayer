@@ -22,8 +22,10 @@ targets:
     info:
       path: TVApp/Resources/Info.plist
       properties:
-        CFBundleDisplayName: TV Guide
-        NSLocalNetworkUsageDescription: TV Guide connects to your TVHeadend server on the local network.
+        CFBundleDisplayName: TV Player
+        NSLocalNetworkUsageDescription: TV Guide discovers and connects to your TVHeadend server on the local network.
+        NSBonjourServices:
+          - _tvplayer._tcp
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         UIApplicationSceneManifest:
@@ -31,6 +33,8 @@ targets:
         UILaunchScreen: {}
     settings:
       base:
+        CODE_SIGN_ENTITLEMENTS: TVApp/Resources/TVApp.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer
         PRODUCT_NAME: TVApp
         INFOPLIST_KEY_NSHumanReadableCopyright: ""

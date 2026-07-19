@@ -7,11 +7,36 @@ private enum GuideGridMetrics {
     static let cardInset: CGFloat = 5
 }
 
-private struct GuideScrollOriginPreferenceKey: PreferenceKey {
-    static let defaultValue: CGPoint = .zero
+enum GuideGridChromeLayout {
+    static func timelineContentOffset(for contentOffset: CGPoint) -> CGSize {
+        CGSize(
+            width: -contentOffset.x,
+            height: 0
+        )
+    }
 
-    static func reduce(value: inout CGPoint, nextValue: () -> CGPoint) {
-        value = nextValue()
+    static func channelHeadersOffset(for contentOffset: CGPoint) -> CGSize {
+        CGSize(
+            width: 0,
+            height: GuideGridMetrics.headerHeight - contentOffset.y
+        )
+    }
+
+    static func correctedHorizontalOffset(
+        currentOffset: CGFloat,
+        programmeOffset: CGFloat,
+        leadingPadding: CGFloat = 8
+    ) -> CGFloat? {
+        let programmeLeadingEdge = GuideGridMetrics.channelWidth
+            + programmeOffset
+            - currentOffset
+        let minimumVisibleEdge = GuideGridMetrics.channelWidth + leadingPadding
+        guard programmeLeadingEdge < minimumVisibleEdge else { return nil }
+        return max(0, programmeOffset - leadingPadding)
+    }
+
+    static func isTimelineMarkVisible(markOffset: CGFloat, contentOffset: CGFloat) -> Bool {
+        markOffset >= contentOffset
     }
 }
 
@@ -21,9 +46,11 @@ struct GuideGridView: View {
     let now: Date
     let focusedProgramID: FocusState<GuideProgram.ID?>.Binding
     let recenterRequest: UUID
+    let recordingState: (GuideProgram) -> TVRecordingState?
     let onActivate: (GuideProgram) -> Void
 
-    @State private var contentOrigin: CGPoint = .zero
+    @State private var contentOffset: CGPoint = .zero
+    @State private var scrollPosition = ScrollPosition(x: 0)
 
     private var contentWidth: CGFloat {
         GuideGridMetrics.channelWidth + timeline.width
@@ -33,48 +60,46 @@ struct GuideGridView: View {
         GuideGridMetrics.headerHeight + CGFloat(channels.count) * GuideGridMetrics.rowHeight
     }
 
-    private var pinnedX: CGFloat {
-        max(0, -contentOrigin.x)
-    }
-
-    private var pinnedY: CGFloat {
-        max(0, -contentOrigin.y)
-    }
-
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView([.horizontal, .vertical]) {
-                ZStack(alignment: .topLeading) {
-                    GeometryReader { geometry in
-                        Color.clear.preference(
-                            key: GuideScrollOriginPreferenceKey.self,
-                            value: geometry.frame(in: .named("guide-scroll")).origin
-                        )
-                    }
-                    .frame(width: 1, height: 1)
-
-                    guideBackground
-                    programmeCards
-                    nowIndicator
-                    timelineHeader
-                    channelHeaders
-                    cornerHeader
-
-                    Color.clear
-                        .frame(width: 2, height: 2)
-                        .offset(
-                            x: GuideGridMetrics.channelWidth + timeline.xOffset(for: now),
-                            y: GuideGridMetrics.headerHeight
-                        )
-                        .id("guide-now-anchor")
-                }
-                .frame(width: contentWidth, height: contentHeight, alignment: .topLeading)
+        ScrollView([.horizontal, .vertical]) {
+            ZStack(alignment: .topLeading) {
+                guideBackground
+                programmeCards
+                nowIndicator
             }
-            .coordinateSpace(name: "guide-scroll")
-            .background(AppTheme.background)
-            .onPreferenceChange(GuideScrollOriginPreferenceKey.self) { contentOrigin = $0 }
-            .onAppear { scrollToNow(using: proxy, animated: false) }
-            .onChange(of: recenterRequest) { _, _ in scrollToNow(using: proxy, animated: true) }
+            .frame(width: contentWidth, height: contentHeight, alignment: .topLeading)
+        }
+        .scrollPosition($scrollPosition)
+        .onScrollGeometryChange(for: CGPoint.self) { geometry in
+            // ScrollGeometry reports the leading resting position as the
+            // negative safe-area inset on tvOS. Normalize it so zero always
+            // means the true top-leading content edge.
+            CGPoint(
+                x: geometry.contentOffset.x + geometry.contentInsets.leading,
+                y: geometry.contentOffset.y + geometry.contentInsets.top
+            )
+        } action: { _, newOffset in
+            contentOffset = newOffset
+        }
+        .overlay(alignment: .topLeading) {
+            // The grid itself owns scrolling while these headers remain outside
+            // its focusable bounds. ScrollGeometry is the authoritative offset;
+            // a GeometryReader preference can remain frozen during tvOS focus
+            // scrolling even while the content visibly moves.
+            ZStack(alignment: .topLeading) {
+                channelColumnBackground
+                timelineHeader
+                channelHeaders
+                cornerHeader
+            }
+        }
+        .clipped()
+        .background(AppTheme.background)
+        .onAppear { scrollToInitialPosition(animated: false) }
+        .onChange(of: recenterRequest) { _, _ in scrollToInitialPosition(animated: true) }
+        .onChange(of: focusedProgramID.wrappedValue) { _, newID in
+            guard let newID else { return }
+            keepFocusedProgrammeClearOfChannelColumn(newID)
         }
     }
 
@@ -109,12 +134,16 @@ struct GuideGridView: View {
                         let visibleEnd = min(program.end, timeline.end)
                         let interval = DateInterval(start: visibleStart, end: visibleEnd)
                         let cardWidth = max(28, timeline.width(for: interval) - GuideGridMetrics.cardInset)
+                        let programmeOffset = timeline.xOffset(for: visibleStart) + 2
+                        let leadingOcclusion = max(0, contentOffset.x - programmeOffset)
                         let isFocused = focusedProgramID.wrappedValue == program.id
 
                         GuideProgramCard(
                             program: program,
                             now: now,
-                            isFocused: isFocused
+                            isFocused: isFocused,
+                            recordingState: recordingState(program),
+                            leadingContentInset: leadingOcclusion
                         )
                         .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         .focusable()
@@ -122,7 +151,7 @@ struct GuideGridView: View {
                         .focusEffectDisabled()
                         .onTapGesture { onActivate(program) }
                         .frame(width: cardWidth, height: GuideGridMetrics.rowHeight - 10)
-                        .offset(x: timeline.xOffset(for: visibleStart) + 2, y: 5)
+                        .offset(x: programmeOffset, y: 5)
                         .zIndex(isFocused ? 20 : 2)
                         .accessibilityLabel(accessibilityLabel(for: program, channel: channel))
                         .accessibilityHint("Select for programme details. Press Play to watch this channel live.")
@@ -160,10 +189,38 @@ struct GuideGridView: View {
     }
 
     private var timelineHeader: some View {
-        GuideTimelineHeader(timeline: timeline)
-            .frame(width: timeline.width, height: GuideGridMetrics.headerHeight)
-            .offset(x: GuideGridMetrics.channelWidth, y: pinnedY)
-            .zIndex(30)
+        GeometryReader { geometry in
+            ZStack(alignment: .topLeading) {
+                GuideTimelineHeader(timeline: timeline, contentOffset: contentOffset.x)
+                    .frame(width: timeline.width, height: GuideGridMetrics.headerHeight)
+                    .offset(GuideGridChromeLayout.timelineContentOffset(for: contentOffset))
+            }
+            .frame(
+                width: max(0, geometry.size.width - GuideGridMetrics.channelWidth),
+                height: GuideGridMetrics.headerHeight,
+                alignment: .topLeading
+            )
+            .clipped()
+            .offset(x: GuideGridMetrics.channelWidth)
+        }
+        .frame(height: GuideGridMetrics.headerHeight)
+        .zIndex(30)
+        .allowsHitTesting(false)
+    }
+
+    private var channelColumnBackground: some View {
+        GeometryReader { geometry in
+            Rectangle()
+                .fill(AppTheme.chrome)
+                .frame(
+                    width: GuideGridMetrics.channelWidth,
+                    height: max(0, geometry.size.height - GuideGridMetrics.headerHeight)
+                )
+                .offset(y: GuideGridMetrics.headerHeight)
+        }
+        .zIndex(29)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     private var channelHeaders: some View {
@@ -174,8 +231,9 @@ struct GuideGridView: View {
             }
         }
         .frame(width: GuideGridMetrics.channelWidth, alignment: .topLeading)
-        .offset(x: pinnedX, y: GuideGridMetrics.headerHeight)
+        .offset(GuideGridChromeLayout.channelHeadersOffset(for: contentOffset))
         .zIndex(31)
+        .allowsHitTesting(false)
     }
 
     private var cornerHeader: some View {
@@ -189,8 +247,8 @@ struct GuideGridView: View {
         .frame(width: GuideGridMetrics.channelWidth, height: GuideGridMetrics.headerHeight)
         .background(AppTheme.chrome)
         .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.divider).frame(height: 1) }
-        .offset(x: pinnedX, y: pinnedY)
         .zIndex(40)
+        .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
 
@@ -209,17 +267,37 @@ struct GuideGridView: View {
         return "\(program.title), \(channel.name), \(program.start.formatted(date: .omitted, time: .shortened)) to \(program.end.formatted(date: .omitted, time: .shortened)), \(state)"
     }
 
-    private func scrollToNow(using proxy: ScrollViewProxy, animated: Bool) {
-        let action = {
-            proxy.scrollTo("guide-now-anchor", anchor: UnitPoint(x: 0.28, y: 0.04))
-        }
-
+    private func scrollToInitialPosition(animated: Bool) {
         Task { @MainActor in
             await Task.yield()
             if animated {
-                withAnimation(.easeInOut(duration: 0.35), action)
+                withAnimation(.easeInOut(duration: 0.35)) {
+                    scrollPosition.scrollTo(x: 0)
+                }
             } else {
-                action()
+                scrollPosition.scrollTo(x: 0)
+            }
+        }
+    }
+
+    private func keepFocusedProgrammeClearOfChannelColumn(_ programID: GuideProgram.ID) {
+        guard let program = channels.lazy.flatMap(\.programs).first(where: { $0.id == programID }) else {
+            return
+        }
+        let visibleStart = max(program.start, timeline.start)
+        let programmeOffset = timeline.xOffset(for: visibleStart)
+
+        Task { @MainActor in
+            await Task.yield()
+            guard focusedProgramID.wrappedValue == programID,
+                  let correctedOffset = GuideGridChromeLayout.correctedHorizontalOffset(
+                      currentOffset: contentOffset.x,
+                      programmeOffset: programmeOffset
+                  )
+            else { return }
+
+            withAnimation(.easeOut(duration: 0.2)) {
+                scrollPosition.scrollTo(x: correctedOffset)
             }
         }
     }
@@ -227,12 +305,22 @@ struct GuideGridView: View {
 
 private struct GuideTimelineHeader: View {
     let timeline: GuideTimeline
+    let contentOffset: CGFloat
+
+    private var visibleMarks: [Date] {
+        timeline.halfHourMarks.filter {
+            GuideGridChromeLayout.isTimelineMarkVisible(
+                markOffset: timeline.xOffset(for: $0),
+                contentOffset: contentOffset
+            )
+        }
+    }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
             AppTheme.chrome
 
-            ForEach(timeline.halfHourMarks, id: \.self) { mark in
+            ForEach(visibleMarks, id: \.self) { mark in
                 VStack(alignment: .leading, spacing: 8) {
                     Text(mark.formatted(date: .omitted, time: .shortened))
                         .font(.headline.monospacedDigit().weight(.semibold))

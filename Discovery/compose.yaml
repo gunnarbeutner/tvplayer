@@ -1,0 +1,16 @@
+name: tvplayer-discovery
+
+services:
+  announcer:
+    build:
+      context: .
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      TVPLAYER_TVH_URL: ${TVPLAYER_TVH_URL:?Set TVPLAYER_TVH_URL in .env}
+      TVPLAYER_TVH_USERNAME: ${TVPLAYER_TVH_USERNAME:?Set TVPLAYER_TVH_USERNAME in .env}
+      TVPLAYER_TVH_PASSWORD: ${TVPLAYER_TVH_PASSWORD:?Set TVPLAYER_TVH_PASSWORD in .env}
+      TVPLAYER_TVH_PROFILE: ${TVPLAYER_TVH_PROFILE:-pass}
+      TVPLAYER_XMLTV_URL: ${TVPLAYER_XMLTV_URL:-}
+      TVPLAYER_MDNS_NAME: ${TVPLAYER_MDNS_NAME:-TVPlayer TVHeadend}
+      TVPLAYER_MDNS_ADDRESS: ${TVPLAYER_MDNS_ADDRESS:-}

@@ -1,4 +1,4 @@
-# TVPlayer for tvOS
+# TV Player for tvOS
 
 TVPlayer is a focused TVheadend client for Apple TV. It provides an accessible
 electronic programme guide and direct live MPEG-TS playback through TVVLCKit,
@@ -10,26 +10,36 @@ The application bundle identifier is `de.beutner.TVPlayer`.
 
 - Channels, Guide, Recordings, and Settings tabs, with Guide selected by default
 - TVheadend channels, channel icons, and EPG data loaded directly from the server
+- No bundled demo guide: Channels and Guide require a configured, reachable TVheadend server
 - Optional XMLTV guide override; the override URL is empty by default
 - High-contrast timeline guide with clear focus styling and programme details
+- Subtle auditory confirmation when focus moves between channels or programmes
 - Background guide refresh and lazy row rendering for responsive tab and focus navigation
 - Select opens programme details; Play/Pause starts the selected channel immediately
 - VLC-based live MPEG-TS playback using the `pass` stream profile by default
-- Pause/resume, catch-up, Go Live, audio-track selection, and subtitle selection
-- Live timeline labels use absolute local times
-- Player controls hide after five seconds of inactivity
-- Select or a directional press reveals hidden controls
-- Back/Menu hides visible controls first and exits playback on the following press
+- Continuous disk-backed live buffering for gap-free pause and resume
+- A programme-aware timeline showing current/next titles, absolute times, the playhead, and the available time-shift range
+- Up opens the timeline; Down opens Details, Playback, and Technical tabs
+- Playback settings include TVheadend stream profiles, audio/subtitle streams, and timing adjustments
+- Technical playback details include codecs, resolution, bitrate, buffer size, dropped pictures, and discontinuities
+- Player controls hide after five seconds of inactivity; Back has a short guard after automatic hiding
+- Leaving playback pauses decoding but retains the channel connection and time-shift buffer; selecting the same channel resumes it
+- Opening programme details prewarms an otherwise-empty channel session and advances it to live when playback starts
+- Record Once and Record All actions in programme details, with scheduled/recording badges in the guide
+- Cached TVheadend DVR views for recordings in progress, upcoming, completed, failed, and Record All rules
+- Recording management for cancelling timers, gracefully stopping active recordings, deleting files, and removing Record All rules
+- VLC playback of completed and in-progress recordings with seeking, track selection, and technical details
+- In-progress recording playback starts at the beginning and exposes Watch Live as a separate action
 - TVheadend password storage in the tvOS Keychain
+- First-run TVheadend configuration discovery over `_tvplayer._tcp` Bonjour/mDNS
 - A connection indicator in Settings verifies the configured credentials
-
-The Recordings tab is currently a placeholder.
 
 ## Requirements
 
 - Xcode with the tvOS 26 SDK
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)
 - An accessible TVheadend server
+- A TVheadend account with Web Interface, streaming, Basic recorder, View All, Failed View, and—when managing recordings created by other users—Manage All permissions
 
 TVVLCKit 3.7.3 is downloaded by the included installation script and kept under
 the git-ignored `.build` directory.
@@ -44,9 +54,12 @@ xcodebuild \
   -scheme TVApp \
   -sdk appletvsimulator \
   -configuration Debug \
-  CODE_SIGNING_ALLOWED=NO \
   build
 ```
+
+Keep the simulator's normal local ad-hoc signing enabled. TV Player's Keychain
+access group is supplied through a signing entitlement, so an unsigned build
+cannot save discovered or manually entered passwords.
 
 `TVApp.xcodeproj` is generated from `project.yml` and is intentionally not
 tracked.
@@ -60,9 +73,33 @@ Open Settings in the app and enter:
 - Stream profile, normally `pass`
 - Optional XMLTV URL
 
-The password is written to the Keychain rather than project files or user
-defaults. Server settings used during development can also be passed through
-process environment variables; they should not be added to tracked files.
+The password is written to the app's own Keychain access group rather than
+project files or user defaults. Server settings used during development can
+also be passed through process environment variables; they should not be added
+to tracked files.
+
+If no server URL has previously been saved or supplied through the environment,
+TVPlayer also browses for `_tvplayer._tcp` on the local network. The optional
+[Discovery container](Discovery/README.md) publishes a complete configuration
+from environment variables. A discovered password is copied into the Keychain,
+the other fields are saved as app preferences, and the normal connection test
+and guide load run automatically.
+
+Because mDNS TXT records are unencrypted and visible to devices on the local
+network, use discovery only on a trusted LAN and give its TVheadend account the
+minimum permissions it needs.
+
+### Recording permissions
+
+TV Player uses TVheadend's JSON DVR API rather than HTSP. Enable **Basic** in
+the account's recorder permissions to list and schedule recordings. **View
+All** exposes recordings created by other accounts, **Failed View** exposes
+failed entries, and **Manage All** permits cancelling, stopping, or deleting
+recordings owned by another account. The account also needs **Web Interface**
+for API access and a streaming permission for live and recorded playback.
+
+The app inherits the requesting user's default DVR profile, including its
+padding, priority, retention, duplicate handling, and recording format.
 
 ## Run in the simulator
 
@@ -91,10 +128,21 @@ It also prompts for the password without writing it to disk:
 bash Scripts/probe-tvheadend.sh http://tvheadend.local:9981 username
 ```
 
-## Live-timeshift limitation
+## Live time-shift
 
-The current transport is TVheadend's ticketed HTTP MPEG-TS stream. VLC can
-pause the stream and resume behind live, and TVPlayer can catch up or reconnect
-at the live edge. Arbitrary backwards seeking is enabled only when VLC reports
-the source as seekable. Reliable server-side rewind for a non-seekable live
-HTTP stream would require an HTSP transport or a dedicated local DVR buffer.
+The current transport is TVheadend's ticketed HTTP MPEG-TS stream. TVPlayer
+keeps ingesting that stream into a rolling, 2 GiB temporary buffer while VLC is
+paused, so resume does not depend on VLC's HTTP access module retaining the
+connection. The temporary buffer is deleted when the channel session is
+replaced or the app terminates. Backwards seeking is offered when VLC reports
+the disk-backed input as seekable; TVheadend server-side rewind beyond the
+current app session would still require HTSP or a recording-backed transport.
+
+## Recording playback
+
+TV Player resolves a fresh ticket-authenticated `dvrfile` URL whenever a
+recording starts. Completed recordings use their normal finite seekable
+timeline. A recording still in progress exposes only the portion already
+written by TVheadend; if VLC reaches that temporary end, the app refreshes the
+ticket and reopens the growing file at the previous position. Watched position
+is not persisted between app sessions.

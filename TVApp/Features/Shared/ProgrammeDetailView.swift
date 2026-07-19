@@ -10,11 +10,28 @@ struct ProgrammeDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var playback: PlaybackCoordinator
+    @EnvironmentObject private var recordings: RecordingStore
+    @State private var confirmRecordingAction: RecordingConfirmation?
 
     let presentation: ProgrammeDetailPresentation
 
     private var program: GuideProgram? { presentation.program }
     private var channel: GuideChannel { presentation.channel }
+    private var existingRecording: TVRecording? {
+        program.flatMap(recordings.scheduledRecording(for:))
+    }
+    private var recordOnceActionKey: String? {
+        program.map { "program:\($0.id)" }
+    }
+    private var recordAllActionKey: String? {
+        program.map { "series:\($0.id)" }
+    }
+
+    private enum RecordingConfirmation: String, Identifiable {
+        case cancel = "Cancel Recording"
+        case stop = "Stop Recording"
+        var id: Self { self }
+    }
 
     var body: some View {
         ZStack {
@@ -80,10 +97,59 @@ struct ProgrammeDetailView: View {
                         .buttonStyle(.borderedProminent)
                         .tint(AppTheme.focused)
 
-                        Button("Back", action: { dismiss() })
-                            .buttonStyle(.borderedProminent)
-                            .tint(AppTheme.surfaceRaised)
-                            .foregroundStyle(.white)
+                        if let program, program.phase(at: Date()) != .past {
+                            if let existingRecording {
+                                Button {
+                                    confirmRecordingAction = existingRecording.state == .recording ? .stop : .cancel
+                                } label: {
+                                    Label(
+                                        existingRecording.state == .recording ? "Stop Recording" : "Cancel Recording",
+                                        systemImage: existingRecording.state == .recording ? "stop.fill" : "xmark"
+                                    )
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.red.opacity(0.82))
+                            } else {
+                                Button {
+                                    Task {
+                                        await recordings.recordOnce(program, configuration: settings.configuration)
+                                    }
+                                } label: {
+                                    if recordOnceActionKey.map(recordings.isPerforming) == true {
+                                        Label("Scheduling…", systemImage: "hourglass")
+                                    } else {
+                                        Label("Record Once", systemImage: "record.circle")
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(AppTheme.surfaceRaised)
+                                .disabled(recordOnceActionKey.map(recordings.isPerforming) == true)
+
+                            }
+
+                            if !recordings.hasRecordAllRule(for: program) {
+                                Button {
+                                    Task {
+                                        await recordings.recordAll(program, configuration: settings.configuration)
+                                    }
+                                } label: {
+                                    if recordAllActionKey.map(recordings.isPerforming) == true {
+                                        Label("Scheduling…", systemImage: "hourglass")
+                                    } else {
+                                        Label("Record All", systemImage: "rectangle.stack.badge.plus")
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(AppTheme.surfaceRaised)
+                                .disabled(recordAllActionKey.map(recordings.isPerforming) == true)
+                            } else {
+                                Label("Recording All", systemImage: "checkmark.circle.fill")
+                                    .font(.headline)
+                                    .foregroundStyle(AppTheme.accent)
+                                    .padding(.horizontal, 16)
+                            }
+                        }
+
                     }
                     .padding(.top, 10)
                 }
@@ -98,6 +164,50 @@ struct ProgrammeDetailView: View {
                 program: program,
                 configuration: settings.configuration
             )
+        }
+        .onExitCommand { dismiss() }
+        .confirmationDialog(
+            confirmRecordingAction?.rawValue ?? "Confirm",
+            isPresented: Binding(
+                get: { confirmRecordingAction != nil },
+                set: { if !$0 { confirmRecordingAction = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let action = confirmRecordingAction {
+                Button(action.rawValue, role: .destructive) {
+                    guard let existingRecording else { return }
+                    Task {
+                        if action == .stop {
+                            await recordings.stop(existingRecording, configuration: settings.configuration)
+                        } else {
+                            await recordings.cancel(existingRecording, configuration: settings.configuration)
+                        }
+                    }
+                }
+            }
+            Button("Keep Recording", role: .cancel) {}
+        }
+        .alert(
+            "Recording unavailable",
+            isPresented: Binding(
+                get: { recordings.errorMessage != nil },
+                set: { if !$0 { recordings.errorMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { recordings.errorMessage = nil }
+        } message: {
+            Text(recordings.errorMessage ?? "Unknown recording error")
+        }
+        .task {
+            playback.prewarm(
+                channel: channel,
+                program: program,
+                configuration: settings.configuration
+            )
+        }
+        .onDisappear {
+            playback.endPrewarming(channelID: channel.id)
         }
     }
 }

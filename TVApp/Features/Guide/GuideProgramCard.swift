@@ -4,6 +4,8 @@ struct GuideProgramCard: View {
     let program: GuideProgram
     let now: Date
     let isFocused: Bool
+    let recordingState: TVRecordingState?
+    let leadingContentInset: CGFloat
 
     private var phase: GuideProgram.Phase {
         program.phase(at: now)
@@ -25,6 +27,9 @@ struct GuideProgramCard: View {
 
     var body: some View {
         GeometryReader { geometry in
+            let safeLeadingInset = min(max(0, leadingContentInset), geometry.size.width)
+            let visibleContentWidth = max(0, geometry.size.width - safeLeadingInset)
+
             ZStack(alignment: .bottomLeading) {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(background)
@@ -35,23 +40,38 @@ struct GuideProgramCard: View {
                         .frame(width: geometry.size.width * progress, height: 5)
                 }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(program.title)
-                        .font(.system(size: 20, weight: .bold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
+                if visibleContentWidth >= 46 {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 7) {
+                            if recordingState == .recording || recordingState == .upcoming {
+                                Image(systemName: recordingState == .recording ? "record.circle.fill" : "clock.fill")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundStyle(recordingState == .recording ? .red : AppTheme.accent)
+                            }
+                            Text(program.title)
+                                .font(.system(size: 20, weight: .bold))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+                        }
 
-                    if geometry.size.width >= 118 {
-                        Text("\(program.start.formatted(date: .omitted, time: .shortened))–\(program.end.formatted(date: .omitted, time: .shortened))")
-                            .font(.system(size: 15, weight: .medium, design: .rounded).monospacedDigit())
-                            .foregroundStyle(isFocused ? Color.white : AppTheme.secondaryText)
-                            .lineLimit(1)
+                        if visibleContentWidth >= 118 {
+                            Text("\(program.start.formatted(date: .omitted, time: .shortened))–\(program.end.formatted(date: .omitted, time: .shortened))")
+                                .font(.system(size: 15, weight: .medium, design: .rounded).monospacedDigit())
+                                .foregroundStyle(isFocused ? Color.white : AppTheme.secondaryText)
+                                .lineLimit(1)
+                        }
                     }
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 10)
+                    .frame(
+                        width: visibleContentWidth,
+                        height: geometry.size.height,
+                        alignment: .topLeading
+                    )
+                    .offset(x: safeLeadingInset)
                 }
-                .padding(.horizontal, 13)
-                .padding(.vertical, 10)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .overlay {
             RoundedRectangle(cornerRadius: 10, style: .continuous)

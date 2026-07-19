@@ -32,6 +32,7 @@ final class ServerSettingsStore: ObservableObject {
 
     private let defaults: UserDefaults
     private let keychain: KeychainPasswordStore
+    private var discovery: TVHeadendDiscovery?
 
     init(defaults: UserDefaults = .standard, keychain: KeychainPasswordStore = KeychainPasswordStore()) {
         self.defaults = defaults
@@ -65,6 +66,16 @@ final class ServerSettingsStore: ObservableObject {
         }
         if let environmentPassword = environment["TVPLAYER_TVH_PASSWORD"] {
             try? keychain.write(environmentPassword)
+        }
+
+        let persistedURL = defaults.string(forKey: Key.baseURL) ?? ""
+        if environment["TVPLAYER_TVH_URL"] == nil,
+           persistedURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let discovery = TVHeadendDiscovery { [weak self] discovered in
+                self?.adopt(discovered)
+            }
+            self.discovery = discovery
+            discovery.start()
         }
     }
 
@@ -132,6 +143,44 @@ final class ServerSettingsStore: ObservableObject {
     private func invalidateConnectionStatus() {
         guard connectionStatus != .notTested else { return }
         connectionStatus = .notTested
+    }
+
+    private func adopt(_ discovered: DiscoveredTVHeadendSettings) {
+        guard baseURLText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            discovery?.stop()
+            discovery = nil
+            return
+        }
+
+        do {
+            // Write the secret first: an mDNS bootstrap must never fall back to
+            // persisting its password in UserDefaults.
+            try keychain.write(discovered.password)
+
+            baseURLText = discovered.baseURL.absoluteString
+            username = discovered.username
+            password = discovered.password
+            streamProfile = discovered.streamProfile
+            xmltvURLText = discovered.xmltvURL?.absoluteString ?? ""
+
+            defaults.set(baseURLText, forKey: Key.baseURL)
+            defaults.set(username, forKey: Key.username)
+            defaults.set(streamProfile, forKey: Key.streamProfile)
+            if xmltvURLText.isEmpty {
+                defaults.removeObject(forKey: Key.xmltvURL)
+            } else {
+                defaults.set(xmltvURLText, forKey: Key.xmltvURL)
+            }
+
+            discovery?.stop()
+            discovery = nil
+            revision += 1
+            Task { await testConnection() }
+        } catch {
+            discovery?.stop()
+            discovery = nil
+            connectionStatus = .failed(error.localizedDescription)
+        }
     }
 
     private var normalizedProfile: String {

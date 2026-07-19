@@ -27,9 +27,11 @@ enum TVProviderError: LocalizedError {
         case .invalidResponse:
             return "TVHeadend returned an invalid response."
         case let .httpStatus(status):
-            return status == 401
-                ? "TVHeadend rejected the username or password."
-                : "TVHeadend returned HTTP \(status)."
+            if status == 401 { return "TVHeadend rejected the username or password." }
+            if status == 403 {
+                return "TVHeadend denied this request. Recording support requires Web Interface and Recorder privileges for this account."
+            }
+            return "TVHeadend returned HTTP \(status)."
         case .noChannels:
             return "TVHeadend did not return any channels."
         case .channelNotInPlaylist:

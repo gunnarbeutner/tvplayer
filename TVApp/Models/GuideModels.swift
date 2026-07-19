@@ -19,12 +19,38 @@ struct GuideProgram: Identifiable, Hashable {
     }
 
     let id: String
+    /// The native TVheadend EPG event identifier. This is absent when an
+    /// external XMLTV document supplied the programme.
+    let providerEventID: Int64?
+    let seriesLink: String?
     let channelID: String
     let title: String
     let subtitle: String?
     let overview: String
     let start: Date
     let end: Date
+
+    init(
+        id: String,
+        providerEventID: Int64? = nil,
+        seriesLink: String? = nil,
+        channelID: String,
+        title: String,
+        subtitle: String?,
+        overview: String,
+        start: Date,
+        end: Date
+    ) {
+        self.id = id
+        self.providerEventID = providerEventID
+        self.seriesLink = seriesLink
+        self.channelID = channelID
+        self.title = title
+        self.subtitle = subtitle
+        self.overview = overview
+        self.start = start
+        self.end = end
+    }
 
     var duration: TimeInterval {
         end.timeIntervalSince(start)
