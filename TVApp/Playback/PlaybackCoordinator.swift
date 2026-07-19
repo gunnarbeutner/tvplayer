@@ -11,12 +11,19 @@ struct PlaybackPresentation: Identifiable {
     var isRecording: Bool { recording != nil }
 }
 
+struct PlaybackNavigationSelection: Equatable, Sendable {
+    let channelID: GuideChannel.ID
+    let programID: GuideProgram.ID?
+}
+
 @MainActor
 final class PlaybackCoordinator: ObservableObject {
     private let logger = Logger(subsystem: "de.beutner.TVPlayer", category: "PlaybackCoordinator")
     @Published var presentation: PlaybackPresentation?
     @Published var isPlayerPresented = false
     @Published var errorMessage: String?
+    @Published private(set) var navigationSelection: PlaybackNavigationSelection?
+    @Published private(set) var focusReturnRevision = 0
     let engine = VLCPlaybackEngine()
     private var prewarmTask: Task<Void, Never>?
     private var prewarmedChannelID: String?
@@ -34,8 +41,9 @@ final class PlaybackCoordinator: ObservableObject {
             sessionCanResume = true
         }
 
-        if presentation?.recording == nil,
-           presentation?.channel.id == channel.id,
+        if let existingPresentation = presentation,
+           existingPresentation.recording == nil,
+           existingPresentation.channel.id == channel.id,
            sessionCanResume {
             if prewarmedChannelID == channel.id {
                 engine.finishPrewarmingAtLiveEdge()
@@ -43,6 +51,16 @@ final class PlaybackCoordinator: ObservableObject {
             prewarmTask?.cancel()
             prewarmTask = nil
             prewarmedChannelID = nil
+            presentation = PlaybackPresentation(
+                channel: channel,
+                program: program,
+                recording: nil,
+                request: existingPresentation.request
+            )
+            navigationSelection = PlaybackNavigationSelection(
+                channelID: channel.id,
+                programID: program?.id
+            )
             isPlayerPresented = true
             errorMessage = nil
             return
@@ -67,6 +85,10 @@ final class PlaybackCoordinator: ObservableObject {
                         profile: configuration.streamProfile
                     )
                 )
+                navigationSelection = PlaybackNavigationSelection(
+                    channelID: channel.id,
+                    programID: program?.id
+                )
                 isPlayerPresented = true
                 errorMessage = nil
             } catch {
@@ -78,6 +100,11 @@ final class PlaybackCoordinator: ObservableObject {
     func leavePlayer() {
         engine.pause()
         isPlayerPresented = false
+    }
+
+    func playerDidDismiss() {
+        guard navigationSelection != nil else { return }
+        focusReturnRevision &+= 1
     }
 
     func prewarm(
@@ -152,6 +179,12 @@ final class PlaybackCoordinator: ObservableObject {
         }
 
         if presentation?.recording?.id == recording.id, sessionCanResume {
+            if let channelID = channel?.id ?? presentation?.channel.id {
+                navigationSelection = PlaybackNavigationSelection(
+                    channelID: channelID,
+                    programID: nil
+                )
+            }
             isPlayerPresented = true
             errorMessage = nil
             return
@@ -178,6 +211,10 @@ final class PlaybackCoordinator: ObservableObject {
                         kind: .recording(isGrowing: recording.state == .recording),
                         expectedDurationSeconds: recording.duration
                     )
+                )
+                navigationSelection = PlaybackNavigationSelection(
+                    channelID: playbackChannel.id,
+                    programID: nil
                 )
                 isPlayerPresented = true
                 errorMessage = nil

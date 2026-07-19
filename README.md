@@ -14,7 +14,8 @@ The application bundle identifier is `de.beutner.TVPlayer`.
 - Optional rich JSON guide cache with an external XMLTV fallback; both URLs are empty by default
 - High-contrast timeline guide with clear focus styling and programme details
 - Subtle auditory confirmation when focus moves between channels or programmes
-- Background guide refresh and lazy row rendering for responsive tab and focus navigation
+- Instant guide restoration from an on-device parsed snapshot, background refresh, and lazy row rendering
+- Delayed guide-shaped loading placeholders that progressively reveal channel names and logos on a cold load
 - Select opens programme details; Play/Pause starts the selected channel immediately
 - VLC-based live MPEG-TS playback using the `pass` stream profile by default
 - Continuous disk-backed live buffering for gap-free pause and resume
@@ -23,7 +24,7 @@ The application bundle identifier is `de.beutner.TVPlayer`.
 - Playback settings include TVheadend stream profiles, audio/subtitle streams, and timing adjustments
 - Technical playback details include codecs, resolution, bitrate, buffer size, dropped pictures, and discontinuities
 - Player controls hide after five seconds of inactivity; Back has a short guard after automatic hiding
-- Leaving playback pauses decoding but retains the channel connection and time-shift buffer; selecting the same channel resumes it
+- Leaving playback pauses decoding, retains the time-shift buffer, and restores focus to the playing channel/current programme
 - Opening programme details prewarms an otherwise-empty channel session and advances it to live when playback starts
 - Record Once and Record All actions in programme details, with scheduled/recording badges in the guide
 - Cached TVheadend DVR views for recordings in progress, upcoming, completed, failed, and Record All rules

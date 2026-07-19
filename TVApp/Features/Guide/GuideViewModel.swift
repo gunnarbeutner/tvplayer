@@ -13,9 +13,11 @@ final class GuideViewModel: ObservableObject {
     @Published private(set) var timeline: GuideTimeline
     @Published private(set) var channels: [GuideChannel]
     @Published private(set) var loadState: GuideLoadState = .needsConfiguration
+    @Published private(set) var hasUsableGuide = false
 
     private var lastConfiguration: TVHeadendConfiguration?
     private var lastLoadedAt: Date?
+    private var activeSnapshotIdentifier: String?
     private var isLoading = false
 
     private static let refreshInterval: TimeInterval = 120
@@ -42,10 +44,22 @@ final class GuideViewModel: ObservableObject {
         guard configuration.isComplete else {
             timeline = refreshedTimeline
             channels = []
+            hasUsableGuide = false
             loadState = .needsConfiguration
             lastConfiguration = nil
             lastLoadedAt = nil
+            activeSnapshotIdentifier = nil
             return
+        }
+
+        let snapshotIdentifier = configuration.guideSnapshotIdentifier
+        if activeSnapshotIdentifier != snapshotIdentifier {
+            timeline = refreshedTimeline
+            channels = []
+            hasUsableGuide = false
+            lastConfiguration = nil
+            lastLoadedAt = nil
+            activeSnapshotIdentifier = snapshotIdentifier
         }
 
         let isFresh = lastConfiguration == configuration
@@ -56,18 +70,53 @@ final class GuideViewModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
 
-        if lastLoadedAt == nil {
+        if !hasUsableGuide {
             loadState = .loading
         }
+
+        if !hasUsableGuide,
+           let cached = await GuideSnapshotStore.shared.load(serverIdentifier: snapshotIdentifier) {
+            guard !Task.isCancelled else { return }
+            let restoredChannels = cached.restoredChannels(for: refreshedTimeline)
+            let hasCurrentOrFutureProgramme = restoredChannels.lazy
+                .flatMap(\.programs)
+                .contains { $0.end > date }
+            if hasCurrentOrFutureProgramme {
+                timeline = refreshedTimeline
+                channels = restoredChannels
+                hasUsableGuide = true
+                loadState = .loaded(
+                    serverName: cached.serverName,
+                    channelCount: restoredChannels.count
+                )
+            }
+        }
+
         do {
-            let snapshot = try await TVHeadendClient(configuration: configuration)
-                .fetchGuide(for: refreshedTimeline)
+            let client = TVHeadendClient(configuration: configuration)
+            let snapshot = try await client.fetchGuide(
+                for: refreshedTimeline,
+                channelUpdate: { [weak self] channelShells in
+                    guard let self, !self.hasUsableGuide else { return }
+                    self.timeline = refreshedTimeline
+                    self.channels = channelShells
+                }
+            )
             try Task.checkCancellation()
             timeline = refreshedTimeline
             channels = snapshot.channels
+            hasUsableGuide = true
             loadState = .loaded(serverName: snapshot.serverName, channelCount: snapshot.channels.count)
             lastConfiguration = configuration
             lastLoadedAt = date
+
+            let persistedSnapshot = PersistedGuideSnapshot(
+                serverIdentifier: snapshotIdentifier,
+                serverName: snapshot.serverName,
+                savedAt: date,
+                channels: snapshot.channels
+            )
+            await GuideSnapshotStore.shared.save(persistedSnapshot)
         } catch is CancellationError {
             return
         } catch {
@@ -95,6 +144,10 @@ final class GuideViewModel: ObservableObject {
             at: now
         )
     }
+
+    var isColdLoading: Bool {
+        !hasUsableGuide && loadState == .loading
+    }
 }
 
 enum GuideFocusSelection {
@@ -113,5 +166,43 @@ enum GuideFocusSelection {
         // locally generated history placeholder. Prefer real metadata if any
         // remains, and otherwise allow normal focus resolution to take over.
         return programs.first { !$0.id.hasPrefix("earlier-") }
+    }
+}
+
+enum PlaybackFocusSelection {
+    static func channelID(
+        in channels: [GuideChannel],
+        selection: PlaybackNavigationSelection?
+    ) -> GuideChannel.ID? {
+        guard let selection,
+              channels.contains(where: { $0.id == selection.channelID })
+        else { return nil }
+        return selection.channelID
+    }
+
+    static func programID(
+        in channels: [GuideChannel],
+        selection: PlaybackNavigationSelection?,
+        at date: Date
+    ) -> GuideProgram.ID? {
+        guard let channelID = channelID(in: channels, selection: selection),
+              let channel = channels.first(where: { $0.id == channelID }),
+              let selection
+        else { return nil }
+
+        if let selectedProgram = channel.programs.first(where: { $0.id == selection.programID }),
+           selectedProgram.isAiring(at: date) {
+            return selectedProgram.id
+        }
+
+        if let currentProgram = channel.programs.first(where: { $0.isAiring(at: date) }) {
+            return currentProgram.id
+        }
+
+        if let selectedProgram = channel.programs.first(where: { $0.id == selection.programID }) {
+            return selectedProgram.id
+        }
+
+        return GuideFocusSelection.initialProgram(in: channel.programs, at: date)?.id
     }
 }

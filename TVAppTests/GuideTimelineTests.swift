@@ -49,6 +49,66 @@ final class GuideTimelineTests: XCTestCase {
         XCTAssertEqual(timeline.width, 720, accuracy: 0.001)
     }
 
+    @MainActor
+    func testPersistedGuideSnapshotRoundTripFiltersGeneratedHistory() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tvplayer-guide-test-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = directory.appendingPathComponent("snapshot.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let now = Date(timeIntervalSince1970: 10_000)
+        let channel = GuideChannel(
+            id: "channel-1",
+            number: 1,
+            name: "A channel with a long name",
+            monogram: "AC",
+            tint: .orange,
+            iconURL: URL(string: "https://example.test/icon.png"),
+            programs: [
+                GuideProgram(
+                    id: "earlier-channel-1",
+                    channelID: "channel-1",
+                    title: "Earlier programme",
+                    subtitle: nil,
+                    overview: "",
+                    start: now.addingTimeInterval(-3_600),
+                    end: now.addingTimeInterval(-1_800)
+                ),
+                GuideProgram(
+                    id: "current",
+                    channelID: "channel-1",
+                    title: "Current programme",
+                    subtitle: "Episode",
+                    overview: "Description",
+                    start: now.addingTimeInterval(-300),
+                    end: now.addingTimeInterval(1_500)
+                ),
+            ]
+        )
+        let snapshot = PersistedGuideSnapshot(
+            serverIdentifier: "server|viewer||",
+            serverName: "Test TVHeadend",
+            savedAt: now,
+            channels: [channel]
+        )
+        let store = GuideSnapshotStore(fileURL: fileURL)
+
+        await store.save(snapshot)
+        let loadedSnapshot = await store.load(serverIdentifier: "server|viewer||")
+        let loaded = try XCTUnwrap(loadedSnapshot)
+        let restored = loaded.restoredChannels(
+            for: GuideTimeline(
+                start: now.addingTimeInterval(-3_600),
+                end: now.addingTimeInterval(3_600)
+            )
+        )
+
+        XCTAssertEqual(restored.first?.name, channel.name)
+        XCTAssertEqual(restored.first?.programs.map(\.id), ["current"])
+        let mismatchedSnapshot = await store.load(serverIdentifier: "another-server")
+        XCTAssertNil(mismatchedSnapshot)
+    }
+
     func testOffsetsAreClampedToTimeline() {
         let start = Date(timeIntervalSince1970: 10_000)
         let timeline = GuideTimeline(start: start, end: start.addingTimeInterval(3_600))

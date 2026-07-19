@@ -11,6 +11,17 @@ struct TVHeadendConfiguration: Equatable, Sendable {
     var isComplete: Bool {
         baseURL != nil && !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !password.isEmpty
     }
+
+    /// Separates on-device guide snapshots by source without persisting the
+    /// password as part of the cache key.
+    var guideSnapshotIdentifier: String {
+        [
+            baseURL?.absoluteString ?? "",
+            username,
+            guideCacheURL?.absoluteString ?? "",
+            xmltvURL?.absoluteString ?? "",
+        ].joined(separator: "|")
+    }
 }
 
 enum ConfigurationError: LocalizedError {

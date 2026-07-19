@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct ChannelsView: View {
+    let isSelected: Bool
     let onOpenSettings: () -> Void
 
     @EnvironmentObject private var model: GuideViewModel
@@ -87,6 +88,15 @@ struct ChannelsView: View {
             guard let newValue, newValue != oldValue else { return }
             NavigationSoundPlayer.shared.play()
         }
+        .onAppear { restorePlaybackFocusIfAvailable() }
+        .onChange(of: isSelected) { _, selected in
+            guard selected else { return }
+            restorePlaybackFocusIfAvailable()
+        }
+        .onChange(of: playback.focusReturnRevision) { _, _ in
+            guard isSelected else { return }
+            restorePlaybackFocusIfAvailable()
+        }
     }
 
     private var focusedChannel: GuideChannel? {
@@ -96,6 +106,19 @@ struct ChannelsView: View {
 
     private func currentProgram(for channel: GuideChannel) -> GuideProgram? {
         channel.programs.first { $0.isAiring(at: model.now) }
+    }
+
+    private func restorePlaybackFocusIfAvailable() {
+        guard let channelID = PlaybackFocusSelection.channelID(
+            in: model.channels,
+            selection: playback.navigationSelection
+        ) else { return }
+
+        Task { @MainActor in
+            await Task.yield()
+            guard isSelected else { return }
+            focusedChannelID = channelID
+        }
     }
 }
 

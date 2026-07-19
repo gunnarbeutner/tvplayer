@@ -17,6 +17,13 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
     }
 
     func fetchGuide(for timeline: GuideTimeline) async throws -> TVProviderSnapshot {
+        try await fetchGuide(for: timeline, channelUpdate: nil)
+    }
+
+    func fetchGuide(
+        for timeline: GuideTimeline,
+        channelUpdate: (@MainActor @Sendable ([GuideChannel]) -> Void)?
+    ) async throws -> TVProviderSnapshot {
         guard configuration.isComplete else { throw TVProviderError.incompleteConfiguration }
 
         async let serverInfo: TVHeadendServerInfo = get(path: "/api/serverinfo")
@@ -25,6 +32,17 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
             queryItems: [URLQueryItem(name: "start", value: "0"), URLQueryItem(name: "limit", value: "10000")]
         )
         guard !channelGrid.entries.isEmpty else { throw TVProviderError.noChannels }
+
+        if let channelUpdate {
+            let channelShells = Self.makeChannels(
+                from: channelGrid.entries,
+                programsByChannel: [:],
+                timeline: timeline,
+                fillPastGap: false,
+                baseURL: configuration.baseURL
+            )
+            await channelUpdate(channelShells)
+        }
 
         let programmesByChannel: [String: [GuideProgram]]
         if let guideCacheURL = configuration.guideCacheURL {
@@ -49,7 +67,26 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
             programmesByChannel = Self.mapEPG(events, timeline: timeline)
         }
 
-        let channels = channelGrid.entries
+        let channels = Self.makeChannels(
+            from: channelGrid.entries,
+            programsByChannel: programmesByChannel,
+            timeline: timeline,
+            fillPastGap: true,
+            baseURL: configuration.baseURL
+        )
+
+        let info = try await serverInfo
+        return TVProviderSnapshot(channels: channels, serverName: info.name ?? "TVHeadend")
+    }
+
+    private static func makeChannels(
+        from entries: [TVHeadendChannel],
+        programsByChannel: [String: [GuideProgram]],
+        timeline: GuideTimeline,
+        fillPastGap: Bool,
+        baseURL: URL?
+    ) -> [GuideChannel] {
+        entries
             .enumerated()
             .map { offset, channel in
                 GuideChannel(
@@ -57,13 +94,15 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
                     number: channel.number.map { Int($0.rounded()) } ?? offset + 1,
                     name: channel.name,
                     monogram: Self.monogram(for: channel.name),
-                    tint: Self.tint(for: channel.uuid),
-                    iconURL: Self.iconURL(for: channel, baseURL: configuration.baseURL),
-                    programs: Self.programsFillingPastGap(
-                        programmesByChannel[channel.uuid, default: []],
-                        channelID: channel.uuid,
-                        timeline: timeline
-                    )
+                    tint: GuideChannelAppearance.tint(for: channel.uuid),
+                    iconURL: Self.iconURL(for: channel, baseURL: baseURL),
+                    programs: fillPastGap
+                        ? Self.programsFillingPastGap(
+                            programsByChannel[channel.uuid, default: []],
+                            channelID: channel.uuid,
+                            timeline: timeline
+                        )
+                        : []
                 )
             }
             .sorted {
@@ -72,9 +111,6 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
                 }
                 return $0.number < $1.number
             }
-
-        let info = try await serverInfo
-        return TVProviderSnapshot(channels: channels, serverName: info.name ?? "TVHeadend")
     }
 
     func liveStreamURL(channelID: String) throws -> URL {
@@ -571,14 +607,6 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
             return words.prefix(2).compactMap(\.first).map(String.init).joined().uppercased()
         }
         return String(name.prefix(2)).uppercased()
-    }
-
-    private static func tint(for identifier: String) -> Color {
-        let palette: [Color] = [.blue, .indigo, .purple, .pink, .red, .orange, .teal, .cyan]
-        let value = identifier.unicodeScalars.reduce(0) {
-            ($0 &* 31 &+ Int($1.value)) & 0x7fffffff
-        }
-        return palette[value % palette.count]
     }
 
     private static func iconURL(for channel: TVHeadendChannel, baseURL: URL?) -> URL? {

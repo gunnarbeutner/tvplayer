@@ -14,16 +14,31 @@ struct GuideView: View {
     @State private var recenterRequest = UUID()
     @State private var detail: ProgrammeDetailPresentation?
     @State private var needsInitialFocus = true
+    @State private var showLoadingSkeleton = false
 
     private var presentedProgram: GuideProgram? {
         model.program(withID: focusedProgramID) ?? model.firstCurrentProgram
+    }
+
+    private var preferredFocusProgramID: GuideProgram.ID? {
+        PlaybackFocusSelection.programID(
+            in: model.channels,
+            selection: playback.navigationSelection,
+            at: model.now
+        ) ?? model.preferredInitialProgram?.id
     }
 
     var body: some View {
         ZStack {
             AppTheme.background.ignoresSafeArea()
 
-            if model.channels.isEmpty {
+            if model.isColdLoading {
+                GuideLoadingSkeleton(
+                    channels: model.channels,
+                    timeline: model.timeline
+                )
+                .opacity(showLoadingSkeleton ? 1 : 0)
+            } else if !model.hasUsableGuide {
                 TVSourceStateView(
                     state: model.loadState,
                     openSettings: onOpenSettings,
@@ -47,7 +62,7 @@ struct GuideView: View {
                         channels: model.channels,
                         timeline: model.timeline,
                         now: model.now,
-                        preferredProgramID: model.preferredInitialProgram?.id,
+                        preferredProgramID: preferredFocusProgramID,
                         focusScope: guideFocusScope,
                         focusedProgramID: $focusedProgramID,
                         recenterRequest: recenterRequest,
@@ -81,6 +96,10 @@ struct GuideView: View {
             guard isSelected, needsInitialFocus else { return }
             applyInitialFocusIfAvailable()
         }
+        .onChange(of: playback.focusReturnRevision) { _, _ in
+            guard isSelected else { return }
+            restorePlaybackFocusIfAvailable()
+        }
         .onPlayPauseCommand {
             guard let program = presentedProgram,
                   let channel = model.channel(containing: program)
@@ -90,6 +109,19 @@ struct GuideView: View {
         .onChange(of: focusedProgramID) { oldValue, newValue in
             guard let newValue, newValue != oldValue else { return }
             NavigationSoundPlayer.shared.play()
+        }
+        .task(id: model.isColdLoading) {
+            guard model.isColdLoading else {
+                showLoadingSkeleton = false
+                return
+            }
+
+            showLoadingSkeleton = false
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, model.isColdLoading else { return }
+            withAnimation(.easeOut(duration: 0.18)) {
+                showLoadingSkeleton = true
+            }
         }
         .task {
             while !Task.isCancelled {
@@ -106,7 +138,7 @@ struct GuideView: View {
     }
 
     private func applyInitialFocusIfAvailable() {
-        guard let programID = model.preferredInitialProgram?.id else { return }
+        guard let programID = preferredFocusProgramID else { return }
 
         Task { @MainActor in
             // The guide's focusable cards need one layout pass before tvOS can
@@ -116,6 +148,183 @@ struct GuideView: View {
             focusedProgramID = programID
             needsInitialFocus = false
         }
+    }
+
+    private func restorePlaybackFocusIfAvailable() {
+        guard let programID = PlaybackFocusSelection.programID(
+            in: model.channels,
+            selection: playback.navigationSelection,
+            at: model.now
+        ) else { return }
+
+        needsInitialFocus = false
+        Task { @MainActor in
+            await Task.yield()
+            guard isSelected else { return }
+            focusedProgramID = programID
+        }
+    }
+}
+
+private struct GuideLoadingSkeleton: View {
+    let channels: [GuideChannel]
+    let timeline: GuideTimeline
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isDimmed = false
+
+    private let visibleRowCount = 7
+
+    var body: some View {
+        VStack(spacing: 0) {
+            informationPlaceholder
+
+            VStack(spacing: 0) {
+                timelinePlaceholder
+
+                ForEach(0..<visibleRowCount, id: \.self) { index in
+                    HStack(spacing: 0) {
+                        channelPlaceholder(at: index)
+                        programmePlaceholders(for: index)
+                    }
+                    .frame(height: GuideGridMetrics.rowHeight)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .clipped()
+            .opacity(isDimmed ? 0.48 : 0.78)
+        }
+        .background(AppTheme.background)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Loading programme guide")
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.easeInOut(duration: 1.15).repeatForever(autoreverses: true)) {
+                isDimmed = true
+            }
+        }
+    }
+
+    private var informationPlaceholder: some View {
+        HStack(spacing: 28) {
+            Circle()
+                .fill(AppTheme.surfaceRaised)
+                .frame(width: 84, height: 84)
+
+            VStack(alignment: .leading, spacing: 12) {
+                placeholder(width: 520, height: 28)
+                placeholder(width: 360, height: 18)
+                placeholder(width: 440, height: 18)
+            }
+
+            Spacer()
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Loading guide…")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(AppTheme.secondaryText)
+                placeholder(width: 360, height: 17)
+                placeholder(width: 330, height: 17)
+            }
+            .frame(width: 400, alignment: .leading)
+        }
+        .padding(.horizontal, 72)
+        .frame(maxWidth: .infinity, minHeight: 154, maxHeight: 154)
+        .background(AppTheme.chrome)
+        .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.divider).frame(height: 1) }
+    }
+
+    private var timelinePlaceholder: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "clock")
+                Text("NOW")
+                    .font(.caption.weight(.bold))
+                    .tracking(1.4)
+            }
+            .foregroundStyle(AppTheme.accent.opacity(0.7))
+            .frame(width: GuideGridMetrics.channelWidth, height: GuideGridMetrics.headerHeight)
+            .background(AppTheme.chrome)
+
+            HStack(spacing: 0) {
+                ForEach(Array(timeline.halfHourMarks.prefix(6)), id: \.self) { mark in
+                    Text(mark.formatted(date: .omitted, time: .shortened))
+                        .font(.headline.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.52))
+                        .frame(width: GuideTimeline.pointsPerHour / 2, alignment: .leading)
+                }
+            }
+            .padding(.leading, 10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .background(AppTheme.chrome)
+            .clipped()
+        }
+        .frame(height: GuideGridMetrics.headerHeight)
+        .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.divider).frame(height: 1) }
+    }
+
+    @ViewBuilder
+    private func channelPlaceholder(at index: Int) -> some View {
+        if channels.indices.contains(index) {
+            let channel = channels[index]
+            HStack(spacing: 12) {
+                ChannelBadge(channel: channel, diameter: 48)
+                Text(channel.name)
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.82))
+                    .lineLimit(3)
+                    .minimumScaleFactor(0.65)
+                    .allowsTightening(true)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 14)
+            .frame(width: GuideGridMetrics.channelWidth, height: GuideGridMetrics.cardHeight)
+            .background(AppTheme.chrome, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .padding(.vertical, GuideGridMetrics.rowInset)
+            .background(AppTheme.chrome)
+        } else {
+            HStack(spacing: 12) {
+                Circle()
+                    .fill(AppTheme.surfaceRaised)
+                    .frame(width: 48, height: 48)
+                placeholder(width: 140, height: 18)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 14)
+            .frame(width: GuideGridMetrics.channelWidth, height: GuideGridMetrics.cardHeight)
+            .padding(.vertical, GuideGridMetrics.rowInset)
+            .background(AppTheme.chrome)
+        }
+    }
+
+    private func programmePlaceholders(for row: Int) -> some View {
+        HStack(spacing: 5) {
+            ForEach(0..<3, id: \.self) { column in
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(AppTheme.surfaceRaised)
+                    .frame(width: placeholderWidth(row: row, column: column))
+            }
+        }
+        .padding(.vertical, GuideGridMetrics.rowInset)
+        .padding(.leading, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(row.isMultiple(of: 2) ? AppTheme.background : AppTheme.chrome.opacity(0.42))
+        .clipped()
+    }
+
+    private func placeholderWidth(row: Int, column: Int) -> CGFloat {
+        let widths: [[CGFloat]] = [
+            [330, 500, 260],
+            [460, 310, 420],
+            [250, 560, 320],
+        ]
+        return widths[row % widths.count][column]
+    }
+
+    private func placeholder(width: CGFloat, height: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: height / 2, style: .continuous)
+            .fill(AppTheme.surfaceRaised)
+            .frame(width: width, height: height)
     }
 }
 

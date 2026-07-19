@@ -1,10 +1,12 @@
 import SwiftUI
 
-private enum GuideGridMetrics {
-    static let channelWidth: CGFloat = 220
+enum GuideGridMetrics {
+    static let channelWidth: CGFloat = 280
     static let headerHeight: CGFloat = 58
     static let rowHeight: CGFloat = 94
     static let cardInset: CGFloat = 5
+    static let rowInset: CGFloat = 5
+    static let cardHeight = rowHeight - (rowInset * 2)
 }
 
 enum GuideGridChromeLayout {
@@ -156,8 +158,8 @@ struct GuideGridView: View {
                         .prefersDefaultFocus(program.id == preferredProgramID, in: focusScope)
                         .focusEffectDisabled()
                         .onTapGesture { onActivate(program) }
-                        .frame(width: cardWidth, height: GuideGridMetrics.rowHeight - 10)
-                        .offset(x: programmeOffset, y: 5)
+                        .frame(width: cardWidth, height: GuideGridMetrics.cardHeight)
+                        .offset(x: programmeOffset, y: GuideGridMetrics.rowInset)
                         .zIndex(isFocused ? 20 : 2)
                         .accessibilityLabel(accessibilityLabel(for: program, channel: channel))
                         .accessibilityHint("Select for programme details. Press Play to watch this channel live.")
@@ -233,7 +235,12 @@ struct GuideGridView: View {
         LazyVStack(spacing: 0) {
             ForEach(channels) { channel in
                 GuideChannelHeader(channel: channel)
-                    .frame(width: GuideGridMetrics.channelWidth, height: GuideGridMetrics.rowHeight)
+                    .frame(
+                        width: GuideGridMetrics.channelWidth,
+                        height: GuideGridMetrics.cardHeight
+                    )
+                    .padding(.vertical, GuideGridMetrics.rowInset)
+                    .frame(height: GuideGridMetrics.rowHeight)
             }
         }
         .frame(width: GuideGridMetrics.channelWidth, alignment: .topLeading)
@@ -352,20 +359,28 @@ private struct GuideChannelHeader: View {
     let channel: GuideChannel
 
     var body: some View {
-        HStack(spacing: 13) {
-            ChannelBadge(channel: channel, diameter: 50)
+        HStack(spacing: 12) {
+            ChannelBadge(channel: channel, diameter: 48)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(channel.name)
-                    .font(.headline.weight(.semibold))
+                    .font(.system(size: 20, weight: .semibold))
                     .foregroundStyle(.white)
-                    .lineLimit(2)
+                    .lineLimit(3)
+                    .minimumScaleFactor(0.65)
+                    .allowsTightening(true)
+                    .layoutPriority(1)
             }
 
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 14)
-        .background(AppTheme.chrome)
+        // Expand the header's painted surface to the fixed row-card frame.
+        // Without this inner frame, the background and dividers only use the
+        // logo/text's intrinsic height even though the outer layout advances
+        // by a full guide row.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .background(AppTheme.chrome, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(alignment: .trailing) { Rectangle().fill(AppTheme.divider).frame(width: 1) }
         .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.divider).frame(height: 1) }
         .accessibilityElement(children: .combine)

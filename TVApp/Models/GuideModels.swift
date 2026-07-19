@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 
-struct GuideChannel: Identifiable {
+struct GuideChannel: Identifiable, Sendable {
     let id: String
     let number: Int
     let name: String
@@ -11,7 +11,7 @@ struct GuideChannel: Identifiable {
     let programs: [GuideProgram]
 }
 
-struct GuideProgramMetadata: Hashable {
+struct GuideProgramMetadata: Hashable, Codable, Sendable {
     let episodeURI: String?
     let seasonNumber: String?
     let episodeNumber: String?
@@ -51,7 +51,7 @@ struct GuideProgramMetadata: Hashable {
     )
 }
 
-struct GuideProgram: Identifiable, Hashable {
+struct GuideProgram: Identifiable, Hashable, Codable, Sendable {
     enum Phase: Equatable {
         case past
         case current
@@ -111,6 +111,16 @@ struct GuideProgram: Identifiable, Hashable {
 
     func isAiring(at date: Date) -> Bool {
         phase(at: date) == .current
+    }
+}
+
+enum GuideChannelAppearance {
+    static func tint(for identifier: String) -> Color {
+        let palette: [Color] = [.blue, .indigo, .purple, .pink, .red, .orange, .teal, .cyan]
+        let value = identifier.unicodeScalars.reduce(0) {
+            ($0 &* 31 &+ Int($1.value)) & 0x7fffffff
+        }
+        return palette[value % palette.count]
     }
 }
 

@@ -16,7 +16,10 @@ struct RootTabView: View {
 
     var body: some View {
         TabView(selection: $selection) {
-            ChannelsView(onOpenSettings: { selection = .settings })
+            ChannelsView(
+                isSelected: selection == .channels,
+                onOpenSettings: { selection = .settings }
+            )
                 .tabItem {
                     Label("Channels", systemImage: "play.rectangle.on.rectangle")
                 }
@@ -48,7 +51,10 @@ struct RootTabView: View {
         .environmentObject(guide)
         .environmentObject(recordings)
         .environmentObject(playback)
-        .fullScreenCover(isPresented: $playback.isPlayerPresented) {
+        .fullScreenCover(
+            isPresented: $playback.isPlayerPresented,
+            onDismiss: { playback.playerDidDismiss() }
+        ) {
             if let presentation = playback.presentation {
                 PlaybackView(engine: playback.engine, presentation: presentation)
                     .environmentObject(playback)

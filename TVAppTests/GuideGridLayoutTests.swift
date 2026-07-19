@@ -3,6 +3,73 @@ import XCTest
 @testable import TVApp
 
 final class GuideGridLayoutTests: XCTestCase {
+    func testPlaybackFocusRestoresThePlayingChannelAndCurrentProgramme() throws {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let firstChannel = channel(
+            id: "first",
+            programs: [program(id: "first-current", channelID: "first", around: now)]
+        )
+        let playingChannel = channel(
+            id: "playing",
+            programs: [program(id: "playing-current", channelID: "playing", around: now)]
+        )
+        let selection = PlaybackNavigationSelection(
+            channelID: "playing",
+            programID: "playing-current"
+        )
+
+        XCTAssertEqual(
+            PlaybackFocusSelection.channelID(
+                in: [firstChannel, playingChannel],
+                selection: selection
+            ),
+            "playing"
+        )
+        XCTAssertEqual(
+            PlaybackFocusSelection.programID(
+                in: [firstChannel, playingChannel],
+                selection: selection,
+                at: now
+            ),
+            "playing-current"
+        )
+    }
+
+    func testPlaybackFocusMovesToCurrentShowWhenOriginalShowHasEnded() throws {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let ended = GuideProgram(
+            id: "ended",
+            channelID: "playing",
+            title: "Ended",
+            subtitle: nil,
+            overview: "",
+            start: now.addingTimeInterval(-3_600),
+            end: now.addingTimeInterval(-1)
+        )
+        let current = program(id: "current", channelID: "playing", around: now)
+        let selection = PlaybackNavigationSelection(channelID: "playing", programID: "ended")
+
+        XCTAssertEqual(
+            PlaybackFocusSelection.programID(
+                in: [channel(id: "playing", programs: [ended, current])],
+                selection: selection,
+                at: now
+            ),
+            "current"
+        )
+    }
+
+    func testPlaybackFocusIgnoresAChannelMissingFromTheGuide() throws {
+        let selection = PlaybackNavigationSelection(channelID: "missing", programID: nil)
+
+        XCTAssertNil(
+            PlaybackFocusSelection.channelID(
+                in: [channel(id: "available", programs: [])],
+                selection: selection
+            )
+        )
+    }
+
     func testInitialFocusSelectsCurrentProgrammeInsteadOfEarlierPlaceholder() throws {
         let now = Date(timeIntervalSince1970: 10_000)
         let earlier = GuideProgram(
@@ -71,6 +138,13 @@ final class GuideGridLayoutTests: XCTestCase {
         )
     }
 
+    func testChannelAndProgrammeCardsUseTheSameRowHeight() {
+        XCTAssertEqual(
+            GuideGridMetrics.cardHeight + (GuideGridMetrics.rowInset * 2),
+            GuideGridMetrics.rowHeight
+        )
+    }
+
     func testScrollingBackRestoresTimelineHeaderPosition() {
         let initialScrollOffset = CGPoint(x: 280, y: 94)
         let farFutureScrollOffset = CGPoint(x: 1_800, y: 94)
@@ -128,6 +202,30 @@ final class GuideGridLayoutTests: XCTestCase {
                 markOffset: 900,
                 contentOffset: 780
             )
+        )
+    }
+
+    private func channel(id: String, programs: [GuideProgram]) -> GuideChannel {
+        GuideChannel(
+            id: id,
+            number: 1,
+            name: id,
+            monogram: String(id.prefix(2)).uppercased(),
+            tint: .orange,
+            iconURL: nil,
+            programs: programs
+        )
+    }
+
+    private func program(id: String, channelID: String, around date: Date) -> GuideProgram {
+        GuideProgram(
+            id: id,
+            channelID: channelID,
+            title: id,
+            subtitle: nil,
+            overview: "",
+            start: date.addingTimeInterval(-300),
+            end: date.addingTimeInterval(1_500)
         )
     }
 }
