@@ -77,6 +77,51 @@ class GuideCacheTests(unittest.TestCase):
                 ["Current Show"],
             )
 
+    def test_reassigned_event_id_replaces_stale_cached_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "guide-cache.json")
+            now = 100_000
+            opener = FakeOpener(
+                channels=[{"uuid": "channel-1", "name": "Test"}],
+                events=[
+                    {
+                        "eventId": 1,
+                        "channelUuid": "channel-1",
+                        "title": "Nichts geht mehr",
+                        "start": now - 300,
+                        "stop": now + 1_500,
+                    }
+                ],
+            )
+            cache = GuideCache(
+                base_url="http://tvheadend.test:9981",
+                username="viewer",
+                password="secret",
+                cache_path=path,
+                opener=opener,
+            )
+            cache.refresh(now=now)
+
+            # TVHeadend's EPG grabber re-parses schedule data and reassigns
+            # a new event id to the same broadcast, with its start drifting
+            # by a few seconds.
+            opener.events = [
+                {
+                    "eventId": 2,
+                    "channelUuid": "channel-1",
+                    "title": "Nichts geht mehr",
+                    "start": now - 297,
+                    "stop": now + 1_503,
+                }
+            ]
+            cache.refresh(now=now + 60)
+            document = json.loads(cache.json_guide())
+
+            self.assertEqual(
+                [programme["eventId"] for programme in document["events"]],
+                [2],
+            )
+
     def test_cache_survives_process_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "guide-cache.json")

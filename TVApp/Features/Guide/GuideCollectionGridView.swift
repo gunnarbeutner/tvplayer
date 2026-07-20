@@ -703,6 +703,7 @@ private final class GuideCollectionView: UICollectionView,
         isEnabled: Bool
     ) {
         self.preferredProgramID = preferredProgramID
+        let previousRequestedFocusedProgramID = requestedFocusedProgramID
         requestedFocusedProgramID = focusedProgramID
         currentConfiguration = configuration
         self.recordingState = recordingState
@@ -746,6 +747,7 @@ private final class GuideCollectionView: UICollectionView,
         if isRestoreRequest, let focusedProgramID {
             requestFocus(on: focusedProgramID, animated: false, retriesRemaining: 4)
         } else if let focusedProgramID,
+                  focusedProgramID != previousRequestedFocusedProgramID,
                   focusedProgramID != currentlyFocusedProgramID,
                   guideSnapshot?.indexPath(for: focusedProgramID) != nil {
             requestFocus(on: focusedProgramID, animated: false, retriesRemaining: 4)
@@ -789,6 +791,10 @@ private final class GuideCollectionView: UICollectionView,
         UIView.performWithoutAnimation {
             reloadData()
             layoutIfNeeded()
+            // A focused collection-view cell can survive reloadData() at the
+            // same index path. Refresh every retained cell explicitly so its
+            // programme ID and callbacks match the newly applied snapshot.
+            reconfigureVisibleProgrammeCells()
         }
         os_signpost(.end, log: guidePerformanceLog, name: "GuideSnapshotApply", "rows=%d", snapshot.rows.count)
 
@@ -839,14 +845,8 @@ private final class GuideCollectionView: UICollectionView,
         let destinationIsRealized = cellForItem(at: indexPath) != nil
         reveal(item: item, animated: animated && destinationIsRealized)
         layoutIfNeeded()
-        if let targetCell = cellForItem(at: indexPath),
-           let focusSystem = UIFocusSystem.focusSystem(for: targetCell) {
-            focusSystem.requestFocusUpdate(to: targetCell)
-            focusSystem.updateFocusIfNeeded()
-        } else {
-            setNeedsFocusUpdate()
-            updateFocusIfNeeded()
-        }
+        setNeedsFocusUpdate()
+        updateFocusIfNeeded()
 
         guard currentlyFocusedProgramID != programID else { return }
         guard retriesRemaining > 0 else {
@@ -931,7 +931,6 @@ private final class GuideCollectionView: UICollectionView,
                 ? .native
                 : .consumed
         }
-
         let signpostID = OSSignpostID(log: guidePerformanceLog)
         navigationSignpostID = signpostID
         let directionName = switch direction {
@@ -949,14 +948,10 @@ private final class GuideCollectionView: UICollectionView,
             directionName
         )
 
-        // UIKit is most reliable when it can perform a normal adjacent focus
-        // move. Intervene only when virtualization has not mounted the indexed
-        // destination yet; shouldAllowFocusUpdate still verifies that UIKit's
-        // geometric candidate matches our time-based navigation target.
-        if let indexPath = snapshot.indexPath(for: destination),
-           cellForItem(at: indexPath) != nil {
-            return .native
-        }
+        // UIKit's own geometric focus resolution is unreliable once a card
+        // spans an irregular width (e.g. a long programme): its candidate can
+        // land on the wrong neighbour. Always resolve the destination from
+        // the indexed snapshot instead of delegating to a native focus move.
         requestFocus(on: destination, animated: true, retriesRemaining: 8)
         return .consumed
     }
@@ -1009,6 +1004,7 @@ private final class GuideCollectionView: UICollectionView,
     }
 
     private func didFocus(programID: GuideProgram.ID) {
+        requestedFocusedProgramID = programID
         pendingFocusProgramID = nil
         updateFocusAvailability()
         focusRetryTask?.cancel()
@@ -1186,7 +1182,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
     private var now = Date()
     private var recordingState: TVRecordingState?
     private var leadingOcclusion: CGFloat = 0
-    private var consumedDirectionalPress: UIPress.PressType?
+    private var consumedDirectionalPressTypes: Set<Int> = []
     private var onFocused: () -> Void = {}
     private var onActivate: () -> Void = {}
     private var onPlay: () -> Void = {}
@@ -1328,28 +1324,10 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
     }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        if presses.contains(where: { $0.type == .upArrow }) {
-            let result = onDirectionalPress(.up)
+        if let direction = presses.lazy.compactMap(navigationDirection(for:)).first {
+            let result = onDirectionalPress(direction)
             if result == .consumed {
-                consumedDirectionalPress = .upArrow
-                return
-            }
-        } else if presses.contains(where: { $0.type == .downArrow }) {
-            let result = onDirectionalPress(.down)
-            if result == .consumed {
-                consumedDirectionalPress = .downArrow
-                return
-            }
-        } else if presses.contains(where: { $0.type == .leftArrow }) {
-            let result = onDirectionalPress(.left)
-            if result == .consumed {
-                consumedDirectionalPress = .leftArrow
-                return
-            }
-        } else if presses.contains(where: { $0.type == .rightArrow }) {
-            let result = onDirectionalPress(.right)
-            if result == .consumed {
-                consumedDirectionalPress = .rightArrow
+                consumedDirectionalPressTypes.formUnion(presses.map { $0.type.rawValue })
                 return
             }
         }
@@ -1357,9 +1335,9 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
     }
 
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        if let consumedDirectionalPress,
-           presses.contains(where: { $0.type == consumedDirectionalPress }) {
-            self.consumedDirectionalPress = nil
+        let endedTypes = Set(presses.map { $0.type.rawValue })
+        if !consumedDirectionalPressTypes.isDisjoint(with: endedTypes) {
+            consumedDirectionalPressTypes.subtract(endedTypes)
             return
         }
         if presses.contains(where: { $0.type == .select }) {
@@ -1372,8 +1350,26 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
     }
 
     override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        consumedDirectionalPress = nil
+        consumedDirectionalPressTypes.subtract(presses.map { $0.type.rawValue })
         super.pressesCancelled(presses, with: event)
+    }
+
+    private func navigationDirection(for press: UIPress) -> GuideCollectionNavigationDirection? {
+        switch press.type {
+        case .upArrow: return .up
+        case .downArrow: return .down
+        case .leftArrow: return .left
+        case .rightArrow: return .right
+        default: break
+        }
+
+        switch press.key?.keyCode {
+        case .keyboardUpArrow: return .up
+        case .keyboardDownArrow: return .down
+        case .keyboardLeftArrow: return .left
+        case .keyboardRightArrow: return .right
+        default: return nil
+        }
     }
 
     private func updateAppearance(animated: Bool) {

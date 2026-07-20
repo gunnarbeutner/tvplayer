@@ -67,6 +67,23 @@ class GuideCache:
         newest_start = int(now + self.future_seconds)
         with self._lock:
             self._channels.update(fresh_channels)
+
+            # TVHeadend reassigns an event's id when its EPG grabber
+            # re-parses schedule data, even though the broadcast itself
+            # hasn't changed. Keying purely by event id then retains both
+            # the stale cached entry and its fresh replacement, and clients
+            # render two overlapping cards for one programme. Drop a cached
+            # event once this refresh already has a fresh event for the
+            # same broadcast slot under a different id.
+            fresh_broadcast_keys = {
+                self._broadcast_key(event) for event in fresh_events.values()
+            }
+            self._events = {
+                key: event
+                for key, event in self._events.items()
+                if key in fresh_events
+                or self._broadcast_key(event) not in fresh_broadcast_keys
+            }
             self._events.update(fresh_events)
             self._events = {
                 key: event
@@ -176,6 +193,16 @@ class GuideCache:
                 self._text(source.get("title")) or "untitled",
             ]
         )
+
+    def _broadcast_key(self, event: dict[str, Any]) -> str:
+        """Identifies the same broadcast slot independent of TVHeadend's
+        event id. Start times for the same broadcast have been observed to
+        drift by a few seconds between grabber runs, so this rounds to the
+        nearest minute."""
+        rounded_start = round(event.get("start", 0) / 60) * 60
+        channel = event.get("channelUuid") or "unknown"
+        title = (event.get("title") or "").strip().casefold()
+        return f"{channel}|{title}|{rounded_start}"
 
     @staticmethod
     def _text(value: Any) -> str | None:
