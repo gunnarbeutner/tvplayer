@@ -26,6 +26,15 @@ extension View {
 #endif
     }
 
+    @ViewBuilder
+    func televisionDefaultFocus(_ preferred: Bool, in namespace: Namespace.ID) -> some View {
+#if os(tvOS)
+        prefersDefaultFocus(preferred, in: namespace)
+#else
+        self
+#endif
+    }
+
     /// Programme and recording details are full-screen on television and use
     /// the platform's normal resizable sheet presentation elsewhere.
     @ViewBuilder

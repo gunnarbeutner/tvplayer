@@ -124,6 +124,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     @Published private(set) var activeProfile = "pass"
     @Published private(set) var activeLivePlaybackMode: ActiveLivePlaybackMode?
     @Published private(set) var livePlaybackMarkerDate: Date?
+    @Published private(set) var isPlaybackOutputConcealed = false
 
     let mediaPlayer: VLCMediaPlayer
 
@@ -135,6 +136,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     private var recoveryReason: PlaybackRecoveryReason?
     private var recoveryAttempt = 0
     private var outputHealthMonitor = PlaybackOutputHealthMonitor()
+    private var postSeekOutputGate = PostSeekPlaybackOutputGate()
+    private var shouldRestoreAudioAfterOutputGate = false
     private var navigationShouldResume = true
     private var pauseRequested = false
     private var livePlaybackPosition = LivePlaybackPositionTracker()
@@ -150,6 +153,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     }
 
     func prepare(_ request: LiveStreamRequest) async throws {
+        cancelPostSeekOutputGate()
         pipelineRecoveryTask?.cancel()
         pipelineRecoveryTask = nil
         pipelineRecoveryID = nil
@@ -247,6 +251,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
             from: playbackOutputCounters
         )
         publishLivePlaybackMarker()
+        beginPostSeekOutputConcealmentIfNeeded()
         _ = nativeTimeshiftActions?.perform(.play)
         mediaPlayer.play()
         if let recoveryReason {
@@ -268,6 +273,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
             navigationShouldResume = false
         }
         pauseRequested = true
+        suspendPostSeekOutputConcealment()
         mediaPlayer.rate = 1
         playbackRate = 1
         mediaPlayer.pause()
@@ -286,6 +292,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     }
 
     func stop() {
+        cancelPostSeekOutputGate()
         pipelineRecoveryTask?.cancel()
         pipelineRecoveryTask = nil
         pipelineRecoveryID = nil
@@ -421,7 +428,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
             if isLive { bufferStartedAt = nil }
             bufferedBytes = 0
         }
-        confirmPlaybackResumeIfOutputAdvanced(at: date)
+        let output = playbackOutputCounters
+        updatePostSeekOutputGate(with: output)
+        if !postSeekOutputGate.isConcealing {
+            confirmPlaybackResumeIfOutputAdvanced(output: output, at: date)
+        }
         publishLivePlaybackMarker(at: date)
         monitorPlaybackHealth(at: date)
 
@@ -576,6 +587,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
                 if case let .success(navigation) = result {
                     self.applyNavigationLanding(navigation)
                 } else if case let .failure(error) = result {
+                    self.cancelPostSeekOutputGate()
                     self.logger.error(
                         "Timeshift navigation failed: \(error.localizedDescription, privacy: .public)"
                     )
@@ -618,6 +630,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
             recoveryAttempt = attempt
             isSeekable = false
             mediaPlayer.pause()
+            cancelPostSeekOutputGate()
             outputHealthMonitor.restartGracePeriod(
                 output: playbackOutputCounters,
                 at: Date()
@@ -689,6 +702,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         recoveryReason = .player
         recoveryAttempt = 1
         setState(.recovering(.player, attempt: 1))
+        cancelPostSeekOutputGate()
 
         let recoveryID = UUID()
         pipelineRecoveryID = recoveryID
@@ -810,6 +824,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         )
         mediaPlayer.rate = 1
         playbackRate = 1
+        beginPostSeekOutputConcealmentIfNeeded()
         mediaPlayer.play()
         setState(waitsForPlaybackProgress ? .preparing : (hasStartedPlayback ? .playing : .preparing))
         lastMetricsUpdate = Date()
@@ -834,15 +849,54 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         return PlaybackOutputCounters(
             displayedPictures: Int(statistics?.displayedPictures ?? 0),
             playedAudioBuffers: Int(statistics?.playedAudioBuffers ?? 0),
+            demuxDiscontinuities: Int(statistics?.demuxDiscontinuity ?? 0),
             playbackTimeMilliseconds: mediaPlayer.time.intValue > 0
                 ? Int64(mediaPlayer.time.intValue)
                 : nil
         )
     }
 
-    private func confirmPlaybackResumeIfOutputAdvanced(at date: Date) {
+    private func beginPostSeekOutputConcealmentIfNeeded() {
+        guard postSeekOutputGate.beginConcealing(from: playbackOutputCounters) else { return }
+        guard !isPlaybackOutputConcealed else { return }
+
+        isPlaybackOutputConcealed = true
+        if let audio = mediaPlayer.audio, !audio.isMuted {
+            audio.isMuted = true
+            shouldRestoreAudioAfterOutputGate = true
+        }
+    }
+
+    private func updatePostSeekOutputGate(with output: PlaybackOutputCounters) {
+        guard postSeekOutputGate.observe(output) else { return }
+        revealPostSeekPlaybackOutput()
+        logger.info("Revealed VLC output after the post-seek discontinuity")
+    }
+
+    private func suspendPostSeekOutputConcealment() {
+        guard postSeekOutputGate.suspendConcealing() else { return }
+        revealPostSeekPlaybackOutput()
+    }
+
+    private func cancelPostSeekOutputGate() {
+        postSeekOutputGate.cancel()
+        revealPostSeekPlaybackOutput()
+    }
+
+    private func revealPostSeekPlaybackOutput() {
+        if isPlaybackOutputConcealed { isPlaybackOutputConcealed = false }
+        if shouldRestoreAudioAfterOutputGate {
+            mediaPlayer.audio?.isMuted = false
+            shouldRestoreAudioAfterOutputGate = false
+        }
+    }
+
+    private func confirmPlaybackResumeIfOutputAdvanced(
+        output: PlaybackOutputCounters,
+        at date: Date
+    ) {
         guard livePlaybackPosition.observePlaybackOutput(
-            playbackOutputCounters,
+            output,
             at: date
         ) else { return }
         hasStartedPlayback = true
@@ -873,6 +927,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         case .none:
             break
         case .pause:
+            suspendPostSeekOutputConcealment()
             anchorLivePlaybackPositionIfNeeded()
             publishLivePlaybackMarker()
             pauseRequested = true
@@ -883,6 +938,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         case .resume:
             resumeLocalPlaybackAfterTimeshiftNavigation()
         case .pauseUntilNavigationCompletes:
+            cancelPostSeekOutputGate()
+            postSeekOutputGate.arm(from: playbackOutputCounters)
             anchorLivePlaybackPositionIfNeeded()
             publishLivePlaybackMarker()
             pauseRequested = true

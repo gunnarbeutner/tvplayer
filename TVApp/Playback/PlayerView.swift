@@ -46,6 +46,13 @@ struct PlaybackView: View {
                 Color.clear.ignoresSafeArea()
             }
 
+            if engine.isPlaybackOutputConcealed {
+                Color.black
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+
             if chromeMode == .hidden {
                 Color.clear
                     .contentShape(Rectangle())

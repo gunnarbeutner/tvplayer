@@ -12,6 +12,9 @@ struct GuideView: View {
     @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var playback: PlaybackCoordinator
     @EnvironmentObject private var recordings: RecordingStore
+#if os(tvOS)
+    @Environment(\.resetFocus) private var resetFocus
+#endif
     @Namespace private var guideFocusScope
     @State private var focusedProgramID: GuideProgram.ID?
     @State private var recenterRequest = UUID()
@@ -110,6 +113,7 @@ struct GuideView: View {
                                 onPlay: play,
                                 onReady: { hasRenderedGuide = true }
                             )
+                            .televisionDefaultFocus(true, in: guideFocusScope)
                         }
                     }
 
@@ -251,6 +255,14 @@ struct GuideView: View {
             // focused, so the binding may not change. Force the grid to
             // re-request UIKit focus regardless.
             focusRestoreRequest = UUID()
+#if os(tvOS)
+            // Re-enabling the underlying TabView can otherwise let its tab bar
+            // win the first focus update before the guide is ready. Reset the
+            // guide's scope after the representable has received this request.
+            await Task.yield()
+            guard isSelected else { return }
+            resetFocus(in: guideFocusScope)
+#endif
         }
     }
 }

@@ -798,6 +798,18 @@ final class TimeshiftActionTests: XCTestCase {
         XCTAssertNil(speed.observeActual(100))
     }
 
+    func testSuccessfulPauseCommandReleasesQueuedResumeWithoutSpeedNotification() {
+        var speed = HTSPSubscriptionSpeedController()
+
+        XCTAssertEqual(speed.request(0), 0)
+        XCTAssertNil(speed.request(100))
+        XCTAssertEqual(speed.commandSucceeded(0), 100)
+        XCTAssertNil(speed.commandSucceeded(0))
+        XCTAssertNil(speed.commandSucceeded(100))
+        XCTAssertEqual(speed.actualSpeed, 100)
+        XCTAssertNil(speed.outstandingSpeed)
+    }
+
     func testNormalStartupDoesNotQueueALatePause() {
         var speed = HTSPSubscriptionSpeedController()
 
@@ -868,6 +880,76 @@ final class TimeshiftActionTests: XCTestCase {
         XCTAssertEqual(speed.commandFailed(400), 100)
         XCTAssertEqual(speed.desiredSpeed, 100)
         XCTAssertEqual(speed.outstandingSpeed, 100)
+    }
+
+    func testPostSeekOutputGateRejectsQueuedOutputUntilFreshOutputFollowsDiscontinuity() {
+        var gate = PostSeekPlaybackOutputGate()
+        let beforeSeek = PlaybackOutputCounters(
+            displayedPictures: 20,
+            playedAudioBuffers: 30,
+            demuxDiscontinuities: 4
+        )
+        gate.arm(from: beforeSeek)
+        XCTAssertTrue(gate.beginConcealing(from: beforeSeek))
+
+        XCTAssertFalse(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 21,
+                    playedAudioBuffers: 31,
+                    demuxDiscontinuities: 4
+                )
+            )
+        )
+        XCTAssertTrue(gate.isConcealing)
+
+        XCTAssertFalse(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 21,
+                    playedAudioBuffers: 31,
+                    demuxDiscontinuities: 5
+                )
+            )
+        )
+        XCTAssertTrue(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 22,
+                    playedAudioBuffers: 32,
+                    demuxDiscontinuities: 5
+                )
+            )
+        )
+        XCTAssertFalse(gate.isArmed)
+        XCTAssertFalse(gate.isConcealing)
+    }
+
+    func testPostSeekOutputGateHandlesDiscontinuityConsumedWhilePaused() {
+        var gate = PostSeekPlaybackOutputGate()
+        let beforeSeek = PlaybackOutputCounters(
+            displayedPictures: 20,
+            playedAudioBuffers: 30,
+            demuxDiscontinuities: 4
+        )
+        let bufferedWhilePaused = PlaybackOutputCounters(
+            displayedPictures: 20,
+            playedAudioBuffers: 30,
+            demuxDiscontinuities: 5
+        )
+        gate.arm(from: beforeSeek)
+
+        XCTAssertFalse(gate.observe(bufferedWhilePaused))
+        XCTAssertTrue(gate.beginConcealing(from: bufferedWhilePaused))
+        XCTAssertTrue(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 21,
+                    playedAudioBuffers: 31,
+                    demuxDiscontinuities: 5
+                )
+            )
+        )
     }
 
     func testPostSeekBufferWaitsForVideoKeyframeAndOneSecondOfMedia() {

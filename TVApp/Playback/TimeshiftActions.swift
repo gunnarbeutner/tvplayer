@@ -154,21 +154,103 @@ enum PlaybackCapabilityPolicy {
 struct PlaybackOutputCounters: Equatable {
     let displayedPictures: Int
     let playedAudioBuffers: Int
+    let demuxDiscontinuities: Int
     let playbackTimeMilliseconds: Int64?
 
     init(
         displayedPictures: Int,
         playedAudioBuffers: Int,
+        demuxDiscontinuities: Int = 0,
         playbackTimeMilliseconds: Int64? = nil
     ) {
         self.displayedPictures = displayedPictures
         self.playedAudioBuffers = playedAudioBuffers
+        self.demuxDiscontinuities = demuxDiscontinuities
         self.playbackTimeMilliseconds = playbackTimeMilliseconds
     }
 
     func hasAdvanced(since previous: PlaybackOutputCounters) -> Bool {
         displayedPictures > previous.displayedPictures
             || playedAudioBuffers > previous.playedAudioBuffers
+    }
+}
+
+/// Keeps post-seek output hidden until VLC has consumed the transport-stream
+/// discontinuity and presented media decoded after it. VLC can retain decoded
+/// pictures and audio while paused; those samples must not become visible when
+/// playback is resumed after moving within the timeshift buffer.
+struct PostSeekPlaybackOutputGate {
+    private(set) var isArmed = false
+    private(set) var isConcealing = false
+    private var baselineDiscontinuities = 0
+    private var outputAfterDiscontinuity: PlaybackOutputCounters?
+
+    mutating func arm(from output: PlaybackOutputCounters) {
+        isArmed = true
+        isConcealing = false
+        baselineDiscontinuities = output.demuxDiscontinuities
+        outputAfterDiscontinuity = nil
+    }
+
+    @discardableResult
+    mutating func beginConcealing(from output: PlaybackOutputCounters) -> Bool {
+        guard isArmed else { return false }
+        isConcealing = true
+        if hasObservedDiscontinuity(in: output) {
+            // The demuxer may consume the marker while VLC is paused. In that
+            // case presentation still needs to advance after playback starts.
+            outputAfterDiscontinuity = output
+        }
+        return true
+    }
+
+    /// Returns true once output can safely be revealed.
+    mutating func observe(_ output: PlaybackOutputCounters) -> Bool {
+        guard isArmed else { return false }
+
+        if output.demuxDiscontinuities < baselineDiscontinuities {
+            // VLC statistics restart if the media pipeline is recreated.
+            baselineDiscontinuities = 0
+            outputAfterDiscontinuity = nil
+        }
+        guard hasObservedDiscontinuity(in: output) else { return false }
+
+        guard let outputAfterDiscontinuity else {
+            self.outputAfterDiscontinuity = output
+            return false
+        }
+        guard isConcealing,
+              output.hasAdvanced(since: outputAfterDiscontinuity)
+        else { return false }
+
+        reset()
+        return true
+    }
+
+    @discardableResult
+    mutating func suspendConcealing() -> Bool {
+        let wasConcealing = isConcealing
+        isConcealing = false
+        outputAfterDiscontinuity = nil
+        return wasConcealing
+    }
+
+    @discardableResult
+    mutating func cancel() -> Bool {
+        let wasConcealing = isConcealing
+        reset()
+        return wasConcealing
+    }
+
+    private func hasObservedDiscontinuity(in output: PlaybackOutputCounters) -> Bool {
+        output.demuxDiscontinuities > baselineDiscontinuities
+    }
+
+    private mutating func reset() {
+        isArmed = false
+        isConcealing = false
+        baselineDiscontinuities = 0
+        outputAfterDiscontinuity = nil
     }
 }
 
@@ -621,6 +703,13 @@ struct HTSPSubscriptionSpeedController {
     mutating func observeActual(_ speed: Int32) -> Int32? {
         actualSpeed = speed
         if outstandingSpeed == speed { outstandingSpeed = nil }
+        return nextCommandIfReady()
+    }
+
+    mutating func commandSucceeded(_ speed: Int32) -> Int32? {
+        guard outstandingSpeed == speed else { return nil }
+        actualSpeed = speed
+        outstandingSpeed = nil
         return nextCommandIfReady()
     }
 

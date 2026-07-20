@@ -240,6 +240,43 @@ final class HTSPTimeshiftTests: XCTestCase {
         stream.close()
     }
 
+    func testPauseRPCAcknowledgementReleasesResumeWithoutSpeedNotification() async throws {
+        let connection = ScriptedHTSPConnection(
+            streams: [
+                HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil),
+            ],
+            reads: [
+                .message(["seq": .int(1)]),
+                .message(["seq": .int(2)]),
+            ]
+        )
+        let configuration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://tvheadend.local:9981"),
+            username: "viewer",
+            password: "secret",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil
+        )
+        let stream = try await HTSPLiveInputStream.connect(
+            configuration: configuration,
+            channelID: 42,
+            profile: "pass",
+            connectionFactory: { connection }
+        )
+
+        stream.pause()
+        stream.play()
+        stream.open()
+
+        for _ in 0..<100 where connection.requestedSpeeds != [0, 100] {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(connection.requestedSpeeds, [0, 100])
+        XCTAssertEqual(stream.healthSnapshot.desiredSpeed, 100)
+        stream.close()
+    }
+
     private func firstPacketHasDiscontinuity(pid: UInt16, in data: Data) -> Bool {
         for offset in stride(from: 0, to: data.count, by: 188) {
             guard offset + 188 <= data.count, data[offset] == 0x47 else { continue }

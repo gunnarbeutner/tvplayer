@@ -228,6 +228,12 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
     func play() {
         let canSend = condition.withLock {
+            if desiredPlaybackSpeed <= 0 {
+                // A long intentional pause must not count toward the packet
+                // stall timeout once delivery is requested again.
+                lastMuxPacketAt = nil
+                subscriptionReadyAt = Date()
+            }
             desiredPlaybackSpeed = 100
             return !recovering
         }
@@ -545,7 +551,16 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         sendControlRequest(
             method: "subscriptionSpeed",
             fields: ["speed": .int(Int64(speed))],
-            succeeded: {},
+            succeeded: { [weak self] in
+                guard let self else { return }
+                // Some TVHeadend versions acknowledge the RPC without also
+                // emitting a subscriptionSpeed notification. Treat the RPC
+                // success as authoritative so a queued resume is not left
+                // waiting forever behind the acknowledged pause.
+                if let command = self.speedController.commandSucceeded(speed) {
+                    self.sendSpeed(command)
+                }
+            },
             failed: { [weak self] error in
                 guard let self else { return }
                 if let command = self.speedController.commandFailed(speed) {
