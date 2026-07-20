@@ -494,14 +494,31 @@ private struct RecordingDetailView: View {
 
     @ViewBuilder
     private func actionButtons(_ recording: TVRecording) -> some View {
+#if os(tvOS)
+        HStack(spacing: 20) {
+            actionButtonContents(recording)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+#else
         LazyVGrid(
             columns: [GridItem(.adaptive(minimum: 170), spacing: 14, alignment: .leading)],
             alignment: .leading,
             spacing: 14
         ) {
+            actionButtonContents(recording)
+        }
+#endif
+    }
+
+    @ViewBuilder
+    private func actionButtonContents(_ recording: TVRecording) -> some View {
             if recording.isPlayable {
                 Button { play(recording) } label: {
-                    Label("Play from Beginning", systemImage: "play.fill")
+                    recordingActionLabel(
+                        "Play from Beginning",
+                        systemImage: "play.fill",
+                        minimumWidth: 270
+                    )
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(AppTheme.focused)
@@ -515,7 +532,11 @@ private struct RecordingDetailView: View {
                         configuration: settings.configuration
                     )
                 } label: {
-                    Label("Watch Live", systemImage: "dot.radiowaves.left.and.right")
+                    recordingActionLabel(
+                        "Watch Live",
+                        systemImage: "dot.radiowaves.left.and.right",
+                        minimumWidth: 220
+                    )
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(AppTheme.surfaceRaised)
@@ -532,17 +553,37 @@ private struct RecordingDetailView: View {
                 EmptyView()
             }
 
-            Button("Back", action: { dismiss() })
+            Button(action: { dismiss() }) {
+                recordingActionLabel(
+                    "Back",
+                    systemImage: "chevron.backward",
+                    minimumWidth: 150
+                )
+            }
                 .buttonStyle(.borderedProminent)
                 .tint(AppTheme.surfaceRaised)
                 .foregroundStyle(.white)
-        }
     }
 
     private func destructiveButton(_ title: String, image: String, action: ConfirmAction) -> some View {
-        Button { confirmAction = action } label: { Label(title, systemImage: image) }
+        Button { confirmAction = action } label: {
+            recordingActionLabel(title, systemImage: image, minimumWidth: 230)
+        }
             .buttonStyle(.borderedProminent)
             .tint(.red.opacity(0.8))
+    }
+
+    private func recordingActionLabel(
+        _ title: String,
+        systemImage: String,
+        minimumWidth: CGFloat
+    ) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.headline)
+            .lineLimit(1)
+#if os(tvOS)
+            .frame(minWidth: minimumWidth, minHeight: 64)
+#endif
     }
 
     private func play(_ recording: TVRecording) {

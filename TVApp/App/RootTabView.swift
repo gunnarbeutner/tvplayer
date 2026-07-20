@@ -99,7 +99,9 @@ struct RootTabView: View {
                 .zIndex(2)
 
             SectionFocusBridge(
-                isEnabled: allowsSectionNavigatorFocus && !playback.isPlayerPresented,
+                isEnabled: allowsSectionNavigatorFocus
+                    && !isSectionNavigatorFocused
+                    && !playback.isPlayerPresented,
                 onFocused: { navigationFocusRequest = selection }
             )
             .zIndex(3)
@@ -497,7 +499,7 @@ private struct TVSectionNavigator: View {
             Image(systemName: tab.systemImage)
                 .font(.system(size: 21, weight: .semibold))
             Text(tab.title)
-                .font(.headline.weight(.semibold))
+                .font(.system(size: 34, weight: .semibold))
                 .tracking(0.2)
                 .lineLimit(1)
         }

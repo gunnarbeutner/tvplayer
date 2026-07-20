@@ -24,7 +24,6 @@ struct PlaybackView: View {
     @State private var chromeMode: PlayerChromeMode = .timeline
     @State private var selectedTab: PlayerOverlayTab = .details
     @State private var chromeActivity = UUID()
-    @State private var automaticallyHiddenAt: Date?
     @State private var profiles: [TVHeadendStreamProfile] = []
     @State private var hasStartedCurrentPresentation = false
     @State private var isRefreshingGrowingRecording = false
@@ -139,7 +138,7 @@ struct PlaybackView: View {
                     selectProfile: { profile in
                         Task { await switchProfile(to: profile) }
                     },
-                    dismiss: { hideChrome(automatically: false) },
+                    dismiss: hideChrome,
                     noteActivity: noteActivity
                 )
                 Spacer()
@@ -252,7 +251,7 @@ struct PlaybackView: View {
             guard chromeMode == .timeline, engine.state == .playing else { return }
             try? await Task.sleep(for: .seconds(5))
             guard !Task.isCancelled, chromeMode == .timeline, engine.state == .playing else { return }
-            hideChrome(automatically: true)
+            hideChrome()
         }
         .onDisappear {
             // Back intentionally collapses live playback into the guide
@@ -297,11 +296,7 @@ struct PlaybackView: View {
         }
         .platformExitCommand {
             if chromeMode != .hidden {
-                hideChrome(automatically: false)
-            } else if let automaticallyHiddenAt,
-                      Date().timeIntervalSince(automaticallyHiddenAt) < 1.25 {
-                // Avoid treating a Back press immediately after auto-hide as a
-                // second action that leaves playback.
+                hideChrome()
             } else {
                 playback.leavePlayer()
             }
@@ -371,7 +366,6 @@ struct PlaybackView: View {
 
     private func showTimeline() {
         wakeSurfaceFocused = false
-        automaticallyHiddenAt = nil
         withAnimation(.easeOut(duration: 0.18)) { chromeMode = .timeline }
         noteActivity()
     }
@@ -385,7 +379,6 @@ struct PlaybackView: View {
 
     private func showPanel() {
         wakeSurfaceFocused = false
-        automaticallyHiddenAt = nil
         if chromeMode != .panel {
             selectedTab = .details
         }
@@ -393,9 +386,8 @@ struct PlaybackView: View {
         noteActivity()
     }
 
-    private func hideChrome(automatically: Bool) {
+    private func hideChrome() {
         withAnimation(.easeOut(duration: 0.2)) { chromeMode = .hidden }
-        automaticallyHiddenAt = automatically ? Date() : nil
         chromeActivity = UUID()
         Task { @MainActor in
             await Task.yield()

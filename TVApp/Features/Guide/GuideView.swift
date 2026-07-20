@@ -1054,19 +1054,26 @@ private struct ProgrammeArtworkView: View {
                 Color.clear
             } else {
                 ZStack {
+                    // Continue the ambient header colour through the reserved
+                    // artwork area while an image is loading (or unavailable).
+                    // This avoids exposing the black player layer at the point
+                    // where the shared header gradient becomes transparent.
+                    AppTheme.chrome
+
                     if let pausedPlayerFrame {
                         platformImage(pausedPlayerFrame)
                             .resizable()
                             .scaledToFill()
+                            .transition(.opacity)
                     } else if let artwork = displayedArtwork {
                         platformImage(artwork.image)
                             .resizable()
                             .scaledToFill()
-                    } else {
-                        Color.clear
+                            .transition(.opacity)
                     }
                 }
                 .mask { artworkMask }
+                .animation(.easeOut(duration: 0.24), value: artworkTransitionKey)
             }
         }
         .clipped()
@@ -1074,6 +1081,10 @@ private struct ProgrammeArtworkView: View {
         .task(id: ProgrammeArtworkLoadID(url: url, settingsRevision: settings.revision)) {
             await loadArtwork()
         }
+    }
+
+    private var artworkTransitionKey: String? {
+        displayedArtwork == nil ? nil : currentKey
     }
 
     private var artworkMask: some View {
