@@ -760,6 +760,10 @@ private final class GuideCollectionView: UICollectionView,
         self.onExitToNavigator = onExitToNavigator
         isGuideEnabled = isEnabled
 
+        if previousRequestedFocusedProgramID != focusedProgramID {
+            reconfigureVisibleProgrammeCells()
+        }
+
         if currentNow != now {
             currentNow = now
             guideLayout.now = now
@@ -1215,9 +1219,17 @@ private final class GuideCollectionView: UICollectionView,
     private func didFocus(programID: GuideProgram.ID) {
         focusedChannelID = nil
         focusedChannelReturnProgramID = nil
+        let previousProgramID = requestedFocusedProgramID
         requestedFocusedProgramID = programID
         pendingFocusProgramID = nil
         updateFocusAvailability()
+        if previousProgramID != programID {
+            // didFocus updates the collection's selection before SwiftUI
+            // publishes the same value back through the binding. Repaint now
+            // so the previous header programme does not retain its subtle
+            // selection border alongside the newly focused card.
+            reconfigureVisibleProgrammeCells()
+        }
         focusRetryTask?.cancel()
         focusRetryTask = nil
         if let navigationSignpostID {
@@ -1252,6 +1264,7 @@ private final class GuideCollectionView: UICollectionView,
             item: item,
             now: currentNow,
             recordingState: recordingState(item.program),
+            isHeaderSelection: item.id == requestedFocusedProgramID,
             isFocusAllowed: allowsFocus(on: item.id),
             leadingOcclusion: leadingOcclusion(for: item),
             onFocused: { [weak self] in self?.didFocus(programID: item.id) },
@@ -1418,6 +1431,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
     private var item: GuideGridSnapshot.Item?
     private var now = Date()
     private var recordingState: TVRecordingState?
+    private var isHeaderSelection = false
     private var leadingOcclusion: CGFloat = 0
     private var consumedDirectionalPressTypes: Set<Int> = []
     private var onFocused: () -> Void = {}
@@ -1466,6 +1480,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
         titleLabel.text = nil
         timeLabel.text = nil
         recordingImageView.image = nil
+        isHeaderSelection = false
         onFocused = {}
         onActivate = {}
         onPlay = {}
@@ -1477,6 +1492,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
         item: GuideGridSnapshot.Item,
         now: Date,
         recordingState: TVRecordingState?,
+        isHeaderSelection: Bool,
         isFocusAllowed: Bool,
         leadingOcclusion: CGFloat,
         onFocused: @escaping () -> Void,
@@ -1487,6 +1503,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
         self.item = item
         self.now = now
         self.recordingState = recordingState
+        self.isHeaderSelection = isHeaderSelection
         self.isFocusAllowed = isFocusAllowed
         self.leadingOcclusion = leadingOcclusion
         self.onFocused = onFocused
@@ -1621,10 +1638,20 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
             }
         }
         contentView.backgroundColor = background
-        contentView.layer.borderColor = UIColor(
-            isFocused ? AppTheme.focusBorder : Color.white.opacity(0.16)
-        ).cgColor
-        contentView.layer.borderWidth = isFocused ? 4 : 1
+        let borderColor: Color
+        let borderWidth: CGFloat
+        if isFocused {
+            borderColor = AppTheme.focusBorder
+            borderWidth = 4
+        } else if isHeaderSelection {
+            borderColor = AppTheme.accent.opacity(0.55)
+            borderWidth = 2
+        } else {
+            borderColor = Color.white.opacity(0.16)
+            borderWidth = 1
+        }
+        contentView.layer.borderColor = UIColor(borderColor).cgColor
+        contentView.layer.borderWidth = borderWidth
         timeLabel.textColor = isFocused ? .white : UIColor(AppTheme.secondaryText)
         switch recordingState {
         case .recording:
