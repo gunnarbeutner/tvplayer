@@ -3,6 +3,19 @@ import Foundation
 struct TVHeadendServerInfo: Decodable, Sendable {
     let name: String?
     let version: String?
+    let capabilities: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case name, capabilities
+        case version = "sw_version"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+        version = try container.decodeIfPresent(String.self, forKey: .version)
+        capabilities = try container.decodeIfPresent([String].self, forKey: .capabilities) ?? []
+    }
 }
 
 struct TVHeadendStreamProfile: Decodable, Sendable, Identifiable, Equatable {

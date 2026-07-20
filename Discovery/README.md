@@ -27,6 +27,7 @@ file accepts:
 - `TVPLAYER_TVH_USERNAME` (required)
 - `TVPLAYER_TVH_PASSWORD` (required)
 - `TVPLAYER_TVH_PROFILE` (default `pass`)
+- `TVPLAYER_TVH_HTSP_PORT` (default `9982`)
 - `TVPLAYER_GUIDE_PORT` (default `49382`)
 - `TVPLAYER_GUIDE_BIND` (default `0.0.0.0`)
 - `TVPLAYER_GUIDE_REFRESH_SECONDS` (default `60`, minimum `15`)

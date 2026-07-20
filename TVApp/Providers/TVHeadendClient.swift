@@ -142,8 +142,50 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
     }
 
     func serverVersion() async throws -> String {
-        let info: TVHeadendServerInfo = try await get(path: "/api/serverinfo")
+        let info = try await serverInfo()
         return [info.name, info.version].compactMap { $0 }.joined(separator: " ")
+    }
+
+    func serverInfo() async throws -> TVHeadendServerInfo {
+        try await get(path: "/api/serverinfo")
+    }
+
+    func livePlaybackRequest(
+        channelID: String,
+        profile: String? = nil,
+        networkCachingMilliseconds: Int = 1_500
+    ) async throws -> LiveStreamRequest {
+        let selectedProfile = profile ?? configuration.streamProfile
+        let url = try await canonicalLiveStreamURL(channelID: channelID, profile: selectedProfile)
+        let mode: LivePlaybackMode
+        if let info = try? await serverInfo(), info.capabilities.contains("timeshift") {
+            if let numericChannelID = Self.numericChannelID(from: url) {
+                mode = .nativeTimeshift(
+                    HTSPPlaybackConfiguration(
+                        configuration: configuration,
+                        channelID: numericChannelID
+                    )
+                )
+            } else {
+                mode = .liveOnly(reason: "TVHeadend did not provide an HTSP channel identifier")
+            }
+        } else {
+            mode = .liveOnly(reason: "Native timeshift is disabled on TVHeadend")
+        }
+        return LiveStreamRequest(
+            url: url,
+            networkCachingMilliseconds: networkCachingMilliseconds,
+            profile: selectedProfile,
+            kind: .live(mode)
+        )
+    }
+
+    static func numericChannelID(from url: URL) -> UInt32? {
+        let components = url.pathComponents
+        guard let marker = components.firstIndex(of: "channelid"),
+              components.indices.contains(marker + 1)
+        else { return nil }
+        return UInt32(components[marker + 1])
     }
 
     /// Loads artwork exposed by TVHeadend's protected `/imagecache` endpoint.

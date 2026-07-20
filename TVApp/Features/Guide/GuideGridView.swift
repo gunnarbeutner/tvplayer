@@ -187,6 +187,7 @@ struct GuideGridView: View {
     @State private var contentOffset: CGPoint = .zero
     @State private var scrollPosition = ScrollPosition(x: 0)
     @StateObject private var focusTargets = GuideFocusTargetRegistry()
+    @StateObject private var occlusion = GuideOcclusionCoordinator()
 
     private var contentWidth: CGFloat {
         GuideGridMetrics.channelWidth + timeline.width
@@ -209,16 +210,19 @@ struct GuideGridView: View {
         // A scoped preferred target overrides the focus engine's geometric
         // choice when moving down into the guide from the tab bar.
         .focusScope(focusScope)
-        .onScrollGeometryChange(for: CGPoint.self) { geometry in
+        .onScrollGeometryChange(for: CGRect.self) { geometry in
             // ScrollGeometry reports the leading resting position as the
             // negative safe-area inset on tvOS. Normalize it so zero always
             // means the true top-leading content edge.
-            CGPoint(
+            CGRect(
                 x: geometry.contentOffset.x + geometry.contentInsets.leading,
-                y: geometry.contentOffset.y + geometry.contentInsets.top
+                y: geometry.contentOffset.y + geometry.contentInsets.top,
+                width: geometry.containerSize.width,
+                height: geometry.containerSize.height
             )
-        } action: { _, newOffset in
-            contentOffset = newOffset
+        } action: { _, newGeometry in
+            contentOffset = newGeometry.origin
+            occlusion.update(offset: newGeometry.origin, viewportHeight: newGeometry.height)
         }
         .overlay(alignment: .topLeading) {
             // The grid itself owns scrolling while these headers remain outside
@@ -270,10 +274,10 @@ struct GuideGridView: View {
             channels: channels,
             timeline: timeline,
             now: now,
-            contentOffsetX: contentOffset.x,
             recordingsFingerprint: recordingsFingerprint,
             isFocusEnabled: isEnabled,
             focusTargets: focusTargets,
+            occlusion: occlusion,
             recordingState: recordingState,
             accessibilityLabel: { self.accessibilityLabel(for: $0, channel: $1) },
             onFocused: { focusedProgramID = $0 },
@@ -466,17 +470,18 @@ struct GuideGridView: View {
 /// The card grid is deliberately non-lazy so every focus target stays
 /// mounted, which makes it expensive to re-evaluate. Scroll offsets change on
 /// every animation frame, so this subtree opts into Equatable diffing keyed
-/// on the values the cards actually render: vertical scrolling and chrome
-/// offset churn skip the entire forest, and only horizontal movement (which
-/// feeds the occlusion insets) re-renders it.
+/// on the values the cards actually render and is fully independent of the
+/// scroll offset: scrolling on either axis skips the entire forest. The
+/// per-frame occlusion insets reach the few affected cards through
+/// `GuideOcclusionCoordinator` instead of view inputs.
 private struct GuideProgrammeRows: View, Equatable {
     let channels: [GuideChannel]
     let timeline: GuideTimeline
     let now: Date
-    let contentOffsetX: CGFloat
     let recordingsFingerprint: Int
     let isFocusEnabled: Bool
     let focusTargets: GuideFocusTargetRegistry
+    let occlusion: GuideOcclusionCoordinator
     let recordingState: (GuideProgram) -> TVRecordingState?
     let accessibilityLabel: (GuideProgram, GuideChannel) -> String
     let onFocused: (GuideProgram.ID) -> Void
@@ -486,8 +491,7 @@ private struct GuideProgrammeRows: View, Equatable {
     let shouldConsumeExternalFocus: (GuideProgram.ID, GuideGridNavigationDirection) -> Bool
 
     nonisolated static func == (lhs: GuideProgrammeRows, rhs: GuideProgrammeRows) -> Bool {
-        lhs.contentOffsetX == rhs.contentOffsetX
-            && lhs.isFocusEnabled == rhs.isFocusEnabled
+        lhs.isFocusEnabled == rhs.isFocusEnabled
             && lhs.now == rhs.now
             && lhs.recordingsFingerprint == rhs.recordingsFingerprint
             && lhs.timeline == rhs.timeline
@@ -514,7 +518,6 @@ private struct GuideProgrammeRows: View, Equatable {
                         let interval = DateInterval(start: visibleStart, end: visibleEnd)
                         let cardWidth = max(28, timeline.width(for: interval) - GuideGridMetrics.cardInset)
                         let programmeOffset = timeline.xOffset(for: visibleStart) + 2
-                        let leadingOcclusion = max(0, contentOffsetX - programmeOffset)
                         let focusFrame = GuideProgramFocusLayout.targetFrame(
                             cardWidth: cardWidth,
                             programmeOffset: programmeOffset,
@@ -527,10 +530,12 @@ private struct GuideProgrammeRows: View, Equatable {
                             program: program,
                             now: now,
                             recordingState: recordingState(program),
-                            leadingContentInset: leadingOcclusion,
+                            rowIndex: channelIndex,
+                            programmeOffset: programmeOffset,
                             cardWidth: cardWidth,
                             focusFrame: focusFrame,
                             registry: focusTargets,
+                            occlusion: occlusion,
                             accessibilityLabel: accessibilityLabel(program, channel),
                             onFocused: { onFocused(program.id) },
                             onActivate: { onActivate(program) },
@@ -562,10 +567,12 @@ private struct GuideProgrammeFocusCell: View {
     let program: GuideProgram
     let now: Date
     let recordingState: TVRecordingState?
-    let leadingContentInset: CGFloat
+    let rowIndex: Int
+    let programmeOffset: CGFloat
     let cardWidth: CGFloat
     let focusFrame: CGRect
     let registry: GuideFocusTargetRegistry
+    let occlusion: GuideOcclusionCoordinator
     let accessibilityLabel: String
     let onFocused: () -> Void
     let onActivate: () -> Void
@@ -574,6 +581,7 @@ private struct GuideProgrammeFocusCell: View {
     let shouldConsumeExternalFocus: (GuideGridNavigationDirection) -> Bool
 
     @State private var isFocused = false
+    @State private var leadingContentInset: CGFloat = 0
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -604,6 +612,96 @@ private struct GuideProgrammeFocusCell: View {
             .offset(x: focusFrame.minX)
         }
         .zIndex(isFocused ? 20 : 2)
+        .onAppear { registerOcclusion() }
+        .onDisappear { occlusion.unregister(id: program.id) }
+        .onChange(of: rowIndex) { _, _ in registerOcclusion() }
+        .onChange(of: programmeOffset) { _, _ in registerOcclusion() }
+        .onChange(of: cardWidth) { _, _ in registerOcclusion() }
+    }
+
+    private func registerOcclusion() {
+        occlusion.register(
+            id: program.id,
+            rowIndex: rowIndex,
+            leadingEdge: programmeOffset,
+            width: cardWidth
+        ) { inset in
+            leadingContentInset = inset
+        }
+    }
+}
+
+/// Delivers the channel-column occlusion inset to programme cards without
+/// routing the scroll offset through view inputs. The offset changes on every
+/// animation frame; passing it into `GuideProgrammeRows` would defeat its
+/// Equatable shield and re-evaluate the entire non-lazy forest per frame.
+/// Instead each card registers its extent here, the grid pushes the offset
+/// per frame, and only cards inside the vertical viewport whose clamped inset
+/// actually changed (those straddling the channel-column edge) receive a
+/// state update. Cards in off-screen rows catch up when scrolling makes their
+/// row visible.
+@MainActor
+private final class GuideOcclusionCoordinator: ObservableObject {
+    private final class Entry {
+        let rowIndex: Int
+        let leadingEdge: CGFloat
+        let width: CGFloat
+        let apply: (CGFloat) -> Void
+        var appliedInset: CGFloat?
+
+        init(
+            rowIndex: Int,
+            leadingEdge: CGFloat,
+            width: CGFloat,
+            apply: @escaping (CGFloat) -> Void
+        ) {
+            self.rowIndex = rowIndex
+            self.leadingEdge = leadingEdge
+            self.width = width
+            self.apply = apply
+        }
+    }
+
+    private var entries: [GuideProgram.ID: Entry] = [:]
+    private var offset: CGPoint = .zero
+    private var viewportHeight: CGFloat = .greatestFiniteMagnitude
+
+    func register(
+        id: GuideProgram.ID,
+        rowIndex: Int,
+        leadingEdge: CGFloat,
+        width: CGFloat,
+        apply: @escaping (CGFloat) -> Void
+    ) {
+        let entry = Entry(rowIndex: rowIndex, leadingEdge: leadingEdge, width: width, apply: apply)
+        entries[id] = entry
+        applyInset(to: entry)
+    }
+
+    func unregister(id: GuideProgram.ID) {
+        entries[id] = nil
+    }
+
+    func update(offset: CGPoint, viewportHeight: CGFloat) {
+        guard offset != self.offset || viewportHeight != self.viewportHeight else { return }
+        self.offset = offset
+        self.viewportHeight = viewportHeight
+        for entry in entries.values where isRowVisible(entry.rowIndex) {
+            applyInset(to: entry)
+        }
+    }
+
+    private func isRowVisible(_ rowIndex: Int) -> Bool {
+        let rowTop = GuideGridMetrics.headerHeight + CGFloat(rowIndex) * GuideGridMetrics.rowHeight
+        return rowTop + GuideGridMetrics.rowHeight > offset.y
+            && rowTop < offset.y + viewportHeight
+    }
+
+    private func applyInset(to entry: Entry) {
+        let inset = min(max(0, offset.x - entry.leadingEdge), entry.width)
+        guard inset != entry.appliedInset else { return }
+        entry.appliedInset = inset
+        entry.apply(inset)
     }
 }
 
@@ -916,14 +1014,18 @@ private final class GuideProgramFocusUIView: UIView {
 
 }
 
-private struct GuideTimelineHeaderBar: View, Equatable {
+/// The scroll offset changes every animation frame, so it must only feed the
+/// `.offset` transform in here. The marks themselves live in the
+/// offset-independent Equatable `GuideTimelineHeader` that per-frame updates
+/// skip; marks scrolled past the leading edge are culled by `.clipped()`.
+private struct GuideTimelineHeaderBar: View {
     let timeline: GuideTimeline
     let contentOffsetX: CGFloat
 
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
-                GuideTimelineHeader(timeline: timeline, contentOffset: contentOffsetX)
+                GuideTimelineHeader(timeline: timeline)
                     .frame(width: timeline.width, height: GuideGridMetrics.headerHeight)
                     .offset(
                         GuideGridChromeLayout.timelineContentOffset(
@@ -943,12 +1045,34 @@ private struct GuideTimelineHeaderBar: View, Equatable {
     }
 }
 
-private struct GuideChannelHeadersColumn: View, Equatable {
+/// The scroll offset changes every animation frame, so it must only feed the
+/// `.offset` transform out here. The header rows themselves live in an
+/// offset-independent Equatable subtree that per-frame updates skip entirely.
+private struct GuideChannelHeadersColumn: View {
     let channels: [GuideChannel]
     let contentOffsetY: CGFloat
 
     var body: some View {
-        LazyVStack(spacing: 0) {
+        GuideChannelHeadersList(channels: channels)
+            .offset(
+                GuideGridChromeLayout.channelHeadersOffset(
+                    for: CGPoint(x: 0, y: contentOffsetY)
+                )
+            )
+    }
+}
+
+private struct GuideChannelHeadersList: View, Equatable {
+    let channels: [GuideChannel]
+
+    nonisolated static func == (lhs: GuideChannelHeadersList, rhs: GuideChannelHeadersList) -> Bool {
+        lhs.channels == rhs.channels
+    }
+
+    var body: some View {
+        // Deliberately non-lazy: the whole column stays mounted, mirroring the
+        // programme grid, so scrolling never materializes rows mid-animation.
+        VStack(spacing: 0) {
             ForEach(channels) { channel in
                 GuideChannelHeader(channel: channel)
                     .frame(
@@ -960,32 +1084,21 @@ private struct GuideChannelHeadersColumn: View, Equatable {
             }
         }
         .frame(width: GuideGridMetrics.channelWidth, alignment: .topLeading)
-        .offset(
-            GuideGridChromeLayout.channelHeadersOffset(
-                for: CGPoint(x: 0, y: contentOffsetY)
-            )
-        )
     }
 }
 
-private struct GuideTimelineHeader: View {
+private struct GuideTimelineHeader: View, Equatable {
     let timeline: GuideTimeline
-    let contentOffset: CGFloat
 
-    private var visibleMarks: [Date] {
-        timeline.halfHourMarks.filter {
-            GuideGridChromeLayout.isTimelineMarkVisible(
-                markOffset: timeline.xOffset(for: $0),
-                contentOffset: contentOffset
-            )
-        }
+    nonisolated static func == (lhs: GuideTimelineHeader, rhs: GuideTimelineHeader) -> Bool {
+        lhs.timeline == rhs.timeline
     }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
             AppTheme.chrome
 
-            ForEach(visibleMarks, id: \.self) { mark in
+            ForEach(timeline.halfHourMarks, id: \.self) { mark in
                 VStack(alignment: .leading, spacing: 8) {
                     Text(mark.formatted(date: .omitted, time: .shortened))
                         .font(.headline.monospacedDigit().weight(.semibold))

@@ -31,43 +31,6 @@ final class GuideGridLayoutTests: XCTestCase {
         )
     }
 
-    func testPausedLiveDelayContinuesGrowingWhileIngestionContinues() {
-        let pauseDate = Date(timeIntervalSince1970: 10_000)
-
-        XCTAssertEqual(
-            LivePlaybackClock.delay(
-                accumulatedDelay: 12,
-                pauseBeganAt: pauseDate,
-                at: pauseDate.addingTimeInterval(18)
-            ),
-            30,
-            accuracy: 0.001
-        )
-    }
-
-    func testPausedProgrammeClockRemainsFixedAsWallClockAdvances() {
-        let pauseDate = Date(timeIntervalSince1970: 10_000)
-        let expectedPlaybackDate = pauseDate.addingTimeInterval(-12)
-
-        let initial = LivePlaybackClock.playbackDate(
-            at: pauseDate,
-            publishedDelay: 12,
-            accumulatedDelay: 12,
-            pauseBeganAt: pauseDate,
-            bufferStartedAt: pauseDate.addingTimeInterval(-60)
-        )
-        let later = LivePlaybackClock.playbackDate(
-            at: pauseDate.addingTimeInterval(18),
-            publishedDelay: 30,
-            accumulatedDelay: 12,
-            pauseBeganAt: pauseDate,
-            bufferStartedAt: pauseDate.addingTimeInterval(-60)
-        )
-
-        XCTAssertEqual(initial, expectedPlaybackDate)
-        XCTAssertEqual(later, expectedPlaybackDate)
-    }
-
     func testPlaybackFocusRestoresThePlayingChannelAndCurrentProgramme() throws {
         let now = Date(timeIntervalSince1970: 10_000)
         let firstChannel = channel(

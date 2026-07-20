@@ -5,8 +5,27 @@ struct TVHeadendConfiguration: Equatable, Sendable {
     let username: String
     let password: String
     let streamProfile: String
+    let htspPort: Int
     let guideCacheURL: URL?
     let xmltvURL: URL?
+
+    init(
+        baseURL: URL?,
+        username: String,
+        password: String,
+        streamProfile: String,
+        htspPort: Int = 9982,
+        guideCacheURL: URL?,
+        xmltvURL: URL?
+    ) {
+        self.baseURL = baseURL
+        self.username = username
+        self.password = password
+        self.streamProfile = streamProfile
+        self.htspPort = htspPort
+        self.guideCacheURL = guideCacheURL
+        self.xmltvURL = xmltvURL
+    }
 
     var isComplete: Bool {
         baseURL != nil && !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !password.isEmpty
@@ -26,6 +45,7 @@ struct TVHeadendConfiguration: Equatable, Sendable {
 
 enum ConfigurationError: LocalizedError {
     case invalidServerURL
+    case invalidHTSPPort
     case invalidGuideCacheURL
     case invalidXMLTVURL
     case keychain(String)
@@ -34,6 +54,8 @@ enum ConfigurationError: LocalizedError {
         switch self {
         case .invalidServerURL:
             return "Enter a valid HTTP or HTTPS TVHeadend URL."
+        case .invalidHTSPPort:
+            return "The HTSP port must be a number between 1 and 65535."
         case .invalidGuideCacheURL:
             return "The guide cache must be a valid HTTP or HTTPS URL."
         case .invalidXMLTVURL:

@@ -7,6 +7,7 @@ struct DiscoveredTVHeadendSettings: Equatable {
     let username: String
     let password: String
     let streamProfile: String
+    let htspPort: Int
     let guideCacheURL: URL?
     let xmltvURL: URL?
 
@@ -34,6 +35,13 @@ struct DiscoveredTVHeadendSettings: Equatable {
         else { return nil }
 
         let profile = value("profile") ?? "pass"
+        let htspPort: Int
+        if let portText = value("htsp_port") {
+            guard let parsedPort = Int(portText), (1...65_535).contains(parsedPort) else { return nil }
+            htspPort = parsedPort
+        } else {
+            htspPort = 9982
+        }
         let guideText = value("guide") ?? ""
         let guideCacheURL = guideText.isEmpty ? nil : Self.httpURL(from: guideText)
         if !guideText.isEmpty, guideCacheURL == nil { return nil }
@@ -45,6 +53,7 @@ struct DiscoveredTVHeadendSettings: Equatable {
         self.username = username
         self.password = password
         streamProfile = profile.isEmpty ? "pass" : profile
+        self.htspPort = htspPort
         self.guideCacheURL = guideCacheURL
         self.xmltvURL = xmltvURL
     }

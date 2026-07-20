@@ -97,6 +97,7 @@ def main() -> int:
         username = required("TVPLAYER_TVH_USERNAME").strip()
         password = required("TVPLAYER_TVH_PASSWORD")
         profile = os.environ.get("TVPLAYER_TVH_PROFILE", "pass").strip() or "pass"
+        htsp_port = integer_setting("TVPLAYER_TVH_HTSP_PORT", 9982, 1, 65535)
         instance = os.environ.get("TVPLAYER_MDNS_NAME", "TVPlayer TVHeadend").strip()
         guide_port = integer_setting("TVPLAYER_GUIDE_PORT", 49382, 1, 65535)
         guide_refresh = integer_setting("TVPLAYER_GUIDE_REFRESH_SECONDS", 60, 15, 3600)
@@ -151,6 +152,7 @@ def main() -> int:
             "username": txt_property("username", username),
             "password": txt_property("password", password),
             "profile": txt_property("profile", profile),
+            "htsp_port": txt_property("htsp_port", str(htsp_port)),
             "guide": txt_property("guide", guide),
         }
 

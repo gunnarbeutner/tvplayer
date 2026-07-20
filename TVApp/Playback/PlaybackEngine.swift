@@ -23,7 +23,7 @@ struct LiveStreamRequest: Equatable {
         url: URL,
         networkCachingMilliseconds: Int,
         profile: String,
-        kind: PlaybackRequestKind = .live,
+        kind: PlaybackRequestKind = .live(.liveOnly(reason: nil)),
         expectedDurationSeconds: TimeInterval? = nil
     ) {
         self.url = url
@@ -35,13 +35,28 @@ struct LiveStreamRequest: Equatable {
 }
 
 enum PlaybackRequestKind: Equatable {
-    case live
+    case live(LivePlaybackMode)
     case recording(isGrowing: Bool)
 
     var isLive: Bool {
         if case .live = self { return true }
         return false
     }
+}
+
+struct HTSPPlaybackConfiguration: Equatable, Sendable {
+    let configuration: TVHeadendConfiguration
+    let channelID: UInt32
+}
+
+enum LivePlaybackMode: Equatable, Sendable {
+    case nativeTimeshift(HTSPPlaybackConfiguration)
+    case liveOnly(reason: String?)
+}
+
+enum ActiveLivePlaybackMode: Equatable, Sendable {
+    case tvHeadend
+    case liveOnly(reason: String?)
 }
 
 struct PlaybackTrack: Identifiable, Equatable {
@@ -54,33 +69,6 @@ struct PlaybackTechnicalDetail: Identifiable, Equatable {
     let value: String
 
     var id: String { label }
-}
-
-enum LivePlaybackClock {
-    static func delay(
-        accumulatedDelay: TimeInterval,
-        pauseBeganAt: Date?,
-        at date: Date
-    ) -> TimeInterval {
-        max(
-            0,
-            accumulatedDelay
-                + (pauseBeganAt.map { date.timeIntervalSince($0) } ?? 0)
-        )
-    }
-
-    static func playbackDate(
-        at date: Date,
-        publishedDelay: TimeInterval,
-        accumulatedDelay: TimeInterval,
-        pauseBeganAt: Date?,
-        bufferStartedAt: Date?
-    ) -> Date {
-        let candidate = pauseBeganAt.map {
-            $0.addingTimeInterval(-accumulatedDelay)
-        } ?? date.addingTimeInterval(-publishedDelay)
-        return max(candidate, bufferStartedAt ?? candidate)
-    }
 }
 
 @MainActor
@@ -114,31 +102,22 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     @Published private(set) var audioDelayMilliseconds = 0
     @Published private(set) var subtitleDelayMilliseconds = 0
     @Published private(set) var activeProfile = "pass"
+    @Published private(set) var activeLivePlaybackMode: ActiveLivePlaybackMode?
 
     let mediaPlayer: VLCMediaPlayer
 
-    private var liveInputStream: BufferedLiveInputStream?
+    private var nativeInputStream: HTSPLiveInputStream?
+    private var nativeTimeshiftActions: NativeTimeshiftActionController?
+    private var nativeTimeshiftSessionID: UUID?
     private var pauseRequested = false
-    private var pauseBeganAt: Date?
-    private var accumulatedLiveDelay: TimeInterval = 0
-    private var timeshiftBeganAt: Date?
-    private var catchUpRemaining: TimeInterval?
+    private var livePlaybackPosition = LivePlaybackPositionTracker()
     private var lastMetricsUpdate = Date()
     private var hasStartedPlayback = false
     private var didLogCapabilities = false
     private var activeRequest: LiveStreamRequest?
 
     override init() {
-        let timeshiftDirectory = FileManager.default.temporaryDirectory
-            .appending(path: "TVPlayerTimeshift", directoryHint: .isDirectory)
-        try? FileManager.default.createDirectory(
-            at: timeshiftDirectory,
-            withIntermediateDirectories: true
-        )
-        mediaPlayer = VLCMediaPlayer(options: [
-            "--input-timeshift-path=\(timeshiftDirectory.path)",
-            "--input-timeshift-granularity=10485760",
-        ])
+        mediaPlayer = VLCMediaPlayer()
         super.init()
         mediaPlayer.delegate = self
     }
@@ -148,20 +127,48 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         logger.info("Preparing stream from \(request.url.host ?? "unknown host", privacy: .public)")
 
         mediaPlayer.stop()
-        liveInputStream?.close()
-        liveInputStream = nil
+        nativeInputStream?.close()
+        nativeInputStream = nil
+        nativeTimeshiftActions = nil
+        nativeTimeshiftSessionID = nil
+        activeLivePlaybackMode = nil
 
         let media: VLCMedia
         switch request.kind {
-        case .live:
-            let stream = try BufferedLiveInputStream(sourceURL: request.url)
-            media = VLCMedia(stream: stream)
-            media.addOption(":demux=ts")
-            liveInputStream = stream
-            bufferStartedAt = stream.startedAt
+        case let .live(mode):
+            switch mode {
+            case let .nativeTimeshift(htsp):
+                do {
+                    let stream = try await HTSPLiveInputStream.connect(
+                        configuration: htsp.configuration,
+                        channelID: htsp.channelID,
+                        profile: request.profile
+                    )
+                    media = VLCMedia(stream: stream)
+                    media.addOption(":demux=ts")
+                    nativeInputStream = stream
+                    nativeTimeshiftActions = NativeTimeshiftActionController(sink: stream)
+                    let sessionID = UUID()
+                    nativeTimeshiftSessionID = sessionID
+                    stream.setNavigationCompletionHandler { [weak self] in
+                        Task { @MainActor [weak self] in
+                            guard let self, self.nativeTimeshiftSessionID == sessionID else { return }
+                            self.resumeLocalPlaybackAfterTimeshiftNavigation()
+                        }
+                    }
+                    activeLivePlaybackMode = .tvHeadend
+                    logger.info("Using TVHeadend native timeshift over HTSP")
+                } catch {
+                    logger.error("Native timeshift unavailable; using live-only HTTP: \(error.localizedDescription, privacy: .public)")
+                    media = VLCMedia(url: request.url)
+                    activeLivePlaybackMode = .liveOnly(reason: error.localizedDescription)
+                }
+            case let .liveOnly(reason):
+                media = VLCMedia(url: request.url)
+                activeLivePlaybackMode = .liveOnly(reason: reason)
+            }
         case .recording:
             media = VLCMedia(url: request.url)
-            bufferStartedAt = nil
         }
         media.addOption(":network-caching=\(request.networkCachingMilliseconds)")
         media.addOption(":live-caching=\(request.networkCachingMilliseconds)")
@@ -171,48 +178,65 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         activeProfile = request.profile
         mediaPlayer.media = media
         resetPlaybackMetrics()
+        if let nativeInputStream {
+            // A successful native subscription has already accepted a
+            // positive timeshift period. Expose its controls immediately;
+            // timeshiftStatus is informational and may arrive later.
+            isSeekable = true
+            canPause = true
+            bufferStartedAt = nativeInputStream.bufferStartedAt
+        }
         hasStartedPlayback = false
         didLogCapabilities = false
     }
 
     func beginBuffering() {
-        liveInputStream?.open()
+        // A paused native HTSP subscription continues buffering on TVHeadend.
     }
 
     func finishPrewarmingAtLiveEdge() {
-        liveInputStream?.moveToLiveEdge()
-        bufferStartedAt = Date()
+        nativeInputStream?.returnToLive()
     }
 
     func play() {
+        guard nativeInputStream?.isNavigatingTimeshift != true else {
+            logger.info("Playback remains paused until TVHeadend completes the timeshift seek")
+            pauseRequested = true
+            setState(.paused)
+            return
+        }
         let wasPaused = state == .paused
-        let retainedBytes = liveInputStream?.bufferedByteCount ?? 0
         if wasPaused {
-            logger.info("Resuming VLC with \(retainedBytes, privacy: .public) buffered bytes")
+            logger.info("Resuming VLC playback")
         } else {
             logger.info("Starting VLC playback")
         }
-        if let pauseBeganAt {
-            accumulatedLiveDelay += Date().timeIntervalSince(pauseBeganAt)
-            self.pauseBeganAt = nil
-        }
         pauseRequested = false
+        let waitsForPlaybackProgress = livePlaybackPosition.requestResume(
+            from: playbackOutputCounters
+        )
+        _ = nativeTimeshiftActions?.perform(.play)
         mediaPlayer.play()
-        setState(wasPaused ? .playing : .preparing)
+        setState(waitsForPlaybackProgress || !wasPaused ? .preparing : .playing)
         lastMetricsUpdate = Date()
     }
 
     func pause() {
-        pauseRequested = true
-        if activeRequest?.kind.isLive == true, pauseBeganAt == nil {
-            pauseBeganAt = Date()
-            timeshiftBeganAt = timeshiftBeganAt ?? pauseBeganAt
+        if activeRequest?.kind.isLive == true, nativeInputStream == nil {
+            logger.info("Pause ignored for a live-only HTTP stream")
+            return
         }
+        anchorLivePlaybackPositionIfNeeded()
+        pauseRequested = true
         mediaPlayer.rate = 1
         playbackRate = 1
-        catchUpRemaining = nil
         mediaPlayer.pause()
-        logger.info("Paused VLC; live ingestion remains active")
+        _ = nativeTimeshiftActions?.perform(.pause)
+        if nativeInputStream == nil {
+            logger.info("Paused VLC recording")
+        } else {
+            logger.info("Paused TVHeadend timeshift subscription")
+        }
         setState(.paused)
         refreshPlaybackInformation()
     }
@@ -220,8 +244,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     func stop() {
         mediaPlayer.stop()
         mediaPlayer.drawable = nil
-        liveInputStream?.close()
-        liveInputStream = nil
+        nativeInputStream?.close()
+        nativeInputStream = nil
+        nativeTimeshiftActions = nil
+        nativeTimeshiftSessionID = nil
+        activeLivePlaybackMode = nil
         activeRequest = nil
         resetPlaybackMetrics()
         setState(.idle)
@@ -236,21 +263,35 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     /// playback stopped, even if VLC subsequently reports a transient
     /// buffering/playing state while the upstream stream keeps downloading.
     func livePlaybackDate(at date: Date = Date()) -> Date {
-        LivePlaybackClock.playbackDate(
+        livePlaybackPosition.playbackDate(
             at: date,
-            publishedDelay: liveDelaySeconds,
-            accumulatedDelay: accumulatedLiveDelay,
-            pauseBeganAt: pauseBeganAt,
+            liveDelay: liveDelaySeconds,
             bufferStartedAt: bufferStartedAt
         )
+    }
+
+    var isLivePlaybackPositionAnchored: Bool {
+        livePlaybackPosition.hasAnchoredDate
     }
 
     /// Returns true when the caller should reconnect at the live edge.
     func skipForward(by seconds: TimeInterval) -> Bool {
         refreshPlaybackInformation()
 
-        if activeRequest?.kind.isLive == true, liveInputStream != nil {
-            seekLiveBuffer(toDelay: max(0, liveDelaySeconds - seconds))
+        if let nativeTimeshiftActions {
+            let navigationDate = Date()
+            nativeTimeshiftActions.perform(
+                .skipForward(seconds, liveDelay: liveDelaySeconds),
+                beforeServerCommands: { [self] effect in
+                    applyNativeTimeshiftLocalEffect(effect)
+                    guard effect == .pauseUntilNavigationCompletes else { return }
+                    livePlaybackPosition.moveAnchor(
+                        by: seconds,
+                        at: navigationDate,
+                        bufferStartedAt: bufferStartedAt
+                    )
+                }
+            )
             return false
         }
 
@@ -259,25 +300,25 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
             return false
         }
 
-        guard liveDelaySeconds > 0.75 else { return false }
-        if seconds >= liveDelaySeconds - 0.75 {
-            return true
-        }
-
-        if state == .paused {
-            play()
-        }
-        catchUpRemaining = min(seconds, liveDelaySeconds)
-        playbackRate = 4
-        mediaPlayer.rate = playbackRate
-        lastMetricsUpdate = Date()
         return false
     }
 
     func skipBackward(by seconds: TimeInterval) {
         refreshPlaybackInformation()
-        if activeRequest?.kind.isLive == true, liveInputStream != nil {
-            seekLiveBuffer(toDelay: liveDelaySeconds + seconds)
+        if let nativeTimeshiftActions {
+            let navigationDate = Date()
+            nativeTimeshiftActions.perform(
+                .skipBackward(seconds),
+                beforeServerCommands: { [self] effect in
+                    applyNativeTimeshiftLocalEffect(effect)
+                    guard effect == .pauseUntilNavigationCompletes else { return }
+                    livePlaybackPosition.moveAnchor(
+                        by: -seconds,
+                        at: navigationDate,
+                        bufferStartedAt: bufferStartedAt
+                    )
+                }
+            )
             return
         }
 
@@ -291,6 +332,19 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         let target = min(max(0, seconds), upperBound)
         mediaPlayer.time = VLCTime(number: NSNumber(value: target * 1_000))
         refreshPlaybackInformation()
+    }
+
+    func returnToLive() {
+        guard let nativeTimeshiftActions else { return }
+        let navigationDate = Date()
+        nativeTimeshiftActions.perform(
+            .returnToLive,
+            beforeServerCommands: { [self] effect in
+                applyNativeTimeshiftLocalEffect(effect)
+                guard effect == .pauseUntilNavigationCompletes else { return }
+                livePlaybackPosition.moveAnchorToLive(at: navigationDate)
+            }
+        )
     }
 
     func selectAudioTrack(_ id: Int) {
@@ -314,70 +368,38 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     }
 
     func refreshPlaybackInformation(at date: Date = Date()) {
-        let delta = max(0, date.timeIntervalSince(lastMetricsUpdate))
         lastMetricsUpdate = date
+        confirmPlaybackResumeIfOutputAdvanced()
 
         let isLive = activeRequest?.kind.isLive == true
-        let updatedLiveDelay: TimeInterval
-        if !isLive {
-            updatedLiveDelay = 0
-            accumulatedLiveDelay = 0
-            pauseBeganAt = nil
-            timeshiftBeganAt = nil
-        } else
-        if let pauseBeganAt {
-            updatedLiveDelay = LivePlaybackClock.delay(
-                accumulatedDelay: accumulatedLiveDelay,
-                pauseBeganAt: pauseBeganAt,
-                at: date
-            )
+        if let nativeInputStream {
+            let delay = nativeInputStream.liveDelaySeconds
+            let window = nativeInputStream.timeshiftWindowSeconds
+            if abs(delay - liveDelaySeconds) >= 0.2 { liveDelaySeconds = delay }
+            if abs(window - timeshiftWindowSeconds) >= 0.2 { timeshiftWindowSeconds = window }
+            bufferStartedAt = nativeInputStream.bufferStartedAt
+            bufferedBytes = nativeInputStream.queuedByteCount
         } else {
-            if playbackRate > 1, accumulatedLiveDelay > 0 {
-                let gained = delta * TimeInterval(playbackRate - 1)
-                accumulatedLiveDelay = max(0, accumulatedLiveDelay - gained)
-                if let catchUpRemaining {
-                    let remaining = catchUpRemaining - gained
-                    self.catchUpRemaining = remaining
-                    if remaining <= 0 || accumulatedLiveDelay <= 0.75 {
-                        finishCatchUp()
-                    }
-                }
-            }
-            updatedLiveDelay = accumulatedLiveDelay
+            if liveDelaySeconds != 0 { liveDelaySeconds = 0 }
+            if timeshiftWindowSeconds != 0 { timeshiftWindowSeconds = 0 }
+            if isLive { bufferStartedAt = nil }
+            bufferedBytes = 0
         }
 
-        if updatedLiveDelay <= 0.75, state == .playing {
-            accumulatedLiveDelay = 0
-            timeshiftBeganAt = nil
-        }
-        if let liveInputStream {
-            bufferStartedAt = liveInputStream.retainedStartDate
-            let retainedDuration = max(0, date.timeIntervalSince(liveInputStream.retainedStartDate))
-            if accumulatedLiveDelay > retainedDuration {
-                accumulatedLiveDelay = retainedDuration
-            }
-        }
-        let availableLiveDelay = min(
-            updatedLiveDelay,
-            bufferStartedAt.map { max(0, date.timeIntervalSince($0)) } ?? updatedLiveDelay
+        let updatedSeekable = PlaybackCapabilityPolicy.isSeekable(
+            isLive: isLive,
+            hasNativeTimeshift: nativeInputStream != nil,
+            mediaIsSeekable: mediaPlayer.isSeekable
         )
-        let normalizedLiveDelay = availableLiveDelay <= 0.75 ? 0 : availableLiveDelay
-        if abs(normalizedLiveDelay - liveDelaySeconds) >= 0.2 {
-            liveDelaySeconds = normalizedLiveDelay
-        }
-
-        let updatedWindow = timeshiftBeganAt.map { date.timeIntervalSince($0) } ?? 0
-        if abs(updatedWindow - timeshiftWindowSeconds) >= 0.2 {
-            timeshiftWindowSeconds = updatedWindow
-        }
-
-        let hasRetainedLiveBuffer = liveInputStream.map { $0.retainedByteCount > 188 } ?? false
-        let updatedSeekable = mediaPlayer.isSeekable || hasRetainedLiveBuffer
         if isSeekable != updatedSeekable { isSeekable = updatedSeekable }
-        let updatedCanPause = mediaPlayer.canPause
+        let updatedCanPause = PlaybackCapabilityPolicy.canPause(
+            isLive: isLive,
+            hasNativeTimeshift: nativeInputStream != nil,
+            mediaCanPause: mediaPlayer.canPause
+        )
         if canPause != updatedCanPause { canPause = updatedCanPause }
 
-        if updatedSeekable {
+        if updatedSeekable, !isLive {
             let updatedElapsed = max(0, TimeInterval(mediaPlayer.time.intValue) / 1_000)
             if abs(updatedElapsed - elapsedSeconds) >= 0.2 { elapsedSeconds = updatedElapsed }
 
@@ -390,7 +412,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
                 updatedDuration = mediaDuration ?? activeRequest?.expectedDurationSeconds
             }
             if durationSeconds != updatedDuration { durationSeconds = updatedDuration }
-        } else {
+        } else if !isLive {
             if elapsedSeconds != 0 { elapsedSeconds = 0 }
             if durationSeconds != nil { durationSeconds = nil }
         }
@@ -412,7 +434,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         for _ in 0..<100 {
             guard !Task.isCancelled else { return false }
 
-            if state == .playing || mediaPlayer.hasVideoOut || mediaPlayer.isPlaying {
+            if !livePlaybackPosition.isAwaitingPlaybackProgress,
+               state == .playing || mediaPlayer.hasVideoOut || mediaPlayer.isPlaying {
                 hasStartedPlayback = true
                 setState(.playing)
                 return true
@@ -444,15 +467,22 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         logger.info("VLC state changed: \(String(describing: playerState), privacy: .public)")
         switch playerState {
         case .opening, .buffering:
+            if pauseRequested {
+                setState(.paused)
+            } else if livePlaybackPosition.isAwaitingPlaybackProgress {
+                setState(.preparing)
+            } else {
+                setState(hasStartedPlayback || mediaPlayer.hasVideoOut ? .playing : .preparing)
+            }
+        case .playing, .esAdded:
+            hasStartedPlayback = true
             setState(
                 pauseRequested
                     ? .paused
-                    : (hasStartedPlayback || mediaPlayer.hasVideoOut ? .playing : .preparing)
+                    : (livePlaybackPosition.isAwaitingPlaybackProgress ? .preparing : .playing)
             )
-        case .playing, .esAdded:
-            hasStartedPlayback = true
-            setState(pauseRequested ? .paused : .playing)
         case .paused:
+            anchorLivePlaybackPositionIfNeeded()
             setState(.paused)
         case .error:
             let detail = VLCLibrary.currentErrorMessage
@@ -461,6 +491,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         case .stopped, .ended:
             hasStartedPlayback = false
             pauseRequested = false
+            livePlaybackPosition.reset()
             setState(.idle)
         default:
             break
@@ -471,6 +502,65 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     private func setState(_ updatedState: PlaybackState) {
         guard state != updatedState else { return }
         state = updatedState
+    }
+
+    private func resumeLocalPlaybackAfterTimeshiftNavigation() {
+        pauseRequested = false
+        let waitsForPlaybackProgress = livePlaybackPosition.requestResume(
+            from: playbackOutputCounters
+        )
+        mediaPlayer.rate = 1
+        playbackRate = 1
+        mediaPlayer.play()
+        setState(waitsForPlaybackProgress ? .preparing : (hasStartedPlayback ? .playing : .preparing))
+        lastMetricsUpdate = Date()
+    }
+
+    private var playbackOutputCounters: PlaybackOutputCounters {
+        let statistics = mediaPlayer.media?.statistics
+        return PlaybackOutputCounters(
+            displayedPictures: Int(statistics?.displayedPictures ?? 0),
+            playedAudioBuffers: Int(statistics?.playedAudioBuffers ?? 0)
+        )
+    }
+
+    private func confirmPlaybackResumeIfOutputAdvanced() {
+        guard livePlaybackPosition.observePlaybackOutput(playbackOutputCounters) else { return }
+        hasStartedPlayback = true
+        if !pauseRequested { setState(.playing) }
+    }
+
+    private func applyNativeTimeshiftLocalEffect(_ effect: NativeTimeshiftLocalPlaybackEffect) {
+        switch effect {
+        case .none:
+            break
+        case .pause:
+            anchorLivePlaybackPositionIfNeeded()
+            pauseRequested = true
+            mediaPlayer.rate = 1
+            playbackRate = 1
+            mediaPlayer.pause()
+            setState(.paused)
+        case .resume:
+            resumeLocalPlaybackAfterTimeshiftNavigation()
+        case .pauseUntilNavigationCompletes:
+            anchorLivePlaybackPositionIfNeeded()
+            pauseRequested = true
+            mediaPlayer.rate = 1
+            playbackRate = 1
+            mediaPlayer.pause()
+            setState(.paused)
+            lastMetricsUpdate = Date()
+        }
+    }
+
+    private func anchorLivePlaybackPositionIfNeeded(at date: Date = Date()) {
+        guard activeRequest?.kind.isLive == true else { return }
+        livePlaybackPosition.pause(
+            at: date,
+            liveDelay: liveDelaySeconds,
+            bufferStartedAt: bufferStartedAt
+        )
     }
 
     private func refreshTracks() {
@@ -495,16 +585,20 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
 
     private func refreshTechnicalDetails() {
         guard let media = mediaPlayer.media else { return }
-        bufferedBytes = liveInputStream?.retainedByteCount ?? 0
 
         let tracks = media.tracksInformation.compactMap { $0 as? [String: Any] }
         let video = tracks.first { ($0[VLCMediaTracksInformationType] as? String) == VLCMediaTracksInformationTypeVideo }
         let audio = tracks.first { ($0[VLCMediaTracksInformationType] as? String) == VLCMediaTracksInformationTypeAudio }
         let statistics = media.statistics
 
-        let delivery = activeRequest?.kind.isLive == true
-            ? "TVheadend · \(activeProfile)"
-            : "TVheadend recording"
+        let delivery: String
+        if activeRequest?.kind.isLive == true {
+            delivery = nativeInputStream == nil
+                ? "TVheadend HTTP · live only · \(activeProfile)"
+                : "TVheadend HTSP · timeshift · \(activeProfile)"
+        } else {
+            delivery = "TVheadend recording"
+        }
         var details = [
             PlaybackTechnicalDetail(label: "Delivery", value: delivery),
             PlaybackTechnicalDetail(label: "Container", value: "MPEG transport stream"),
@@ -530,11 +624,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
                 )
             )
         }
-        if activeRequest?.kind.isLive == true {
+        if nativeInputStream != nil {
             details.append(
                 PlaybackTechnicalDetail(
-                    label: "Live buffer",
-                    value: ByteCountFormatter.string(fromByteCount: bufferedBytes, countStyle: .file)
+                    label: "Timeshift window",
+                    value: Self.formatDuration(timeshiftWindowSeconds)
                 )
             )
         }
@@ -550,35 +644,6 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         return codec.isEmpty ? nil : codec
     }
 
-    private func finishCatchUp() {
-        mediaPlayer.rate = 1
-        playbackRate = 1
-        bufferStartedAt = nil
-        bufferedBytes = 0
-        technicalDetails = []
-        audioDelayMilliseconds = 0
-        subtitleDelayMilliseconds = 0
-        catchUpRemaining = nil
-    }
-
-    private func seekLiveBuffer(toDelay requestedDelay: TimeInterval, at date: Date = Date()) {
-        guard let liveInputStream else { return }
-        let requestedDate = date.addingTimeInterval(-max(0, requestedDelay))
-        guard let selectedDate = liveInputStream.seek(to: requestedDate) else { return }
-
-        let actualDelay = max(0, date.timeIntervalSince(selectedDate))
-        let currentPauseDuration = pauseBeganAt.map { max(0, date.timeIntervalSince($0)) } ?? 0
-        accumulatedLiveDelay = max(0, actualDelay - currentPauseDuration)
-        timeshiftBeganAt = actualDelay > 0.75 ? (bufferStartedAt ?? selectedDate) : nil
-        catchUpRemaining = nil
-        mediaPlayer.rate = 1
-        playbackRate = 1
-        refreshPlaybackInformation(at: date)
-        logger.info(
-            "Requested live delay \(requestedDelay, privacy: .public)s; buffer selected \(actualDelay, privacy: .public)s behind live"
-        )
-    }
-
     private func resetPlaybackMetrics() {
         elapsedSeconds = 0
         durationSeconds = nil
@@ -592,11 +657,20 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         timeshiftWindowSeconds = 0
         playbackRate = 1
         pauseRequested = false
-        pauseBeganAt = nil
-        accumulatedLiveDelay = 0
-        timeshiftBeganAt = nil
-        catchUpRemaining = nil
+        livePlaybackPosition.reset()
+        bufferStartedAt = nil
+        bufferedBytes = 0
         lastMetricsUpdate = Date()
+    }
+
+    private static func formatDuration(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        let hours = total / 3_600
+        let minutes = (total % 3_600) / 60
+        let remainder = total % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, remainder)
+            : String(format: "%d:%02d", minutes, remainder)
     }
 }
 

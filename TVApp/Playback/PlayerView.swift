@@ -26,6 +26,7 @@ struct PlaybackView: View {
     @State private var profiles: [TVHeadendStreamProfile] = []
     @State private var hasStartedCurrentPresentation = false
     @State private var isRefreshingGrowingRecording = false
+    @State private var nativeFailureFallbackAttempted = false
     @State private var videoAttachmentRevision = 0
     @FocusState private var wakeSurfaceFocused: Bool
 
@@ -74,11 +75,12 @@ struct PlaybackView: View {
                         ProgrammePlaybackTimeline(
                             channel: presentation.channel,
                             fallbackProgram: presentation.program,
-                            pausedPlaybackDate: engine.state == .paused
+                            pausedPlaybackDate: engine.isLivePlaybackPositionAnchored
                                 ? engine.livePlaybackDate()
                                 : nil,
                             liveDelaySeconds: engine.liveDelaySeconds,
                             bufferStartedAt: engine.bufferStartedAt,
+                            canPause: engine.canPause,
                             canSeek: engine.isSeekable,
                             seekBackward: { engine.skipBackward(by: $0); noteActivity() },
                             seekForward: { skipForward(by: $0) },
@@ -126,6 +128,7 @@ struct PlaybackView: View {
         }
         .task(id: presentation.id) {
             hasStartedCurrentPresentation = false
+            nativeFailureFallbackAttempted = false
             if engine.state == .idle {
                 await startPlayback(with: presentation.request)
             } else if engine.state == .paused || engine.state == .preparing {
@@ -217,6 +220,12 @@ struct PlaybackView: View {
                       Date() < recording.end.addingTimeInterval(120),
                       !isRefreshingGrowingRecording {
                 Task { await refreshGrowingRecording() }
+            } else if case .failed = state,
+                      !presentation.isRecording,
+                      engine.activeLivePlaybackMode == .tvHeadend,
+                      !nativeFailureFallbackAttempted {
+                nativeFailureFallbackAttempted = true
+                Task { await fallBackToLiveOnly() }
             } else {
                 showTimeline()
             }
@@ -315,16 +324,18 @@ struct PlaybackView: View {
 
     private func returnToLive() async {
         guard !presentation.isRecording else { return }
+        if engine.activeLivePlaybackMode == .tvHeadend {
+            engine.returnToLive()
+            return
+        }
         do {
-            let url = try await TVHeadendClient(configuration: settings.configuration)
-                .canonicalLiveStreamURL(channelID: presentation.channel.id, profile: engine.activeProfile)
-            await startPlayback(
-                with: LiveStreamRequest(
-                    url: url,
-                    networkCachingMilliseconds: presentation.request.networkCachingMilliseconds,
-                    profile: engine.activeProfile
+            let request = try await TVHeadendClient(configuration: settings.configuration)
+                .livePlaybackRequest(
+                    channelID: presentation.channel.id,
+                    profile: engine.activeProfile,
+                    networkCachingMilliseconds: presentation.request.networkCachingMilliseconds
                 )
-            )
+            await startPlayback(with: request)
         } catch {
             engine.reportFailure(error.localizedDescription)
         }
@@ -334,16 +345,31 @@ struct PlaybackView: View {
         guard !presentation.isRecording else { return }
         guard profile.name != engine.activeProfile else { return }
         do {
+            let request = try await TVHeadendClient(configuration: settings.configuration)
+                .livePlaybackRequest(
+                    channelID: presentation.channel.id,
+                    profile: profile.name,
+                    networkCachingMilliseconds: presentation.request.networkCachingMilliseconds
+                )
+            await startPlayback(with: request)
+            showPanel()
+        } catch {
+            engine.reportFailure(error.localizedDescription)
+        }
+    }
+
+    private func fallBackToLiveOnly() async {
+        do {
             let url = try await TVHeadendClient(configuration: settings.configuration)
-                .canonicalLiveStreamURL(channelID: presentation.channel.id, profile: profile.name)
+                .canonicalLiveStreamURL(channelID: presentation.channel.id, profile: engine.activeProfile)
             await startPlayback(
                 with: LiveStreamRequest(
                     url: url,
                     networkCachingMilliseconds: presentation.request.networkCachingMilliseconds,
-                    profile: profile.name
+                    profile: engine.activeProfile,
+                    kind: .live(.liveOnly(reason: "The native HTSP session failed"))
                 )
             )
-            showPanel()
         } catch {
             engine.reportFailure(error.localizedDescription)
         }
@@ -458,6 +484,7 @@ private struct ProgrammePlaybackTimeline: View {
     let pausedPlaybackDate: Date?
     let liveDelaySeconds: TimeInterval
     let bufferStartedAt: Date?
+    let canPause: Bool
     let canSeek: Bool
     let seekBackward: (TimeInterval) -> Void
     let seekForward: (TimeInterval) -> Void
@@ -537,7 +564,9 @@ private struct ProgrammePlaybackTimeline: View {
         .focusable()
         .focused($isFocused)
         .focusEffectDisabled()
-        .onTapGesture(perform: togglePlayback)
+        .onTapGesture {
+            if canPause { togglePlayback() }
+        }
         .onMoveCommand { direction in
             if direction == .down {
                 showPanel()
@@ -553,7 +582,7 @@ private struct ProgrammePlaybackTimeline: View {
         .accessibilityHint(
             canSeek
                 ? "Timeshift is available from \(bufferStartedAt.map(clock) ?? "the start of playback"). Swipe left or right to move 15 seconds"
-                : "Live playback"
+                : "Live playback without timeshift"
         )
     }
 

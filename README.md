@@ -18,13 +18,14 @@ The application bundle identifier is `de.beutner.TVPlayer`.
 - Delayed guide-shaped loading placeholders that progressively reveal channel names and logos on a cold load
 - Select opens programme details; Play/Pause starts the selected channel immediately
 - VLC-based live MPEG-TS playback using the `pass` stream profile by default
-- Continuous disk-backed live buffering for gap-free pause and resume
+- Native TVheadend timeshift over HTSP for live pause, resume, and seeking
+- Automatic ticketed-HTTP live-only fallback when HTSP timeshift is unavailable
 - A programme-aware timeline showing current/next titles, absolute times, the playhead, and the available time-shift range
 - Up opens the timeline; Down opens Details, Playback, and Technical tabs
 - Playback settings include TVheadend stream profiles, audio/subtitle streams, and timing adjustments
-- Technical playback details include codecs, resolution, bitrate, buffer size, dropped pictures, and discontinuities
+- Technical playback details include delivery mode, codecs, resolution, bitrate, timeshift window, dropped pictures, and discontinuities
 - Player controls hide after five seconds of inactivity; Back has a short guard after automatic hiding
-- Leaving playback pauses decoding, retains the time-shift buffer, and restores focus to the playing channel/current programme
+- Leaving native-timeshift playback pauses on TVheadend and restores focus to the playing channel/current programme
 - Opening programme details prewarms an otherwise-empty channel session and advances it to live when playback starts
 - Record Once and Record All actions in programme details, with scheduled/recording badges in the guide
 - Cached TVheadend DVR views for recordings in progress, upcoming, completed, failed, and Record All rules
@@ -34,14 +35,15 @@ The application bundle identifier is `de.beutner.TVPlayer`.
 - TVheadend password storage in the tvOS Keychain
 - First-run TVheadend configuration discovery over `_tvplayer._tcp` Bonjour/mDNS
 - An optional always-on discovery container that preserves native EPG metadata and publishes its JSON guide URL over mDNS
-- A connection indicator in Settings verifies the configured credentials
+- Connection and timeshift badges in Settings verify HTTP credentials and native HTSP availability
 
 ## Requirements
 
 - Xcode with the tvOS 26 SDK
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)
 - An accessible TVheadend server
-- A TVheadend account with Web Interface, streaming, Basic recorder, View All, Failed View, and—when managing recordings created by other users—Manage All permissions
+- A TVheadend account with Web Interface, HTSP streaming, Basic recorder, View All, Failed View, and—when managing recordings created by other users—Manage All permissions
+- TVheadend timeshift enabled on the server and its HTSP service reachable (port `9982` by default)
 
 TVVLCKit 3.7.3 is downloaded by the included installation script and kept under
 the git-ignored `.build` directory.
@@ -73,6 +75,7 @@ Open Settings in the app and enter:
 - Server URL, for example `http://tvheadend.local:9981`
 - Username and password
 - Stream profile, normally `pass`
+- HTSP port, normally `9982`
 - Optional rich guide-cache URL
 - Optional external XMLTV fallback URL
 
@@ -135,13 +138,18 @@ bash Scripts/probe-tvheadend.sh http://tvheadend.local:9981 username
 
 ## Live time-shift
 
-The current transport is TVheadend's ticketed HTTP MPEG-TS stream. TVPlayer
-keeps ingesting that stream into a rolling, 2 GiB temporary buffer while VLC is
-paused, so resume does not depend on VLC's HTTP access module retaining the
-connection. The temporary buffer is deleted when the channel session is
-replaced or the app terminates. Backwards seeking is offered when VLC reports
-the disk-backed input as seekable; TVheadend server-side rewind beyond the
-current app session would still require HTSP or a recording-backed transport.
+TVPlayer uses TVheadend's native HTSP timeshift as its only timeshift mode.
+Pause, relative seeking, the available rewind window, and returning to live are
+controlled by TVheadend, so storage limits and retention follow the server's
+timeshift configuration. The app does not maintain a second on-device
+timeshift file.
+
+Before selecting this mode, TVPlayer checks the server capability and opens an
+authenticated HTSP session. If timeshift is disabled, the HTSP service is
+unreachable, the account lacks HTSP streaming permission, or a native session
+fails, live playback continues through a fresh ticketed HTTP MPEG-TS URL with
+pause and seeking disabled. The Settings timeshift badge reports whether native
+TVheadend timeshift is ready, active, or unavailable.
 
 ## Recording playback
 

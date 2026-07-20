@@ -72,18 +72,14 @@ final class PlaybackCoordinator: ObservableObject {
         Task {
             do {
                 guard configuration.isComplete else { throw TVProviderError.incompleteConfiguration }
-                let url = try await TVHeadendClient(configuration: configuration)
-                    .canonicalLiveStreamURL(channelID: channel.id)
+                let request = try await TVHeadendClient(configuration: configuration)
+                    .livePlaybackRequest(channelID: channel.id)
                 engine.stop()
                 presentation = PlaybackPresentation(
                     channel: channel,
                     program: program,
                     recording: nil,
-                    request: LiveStreamRequest(
-                        url: url,
-                        networkCachingMilliseconds: 1_500,
-                        profile: configuration.streamProfile
-                    )
+                    request: request
                 )
                 navigationSelection = PlaybackNavigationSelection(
                     channelID: channel.id,
@@ -98,7 +94,11 @@ final class PlaybackCoordinator: ObservableObject {
     }
 
     func leavePlayer() {
-        engine.pause()
+        if case .liveOnly = engine.activeLivePlaybackMode {
+            engine.stop()
+        } else {
+            engine.pause()
+        }
         isPlayerPresented = false
     }
 
@@ -121,16 +121,16 @@ final class PlaybackCoordinator: ObservableObject {
             guard let self else { return }
             do {
                 guard configuration.isComplete else { return }
-                let url = try await TVHeadendClient(configuration: configuration)
-                    .canonicalLiveStreamURL(channelID: channel.id)
+                let request = try await TVHeadendClient(configuration: configuration)
+                    .livePlaybackRequest(channelID: channel.id)
                 guard !Task.isCancelled else { return }
 
+                guard case .live(.nativeTimeshift) = request.kind else {
+                    if prewarmedChannelID == channel.id { prewarmedChannelID = nil }
+                    return
+                }
+
                 engine.stop()
-                let request = LiveStreamRequest(
-                    url: url,
-                    networkCachingMilliseconds: 1_500,
-                    profile: configuration.streamProfile
-                )
                 presentation = PlaybackPresentation(
                     channel: channel,
                     program: program,
@@ -139,6 +139,12 @@ final class PlaybackCoordinator: ObservableObject {
                 )
                 try await engine.prepare(request)
                 guard !Task.isCancelled else { return }
+                guard engine.activeLivePlaybackMode == .tvHeadend else {
+                    engine.stop()
+                    presentation = nil
+                    if prewarmedChannelID == channel.id { prewarmedChannelID = nil }
+                    return
+                }
                 engine.beginBuffering()
                 prewarmedChannelID = channel.id
             } catch {

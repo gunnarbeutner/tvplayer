@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var settings: ServerSettingsStore
+    @EnvironmentObject private var playback: PlaybackCoordinator
     @State private var saveError: String?
 
     var body: some View {
@@ -27,7 +28,13 @@ struct SettingsView: View {
 
                         Spacer()
 
-                        ConnectionStatusView(status: settings.connectionStatus)
+                        VStack(alignment: .trailing, spacing: 10) {
+                            ConnectionStatusView(status: settings.connectionStatus)
+                            TimeshiftStatusView(
+                                status: settings.timeshiftStatus,
+                                engine: playback.engine
+                            )
+                        }
                     }
 
                     SettingsField(
@@ -47,11 +54,20 @@ struct SettingsView: View {
                         }
                     }
 
-                    SettingsField(
-                        title: "Stream profile",
-                        hint: "TVHeadend profile used for live streams. The default is pass."
-                    ) {
-                        TextField("pass", text: $settings.streamProfile)
+                    HStack(alignment: .top, spacing: 24) {
+                        SettingsField(
+                            title: "Stream profile",
+                            hint: "TVHeadend profile used for live streams. The default is pass."
+                        ) {
+                            TextField("pass", text: $settings.streamProfile)
+                        }
+
+                        SettingsField(
+                            title: "HTSP port",
+                            hint: "Native TVHeadend timeshift normally uses port 9982."
+                        ) {
+                            TextField("9982", text: $settings.htspPortText)
+                        }
                     }
 
                     SettingsField(
@@ -128,6 +144,63 @@ struct SettingsView: View {
             saveError = nil
             await settings.testConnection()
         }
+    }
+}
+
+private struct TimeshiftStatusView: View {
+    let status: TVHeadendTimeshiftStatus
+    @ObservedObject var engine: VLCPlaybackEngine
+
+    private var appearance: (String, String, Color, String) {
+        if let mode = engine.activeLivePlaybackMode {
+            switch mode {
+            case .tvHeadend:
+                return (
+                    "Timeshift · TVHeadend",
+                    "clock.arrow.circlepath",
+                    .green,
+                    "TVHeadend timeshift is active for the current live stream."
+                )
+            case let .liveOnly(reason):
+                return (
+                    "Timeshift · Unavailable",
+                    "clock.badge.exclamationmark",
+                    .orange,
+                    reason ?? "The current live stream has no timeshift support."
+                )
+            }
+        }
+
+        switch status {
+        case .notTested:
+            return ("Timeshift · Not tested", "questionmark.circle.fill", AppTheme.secondaryText, "Test the connection to check native timeshift.")
+        case .checking:
+            return ("Timeshift · Checking…", "arrow.triangle.2.circlepath", AppTheme.accent, "Checking TVHeadend's HTSP service.")
+        case .ready:
+            return ("Timeshift · TVHeadend", "clock.arrow.circlepath", .green, "Native timeshift will be used for live TV.")
+        case let .unavailable(reason):
+            return ("Timeshift · Unavailable", "clock.badge.exclamationmark", .orange, reason)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            Label(appearance.0, systemImage: appearance.1)
+                .font(.headline)
+                .foregroundStyle(appearance.2)
+                .lineLimit(1)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 11)
+                .background(AppTheme.surface, in: Capsule())
+            Text(appearance.3)
+                .font(.caption)
+                .foregroundStyle(AppTheme.secondaryText)
+                .multilineTextAlignment(.trailing)
+                .lineLimit(2)
+                .frame(maxWidth: 420, alignment: .trailing)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Timeshift: \(appearance.0). \(appearance.3)")
     }
 }
 
