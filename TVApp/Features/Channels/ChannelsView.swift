@@ -10,10 +10,12 @@ struct ChannelsView: View {
     @FocusState private var focusedChannelID: GuideChannel.ID?
     @State private var detail: ProgrammeDetailPresentation?
 
-    private let columns = Array(
-        repeating: GridItem(.flexible(minimum: 500), spacing: 30),
-        count: 3
-    )
+    private let columns = [
+        GridItem(
+            .adaptive(minimum: PlatformLayout.channelCardMinimumWidth),
+            spacing: PlatformLayout.gridSpacing
+        )
+    ]
 
     var body: some View {
         ZStack {
@@ -46,7 +48,14 @@ struct ChannelsView: View {
                                 ChannelCard(
                                     channel: channel,
                                     currentProgram: currentProgram(for: channel),
-                                    isFocused: focusedChannelID == channel.id
+                                    isFocused: focusedChannelID == channel.id,
+                                    onWatch: {
+                                        playback.start(
+                                            channel: channel,
+                                            program: currentProgram(for: channel),
+                                            configuration: settings.configuration
+                                        )
+                                    }
                                 )
                                 .contentShape(RoundedRectangle(cornerRadius: 14))
                                 .focusable()
@@ -68,15 +77,15 @@ struct ChannelsView: View {
                             }
                         }
                     }
-                    .padding(.horizontal, 72)
-                    .padding(.vertical, 34)
+                    .padding(.horizontal, PlatformLayout.contentPadding)
+                    .padding(.vertical, PlatformLayout.contentVerticalPadding)
                 }
             }
         }
-        .fullScreenCover(item: $detail) { presentation in
+        .platformDetailPresentation(item: $detail) { presentation in
             ProgrammeDetailView(presentation: presentation)
         }
-        .onPlayPauseCommand {
+        .televisionPlayPauseCommand {
             guard let channel = focusedChannel else { return }
             playback.start(
                 channel: channel,
@@ -126,6 +135,7 @@ private struct ChannelCard: View {
     let channel: GuideChannel
     let currentProgram: GuideProgram?
     let isFocused: Bool
+    let onWatch: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -151,9 +161,18 @@ private struct ChannelCard: View {
                 .lineLimit(4)
                 .minimumScaleFactor(0.72)
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+#if !os(tvOS)
+            Spacer(minLength: 0)
+            Button(action: onWatch) {
+                Label("Watch Live", systemImage: "play.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+#endif
         }
         .padding(24)
-        .frame(height: 280, alignment: .topLeading)
+        .frame(height: cardHeight, alignment: .topLeading)
         .background(isFocused ? AppTheme.focused : AppTheme.surface, in: RoundedRectangle(cornerRadius: 14))
         .overlay {
             RoundedRectangle(cornerRadius: 14)
@@ -162,5 +181,13 @@ private struct ChannelCard: View {
         .animation(.easeOut(duration: 0.14), value: isFocused)
         .accessibilityElement(children: .combine)
         .accessibilityHint("Select for details. Press Play to watch live.")
+    }
+
+    private var cardHeight: CGFloat {
+#if os(tvOS)
+        280
+#else
+        240
+#endif
     }
 }

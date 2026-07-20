@@ -1,6 +1,9 @@
 import SwiftUI
 
 struct SettingsView: View {
+#if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+#endif
     @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var playback: PlaybackCoordinator
     @State private var saveError: String?
@@ -11,7 +14,7 @@ struct SettingsView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 28) {
-                    HStack(alignment: .top) {
+                    adaptiveLayout {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("TVHEADEND")
                                 .font(.caption.bold())
@@ -21,7 +24,7 @@ struct SettingsView: View {
                             Text("Server settings")
                                 .font(.largeTitle.bold())
 
-                            Text("The password is stored in the Apple TV Keychain. Other settings use app preferences.")
+                            Text("The password is stored in this device's Keychain. Other settings use app preferences.")
                                 .font(.callout)
                                 .foregroundStyle(AppTheme.secondaryText)
                         }
@@ -44,7 +47,7 @@ struct SettingsView: View {
                         TextField("http://tvheadend.local:9981", text: $settings.baseURLText)
                     }
 
-                    HStack(alignment: .top, spacing: 24) {
+                    adaptiveLayout {
                         SettingsField(title: "Username", hint: "TVHeadend account") {
                             TextField("Username", text: $settings.username)
                         }
@@ -54,7 +57,7 @@ struct SettingsView: View {
                         }
                     }
 
-                    HStack(alignment: .top, spacing: 24) {
+                    adaptiveLayout {
                         SettingsField(
                             title: "Stream profile",
                             hint: "TVHeadend profile used for live streams. The default is pass."
@@ -117,8 +120,8 @@ struct SettingsView: View {
                         }
                     }
                 }
-                .padding(.horizontal, 90)
-                .padding(.vertical, 44)
+                .padding(.horizontal, PlatformLayout.contentPadding)
+                .padding(.vertical, PlatformLayout.contentVerticalPadding)
             }
         }
         .task {
@@ -127,6 +130,20 @@ struct SettingsView: View {
                 await settings.testConnection()
             }
         }
+    }
+
+    private var adaptiveLayout: AnyLayout {
+        usesVerticalLayout
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 18))
+            : AnyLayout(HStackLayout(alignment: .top, spacing: 24))
+    }
+
+    private var usesVerticalLayout: Bool {
+#if os(iOS)
+        horizontalSizeClass == .compact
+#else
+        false
+#endif
     }
 
     private func save() {

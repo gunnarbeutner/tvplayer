@@ -64,6 +64,7 @@ struct PlaybackView: View {
                         RecordingPlaybackTimeline(
                             recording: recording,
                             elapsedSeconds: engine.elapsedSeconds,
+                            isPlaying: engine.state == .playing,
                             canSeek: engine.isSeekable,
                             seekBackward: { engine.skipBackward(by: $0); noteActivity() },
                             seekForward: { skipForward(by: $0) },
@@ -81,6 +82,7 @@ struct PlaybackView: View {
                             bufferStartedAt: engine.bufferStartedAt,
                             canPause: engine.canPause,
                             canSeek: engine.isSeekable,
+                            isPlaying: engine.state == .playing,
                             seekBackward: { engine.skipBackward(by: $0); noteActivity() },
                             seekForward: { skipForward(by: $0) },
                             togglePlayback: toggleTimelinePlayback,
@@ -124,6 +126,28 @@ struct PlaybackView: View {
                     .padding(24)
                     .background(.red.opacity(0.88), in: RoundedRectangle(cornerRadius: 16))
             }
+
+#if !os(tvOS)
+            VStack {
+                HStack {
+                    Button {
+                        playback.leavePlayer()
+                    } label: {
+                        Label("Close Player", systemImage: "xmark")
+                            .labelStyle(.iconOnly)
+                            .frame(width: 36, height: 36)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.black.opacity(0.72))
+                    .accessibilityLabel("Close Player")
+                    .keyboardShortcut(.cancelAction)
+
+                    Spacer()
+                }
+                Spacer()
+            }
+            .padding(20)
+#endif
 
             if case let .recovering(reason, attempt) = engine.state {
                 HStack(spacing: 14) {
@@ -189,10 +213,10 @@ struct PlaybackView: View {
                 break
             }
         }
-        .onPlayPauseCommand {
+        .televisionPlayPauseCommand {
             toggleTimelinePlayback()
         }
-        .onMoveCommand { direction in
+        .platformMoveCommand { direction in
             switch direction {
             case .up:
                 if chromeMode == .panel {
@@ -218,7 +242,7 @@ struct PlaybackView: View {
                 showTimeline()
             }
         }
-        .onExitCommand {
+        .platformExitCommand {
             if chromeMode != .hidden {
                 hideChrome(automatically: false)
             } else if let automaticallyHiddenAt,
@@ -377,6 +401,7 @@ struct PlaybackView: View {
 private struct RecordingPlaybackTimeline: View {
     let recording: TVRecording
     let elapsedSeconds: TimeInterval
+    let isPlaying: Bool
     let canSeek: Bool
     let seekBackward: (TimeInterval) -> Void
     let seekForward: (TimeInterval) -> Void
@@ -441,13 +466,25 @@ private struct RecordingPlaybackTimeline: View {
             }
             .font(.callout.monospacedDigit())
             .foregroundStyle(.white.opacity(0.76))
+
+#if !os(tvOS)
+            PlaybackTransportControls(
+                isPlaying: isPlaying,
+                canPause: true,
+                canSeek: canSeek,
+                seekBackward: { seekBackward(15) },
+                seekForward: { seekForward(15) },
+                togglePlayback: togglePlayback,
+                showPanel: showPanel
+            )
+#endif
         }
         .contentShape(Rectangle())
         .focusable()
         .focused($isFocused)
         .focusEffectDisabled()
         .onTapGesture(perform: togglePlayback)
-        .onMoveCommand { direction in
+        .platformMoveCommand { direction in
             if direction == .down {
                 showPanel()
                 return
@@ -484,6 +521,7 @@ private struct ProgrammePlaybackTimeline: View {
     let bufferStartedAt: Date?
     let canPause: Bool
     let canSeek: Bool
+    let isPlaying: Bool
     let seekBackward: (TimeInterval) -> Void
     let seekForward: (TimeInterval) -> Void
     let togglePlayback: () -> Void
@@ -557,6 +595,18 @@ private struct ProgrammePlaybackTimeline: View {
             } else {
                 Capsule().fill(.white.opacity(0.25)).frame(height: 14)
             }
+
+#if !os(tvOS)
+            PlaybackTransportControls(
+                isPlaying: isPlaying,
+                canPause: canPause,
+                canSeek: canSeek,
+                seekBackward: { seekBackward(15) },
+                seekForward: { seekForward(15) },
+                togglePlayback: togglePlayback,
+                showPanel: showPanel
+            )
+#endif
         }
         .contentShape(Rectangle())
         .focusable()
@@ -565,7 +615,7 @@ private struct ProgrammePlaybackTimeline: View {
         .onTapGesture {
             if canPause { togglePlayback() }
         }
-        .onMoveCommand { direction in
+        .platformMoveCommand { direction in
             if direction == .down {
                 showPanel()
                 return
@@ -588,6 +638,51 @@ private struct ProgrammePlaybackTimeline: View {
         date.formatted(date: .omitted, time: .standard)
     }
 }
+
+#if !os(tvOS)
+private struct PlaybackTransportControls: View {
+    let isPlaying: Bool
+    let canPause: Bool
+    let canSeek: Bool
+    let seekBackward: () -> Void
+    let seekForward: () -> Void
+    let togglePlayback: () -> Void
+    let showPanel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 18) {
+            Button(action: seekBackward) {
+                Label("Back 15 Seconds", systemImage: "gobackward.15")
+                    .labelStyle(.iconOnly)
+            }
+            .disabled(!canSeek)
+
+            Button(action: togglePlayback) {
+                Label(isPlaying ? "Pause" : "Play", systemImage: isPlaying ? "pause.fill" : "play.fill")
+                    .labelStyle(.iconOnly)
+            }
+            .disabled(!canPause)
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut(.space, modifiers: [])
+
+            Button(action: seekForward) {
+                Label("Forward 15 Seconds", systemImage: "goforward.15")
+                    .labelStyle(.iconOnly)
+            }
+            .disabled(!canSeek)
+
+            Spacer()
+
+            Button(action: showPanel) {
+                Label("Playback Options", systemImage: "slider.horizontal.3")
+            }
+        }
+        .font(.title3)
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+    }
+}
+#endif
 
 private struct TimelineBar: View {
     let program: GuideProgram
@@ -665,13 +760,19 @@ private struct PlayerTabbedOverlay: View {
                                 : Color.white.opacity(0.08),
                             in: Capsule()
                         )
+                        .contentShape(Capsule())
+                        .onTapGesture {
+                            selectedTab = tab
+                            noteActivity()
+                        }
+                        .accessibilityAddTraits(.isButton)
                 }
             }
             .contentShape(Rectangle())
             .focusable()
             .focused($tabBarFocused)
             .focusEffectDisabled()
-            .onMoveCommand(perform: moveTab)
+            .platformMoveCommand(moveTab)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("(selectedTab.rawValue) tab")
             .accessibilityHint("Swipe left or right to change tabs")
@@ -698,7 +799,7 @@ private struct PlayerTabbedOverlay: View {
         }
     }
 
-    private func moveTab(_ direction: MoveCommandDirection) {
+    private func moveTab(_ direction: PlatformMoveDirection) {
         let tabs = PlayerOverlayTab.allCases
         guard let index = tabs.firstIndex(of: selectedTab) else { return }
 

@@ -14,18 +14,24 @@ final class NavigationSoundPlayer {
     private var lastPlayedAt: TimeInterval = 0
 
     private init() {
+#if os(tvOS)
         player = try? AVAudioPlayer(data: Self.makeSound())
         player?.volume = 0.22
         player?.prepareToPlay()
+#else
+        player = nil
+#endif
     }
 
     func play() {
+#if os(tvOS)
         let now = ProcessInfo.processInfo.systemUptime
         guard now - lastPlayedAt >= 0.045 else { return }
         lastPlayedAt = now
 
         player?.currentTime = 0
         player?.play()
+#endif
     }
 
     private static func makeSound() -> Data {

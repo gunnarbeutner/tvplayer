@@ -121,7 +121,26 @@ struct RootTabView: View {
         }
     }
 
+    @ViewBuilder
     private var tabs: some View {
+#if os(macOS)
+        NavigationSplitView {
+            List(selection: $selection) {
+                Label("Channels", systemImage: "play.rectangle.on.rectangle")
+                    .tag(AppTab.channels)
+                Label("Guide", systemImage: "rectangle.grid.2x2")
+                    .tag(AppTab.guide)
+                Label("Recordings", systemImage: "record.circle")
+                    .tag(AppTab.recordings)
+                Label("Settings", systemImage: "gearshape")
+                    .tag(AppTab.settings)
+            }
+            .navigationTitle("TV Player")
+            .navigationSplitViewColumnWidth(min: 180, ideal: 220)
+        } detail: {
+            selectedContent
+        }
+#else
         TabView(selection: $selection) {
             ChannelsView(
                 isSelected: selection == .channels,
@@ -153,7 +172,33 @@ struct RootTabView: View {
                 }
                 .tag(AppTab.settings)
         }
+#if os(iOS)
+        .tabViewStyle(.sidebarAdaptable)
+#endif
+#endif
     }
+
+#if os(macOS)
+    @ViewBuilder
+    private var selectedContent: some View {
+        switch selection {
+        case .channels:
+            ChannelsView(
+                isSelected: true,
+                onOpenSettings: { selection = .settings }
+            )
+        case .guide:
+            GuideView(
+                isSelected: true,
+                onOpenSettings: { selection = .settings }
+            )
+        case .recordings:
+            RecordingsView(onOpenSettings: { selection = .settings })
+        case .settings:
+            SettingsView()
+        }
+    }
+#endif
 }
 
 private struct PersistentPlaybackSurface: View {

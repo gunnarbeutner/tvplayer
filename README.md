@@ -1,14 +1,17 @@
-# TV Player for tvOS
+# TV Player for Apple Platforms
 
-TVPlayer is a focused TVheadend client for Apple TV. It provides an accessible
-electronic programme guide and direct live MPEG-TS playback through TVVLCKit,
-without requiring Plex or another licensed media-server client.
+TVPlayer is a native TVheadend client for Apple TV, iPhone, iPad, and Mac. It
+provides an accessible electronic programme guide and direct live MPEG-TS
+playback through the platform-appropriate VLCKit framework, without requiring
+Plex or another licensed media-server client.
 
 The application bundle identifier is `de.beutner.TVPlayer`.
 
 ## Features
 
-- Channels, Guide, Recordings, and Settings tabs, with Guide selected by default
+- Channels, Guide, Recordings, and Settings navigation, with Guide selected by default
+- Remote-first focus navigation on Apple TV, touch-first compact layouts on iPhone,
+  sidebar and pointer support on iPad, and native split-view, keyboard, and window behavior on Mac
 - TVheadend channels, channel icons, and EPG data loaded directly or through the persistent rich guide cache
 - No bundled demo guide: Channels and Guide require a configured, reachable TVheadend server
 - Optional rich JSON guide cache with an external XMLTV fallback; both URLs are empty by default
@@ -32,36 +35,58 @@ The application bundle identifier is `de.beutner.TVPlayer`.
 - Recording management for cancelling timers, gracefully stopping active recordings, deleting files, and removing Record All rules
 - VLC playback of completed and in-progress recordings with seeking, track selection, and technical details
 - In-progress recording playback starts at the beginning and exposes Watch Live as a separate action
-- TVheadend password storage in the tvOS Keychain
+- TVheadend password storage in the platform Keychain
 - First-run TVheadend configuration discovery over `_tvplayer._tcp` Bonjour/mDNS
 - An optional always-on discovery container that preserves native EPG metadata and publishes its JSON guide URL over mDNS
 - Connection and timeshift badges in Settings verify HTTP credentials and native HTSP availability
 
 ## Requirements
 
-- Xcode with the tvOS 26 SDK
+- Xcode with the iOS, macOS, and tvOS 26 SDKs
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)
 - An accessible TVheadend server
 - A TVheadend account with Web Interface, HTSP streaming, Basic recorder, View All, Failed View, and—when managing recordings created by other users—Manage All permissions
 - TVheadend timeshift enabled on the server and its HTSP service reachable (port `9982` by default)
 
-TVVLCKit 3.7.3 is downloaded by the included installation script and kept under
-the git-ignored `.build` directory.
+TVVLCKit, MobileVLCKit, and VLCKit 3.7.3 are downloaded and checksum-verified by
+the included installation script, then kept under the git-ignored `.build`
+directory.
 
 ## Generate and build
 
 ```sh
 bash Scripts/install-vlckit.sh
 xcodegen generate
+
+# Apple TV
 xcodebuild \
   -project TVApp.xcodeproj \
   -scheme TVApp \
   -sdk appletvsimulator \
   -configuration Debug \
   build
+
+# iPhone and iPad
+xcodebuild \
+  -project TVApp.xcodeproj \
+  -scheme TVApp-iOS \
+  -sdk iphonesimulator \
+  -configuration Debug \
+  build
+
+# Mac
+xcodebuild \
+  -project TVApp.xcodeproj \
+  -scheme TVApp-macOS \
+  -configuration Debug \
+  build
 ```
 
-Keep the simulator's normal local ad-hoc signing enabled. TV Player's Keychain
+For a signing-free compile check of all three application targets, run
+`bash Scripts/build-all.sh`. The iOS target includes both iPhone and iPad device
+families; iPadOS does not require a separate Xcode target.
+
+Keep each simulator's normal local ad-hoc signing enabled. TV Player's Keychain
 access group is supplied through a signing entitlement, so an unsigned build
 cannot save discovered or manually entered passwords.
 
@@ -109,7 +134,7 @@ for API access and a streaming permission for live and recorded playback.
 The app inherits the requesting user's default DVR profile, including its
 padding, priority, retention, duplicate handling, and recording format.
 
-## Run in the simulator
+## Run on Apple TV Simulator
 
 Build the simulator target first, then use the credential-safe launch helper.
 It prompts for the password without writing it to disk:
@@ -126,6 +151,15 @@ Set the development team in `project.yml`, regenerate the Xcode project, and
 select the paired Apple TV as the Xcode destination. The application can then
 be run from Xcode or installed with `xcrun devicectl` after a signed device
 build.
+
+## Run on iPhone, iPad, and Mac
+
+Select the `TVApp-iOS` scheme for either an iPhone or iPad destination. The same
+target adapts between bottom-tab, sidebar, compact guide, and regular timeline
+layouts. Select `TVApp-macOS` for the native Mac application; it supports normal
+window resizing, full-screen playback, menus, pointer input, and keyboard
+transport controls. Signing uses the same development team and bundle identity
+as Apple TV.
 
 ## Probe a TVheadend server
 

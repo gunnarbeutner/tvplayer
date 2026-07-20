@@ -11,7 +11,12 @@ struct RecordingsView: View {
     @State private var selectedRecording: TVRecording?
     @State private var ruleToDelete: TVRecordingRule?
 
-    private let columns = Array(repeating: GridItem(.flexible(minimum: 420), spacing: 28), count: 3)
+    private let columns = [
+        GridItem(
+            .adaptive(minimum: PlatformLayout.recordingCardMinimumWidth),
+            spacing: PlatformLayout.gridSpacing
+        )
+    ]
 
     var body: some View {
         ZStack {
@@ -28,15 +33,15 @@ struct RecordingsView: View {
                         recordingSection("FAILED", entries: store.failed)
                         rulesSection
                     }
-                    .padding(.horizontal, 72)
-                    .padding(.vertical, 34)
+                    .padding(.horizontal, PlatformLayout.contentPadding)
+                    .padding(.vertical, PlatformLayout.contentVerticalPadding)
                 }
                 .refreshable {
                     await store.load(configuration: settings.configuration, force: true)
                 }
             }
         }
-        .fullScreenCover(item: $selectedRecording) { recording in
+        .platformDetailPresentation(item: $selectedRecording) { recording in
             RecordingDetailView(recordingID: recording.id)
         }
         .confirmationDialog(
@@ -57,7 +62,7 @@ struct RecordingsView: View {
         } message: {
             Text("The rule and its upcoming recordings will be cancelled. Existing recordings will be kept.")
         }
-        .onPlayPauseCommand {
+        .televisionPlayPauseCommand {
             guard let id = focusedRecordingID,
                   let recording = store.recordings.first(where: { $0.id == id }),
                   recording.isPlayable
@@ -116,7 +121,14 @@ struct RecordingsView: View {
                     ForEach(entries) { recording in
                         RecordingCard(
                             recording: recording,
-                            isFocused: focusedRecordingID == recording.id
+                            isFocused: focusedRecordingID == recording.id,
+                            onPlay: {
+                                playback.start(
+                                    recording: recording,
+                                    channel: channel(for: recording),
+                                    configuration: settings.configuration
+                                )
+                            }
                         )
                         .contentShape(RoundedRectangle(cornerRadius: 14))
                         .focusable()
@@ -197,6 +209,7 @@ struct RecordingsView: View {
 private struct RecordingCard: View {
     let recording: TVRecording
     let isFocused: Bool
+    let onPlay: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -243,9 +256,18 @@ private struct RecordingCard: View {
             }
             .font(.callout)
             .foregroundStyle(AppTheme.secondaryText)
+
+#if !os(tvOS)
+            if recording.isPlayable {
+                Button(action: onPlay) {
+                    Label("Play", systemImage: "play.fill")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+#endif
         }
         .padding(22)
-        .frame(height: 290, alignment: .topLeading)
+        .frame(height: cardHeight, alignment: .topLeading)
         .background(isFocused ? AppTheme.focused : AppTheme.surface, in: RoundedRectangle(cornerRadius: 14))
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay {
@@ -254,6 +276,14 @@ private struct RecordingCard: View {
         }
         .animation(.easeOut(duration: 0.14), value: isFocused)
         .accessibilityElement(children: .combine)
+    }
+
+    private var cardHeight: CGFloat {
+#if os(tvOS)
+        290
+#else
+        280
+#endif
     }
 
     private var statusImage: String {
@@ -277,6 +307,9 @@ private struct RecordingCard: View {
 
 private struct RecordingDetailView: View {
     @Environment(\.dismiss) private var dismiss
+#if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+#endif
     @EnvironmentObject private var store: RecordingStore
     @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var guide: GuideViewModel
@@ -305,12 +338,35 @@ private struct RecordingDetailView: View {
         return guide.channels.first { $0.name == recording.channelName }
     }
 
+    private var detailLayout: AnyLayout {
+        usesCompactLayout
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 28))
+            : AnyLayout(HStackLayout(alignment: .top, spacing: 54))
+    }
+
+    private var usesCompactLayout: Bool {
+#if os(iOS)
+        horizontalSizeClass == .compact
+#else
+        false
+#endif
+    }
+
+    private var detailPadding: CGFloat {
+#if os(tvOS)
+        80
+#else
+        PlatformLayout.contentPadding
+#endif
+    }
+
     var body: some View {
         ZStack {
             AppTheme.background.ignoresSafeArea()
 
             if let recording {
-                HStack(alignment: .top, spacing: 54) {
+                ScrollView {
+                    detailLayout {
                     VStack(spacing: 22) {
                         if let channel {
                             ChannelBadge(channel: channel, diameter: 132)
@@ -323,7 +379,7 @@ private struct RecordingDetailView: View {
                             .font(.title2.bold())
                             .multilineTextAlignment(.center)
                     }
-                    .frame(width: 280)
+                    .frame(width: usesCompactLayout ? nil : 280)
 
                     VStack(alignment: .leading, spacing: 18) {
                         Label(recording.state.label.uppercased(), systemImage: recording.state == .recording ? "record.circle.fill" : "video.fill")
@@ -366,9 +422,10 @@ private struct RecordingDetailView: View {
                             .padding(.top, 8)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxWidth: 1_720, alignment: .leading)
+                    .padding(detailPadding)
                 }
-                .frame(maxWidth: 1_720, alignment: .leading)
-                .padding(80)
             } else {
                 PlaceholderView(
                     title: "Recording no longer available",
@@ -402,7 +459,7 @@ private struct RecordingDetailView: View {
             }
             Button("Keep Recording", role: .cancel) {}
         }
-        .onPlayPauseCommand {
+        .televisionPlayPauseCommand {
             guard let recording, recording.isPlayable else { return }
             play(recording)
         }
@@ -410,7 +467,11 @@ private struct RecordingDetailView: View {
 
     @ViewBuilder
     private func actionButtons(_ recording: TVRecording) -> some View {
-        HStack(spacing: 18) {
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 170), spacing: 14, alignment: .leading)],
+            alignment: .leading,
+            spacing: 14
+        ) {
             if recording.isPlayable {
                 Button { play(recording) } label: {
                     Label("Play from Beginning", systemImage: "play.fill")

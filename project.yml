@@ -2,6 +2,8 @@ name: TVApp
 options:
   bundleIdPrefix: de.beutner
   deploymentTarget:
+    iOS: "26.0"
+    macOS: "26.0"
     tvOS: "26.0"
   createIntermediateGroups: true
 
@@ -10,46 +12,153 @@ settings:
     SWIFT_VERSION: "6.0"
     DEVELOPMENT_TEAM: Z5JV9S33V5
 
-targets:
-  TVApp:
+targetTemplates:
+  SharedApp:
     type: application
-    platform: tvOS
     sources:
       - path: TVApp
+        excludes:
+          - Resources/Info.plist
+          - Resources/Info-tvOS.plist
+          - Resources/Info-iOS.plist
+          - Resources/Info-macOS.plist
+          - Resources/TVApp.entitlements
+          - Resources/TVApp-iOS.entitlements
+          - Resources/TVApp-macOS.entitlements
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer
+        PRODUCT_MODULE_NAME: TVApp
+        PRODUCT_NAME: TVApp
+        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+
+  SharedTests:
+    type: bundle.unit-test
+    sources:
+      - path: TVAppTests
+    settings:
+      base:
+        PRODUCT_MODULE_NAME: TVAppTests
+        GENERATE_INFOPLIST_FILE: true
+
+targets:
+  TVApp:
+    templates:
+      - SharedApp
+    platform: tvOS
     dependencies:
       - framework: .build/VLCKit/TVVLCKit.xcframework
         embed: true
     info:
-      path: TVApp/Resources/Info.plist
+      path: TVApp/Resources/Info-tvOS.plist
       properties:
         CFBundleDisplayName: TV Player
-        NSLocalNetworkUsageDescription: TV Guide discovers and connects to your TVHeadend server on the local network.
+        NSLocalNetworkUsageDescription: TV Player discovers and connects to your TVHeadend server on the local network.
         NSBonjourServices:
           - _tvplayer._tcp
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         UIApplicationSceneManifest:
-          UIApplicationSupportsMultipleScenes: true
+          UIApplicationSupportsMultipleScenes: false
         UILaunchScreen: {}
     settings:
       base:
         CODE_SIGN_ENTITLEMENTS: TVApp/Resources/TVApp.entitlements
-        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer
-        PRODUCT_NAME: TVApp
-        INFOPLIST_KEY_NSHumanReadableCopyright: ""
     scheme:
       testTargets:
         - TVAppTests
 
+  TVApp-iOS:
+    templates:
+      - SharedApp
+    platform: iOS
+    dependencies:
+      - framework: .build/VLCKit/Mobile/MobileVLCKit.xcframework
+        embed: true
+    info:
+      path: TVApp/Resources/Info-iOS.plist
+      properties:
+        CFBundleDisplayName: TV Player
+        NSLocalNetworkUsageDescription: TV Player discovers and connects to your TVHeadend server on the local network.
+        NSBonjourServices:
+          - _tvplayer._tcp
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon-Mobile
+        CODE_SIGN_ENTITLEMENTS: TVApp/Resources/TVApp-iOS.entitlements
+        TARGETED_DEVICE_FAMILY: "1,2"
+    scheme:
+      testTargets:
+        - TVAppTests-iOS
+
+  TVApp-macOS:
+    templates:
+      - SharedApp
+    platform: macOS
+    dependencies:
+      - framework: .build/VLCKit/macOS/VLCKit.xcframework
+        embed: true
+    info:
+      path: TVApp/Resources/Info-macOS.plist
+      properties:
+        CFBundleDisplayName: TV Player
+        NSLocalNetworkUsageDescription: TV Player discovers and connects to your TVHeadend server on the local network.
+        NSBonjourServices:
+          - _tvplayer._tcp
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon-Mac
+        CODE_SIGN_ENTITLEMENTS: TVApp/Resources/TVApp-macOS.entitlements
+        ENABLE_HARDENED_RUNTIME: true
+    scheme:
+      testTargets:
+        - TVAppTests-macOS
+
   TVAppTests:
-    type: bundle.unit-test
+    templates:
+      - SharedTests
     platform: tvOS
-    sources:
-      - path: TVAppTests
     dependencies:
       - target: TVApp
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer.tests
-        GENERATE_INFOPLIST_FILE: true
+
+  TVAppTests-iOS:
+    templates:
+      - SharedTests
+    platform: iOS
+    dependencies:
+      - target: TVApp-iOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer.tests.ios
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/TVApp.app/TVApp"
+
+  TVAppTests-macOS:
+    templates:
+      - SharedTests
+    platform: macOS
+    dependencies:
+      - target: TVApp-macOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer.tests.macos
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/TVApp.app/Contents/MacOS/TVApp"

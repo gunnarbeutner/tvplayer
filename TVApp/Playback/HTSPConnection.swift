@@ -298,7 +298,7 @@ final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
         let hello = try request(
             method: "hello",
             fields: [
-                "clientname": .string("TV Player for tvOS"),
+                "clientname": .string(Self.clientName),
                 "clientversion": .string("1"),
                 "htspversion": .int(Self.protocolVersion),
             ]
@@ -332,6 +332,18 @@ final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
         } catch HTSPError.authenticationFailed {
             throw HTSPError.streamingUnavailable
         }
+    }
+
+    private static var clientName: String {
+#if os(tvOS)
+        "TV Player for Apple TV"
+#elseif os(iOS)
+        "TV Player for iPhone and iPad"
+#elseif os(macOS)
+        "TV Player for Mac"
+#else
+        "TV Player"
+#endif
     }
 
     func subscribe(channelID: UInt32, profile: String) throws -> (Int64, [HTSPStreamInfo]) {

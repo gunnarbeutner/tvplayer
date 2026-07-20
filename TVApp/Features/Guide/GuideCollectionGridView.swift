@@ -1,5 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+#endif
 import OSLog
 
 private let guidePerformanceLog = OSLog(
@@ -28,6 +30,7 @@ enum GuideCollectionNavigationDirection: Equatable {
     case left
     case right
 
+#if canImport(UIKit)
     init?(focusHeading: UIFocusHeading) {
         if focusHeading.contains(.up) {
             self = .up
@@ -41,6 +44,7 @@ enum GuideCollectionNavigationDirection: Equatable {
             return nil
         }
     }
+#endif
 }
 
 /// Immutable, indexed input for the collection view. Expensive date
@@ -250,6 +254,7 @@ private extension Collection {
 
 /// Maintains the existing SwiftUI contract while moving the hot render and
 /// scroll path into a reusable UIKit collection view.
+#if canImport(UIKit)
 struct GuideGridView: View {
     let channels: [GuideChannel]
     let timeline: GuideTimeline
@@ -287,7 +292,7 @@ struct GuideGridView: View {
             onFirstSnapshotApplied: onReady,
             isEnabled: isEnabled
         )
-        .focusScope(focusScope)
+        .televisionFocusScope(focusScope)
     }
 }
 
@@ -1064,6 +1069,14 @@ private final class GuideCollectionView: UICollectionView,
         return cell
     }
 
+    func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+        guard isGuideEnabled, let item = guideSnapshot?.item(at: indexPath) else { return }
+        requestedFocusedProgramID = item.id
+        onFocused(item.id)
+        onActivate(item.program)
+        collectionView.deselectItem(at: indexPath, animated: true)
+    }
+
     func collectionView(
         _ collectionView: UICollectionView,
         viewForSupplementaryElementOfKind kind: String,
@@ -1636,3 +1649,126 @@ private final class GuideChannelHeaderReusableView: UICollectionReusableView {
         }
     }
 }
+#else
+/// Native macOS guide surface. The shared snapshot keeps programme geometry
+/// identical to the television grid, while SwiftUI provides standard pointer,
+/// scrolling, keyboard-focus, and context-menu behavior.
+struct GuideGridView: View {
+    let channels: [GuideChannel]
+    let timeline: GuideTimeline
+    let now: Date
+    let guideRevision: Int
+    let preferredProgramID: GuideProgram.ID?
+    let focusScope: Namespace.ID
+    @Binding var focusedProgramID: GuideProgram.ID?
+    let recenterRequest: UUID
+    let focusRestoreRequest: UUID
+    let recordingsRevision: Int
+    let configuration: TVHeadendConfiguration
+    let recordingState: (GuideProgram) -> TVRecordingState?
+    let onActivate: (GuideProgram) -> Void
+    let onPlay: (GuideProgram) -> Void
+    let onReady: () -> Void
+
+    private var visiblePrograms: [[GuideProgram]] {
+        channels.map { channel in
+            channel.programs.filter { $0.end > timeline.start && $0.start < timeline.end }
+        }
+    }
+
+    var body: some View {
+        ScrollView([.horizontal, .vertical]) {
+            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                Section {
+                    ForEach(Array(channels.enumerated()), id: \.element.id) { row, channel in
+                        HStack(spacing: 0) {
+                            channelLabel(channel)
+
+                            ZStack(alignment: .topLeading) {
+                                ForEach(visiblePrograms[row]) { program in
+                                    let interval = DateInterval(
+                                        start: max(program.start, timeline.start),
+                                        end: min(program.end, timeline.end)
+                                    )
+                                    Button {
+                                        focusedProgramID = program.id
+                                        onActivate(program)
+                                    } label: {
+                                        GuideProgramCard(
+                                            program: program,
+                                            now: now,
+                                            isFocused: focusedProgramID == program.id,
+                                            recordingState: recordingState(program),
+                                            leadingContentInset: 0
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .frame(
+                                        width: max(56, timeline.width(for: interval) - GuideGridMetrics.cardInset),
+                                        height: GuideGridMetrics.cardHeight
+                                    )
+                                    .offset(x: timeline.xOffset(for: interval.start) + 2)
+                                    .contextMenu {
+                                        Button("Programme Details", systemImage: "info.circle") {
+                                            onActivate(program)
+                                        }
+                                        Button("Watch", systemImage: "play.fill") {
+                                            onPlay(program)
+                                        }
+                                    }
+                                }
+                            }
+                            .frame(width: timeline.width, height: GuideGridMetrics.rowHeight)
+                            .background(row.isMultiple(of: 2) ? AppTheme.background : AppTheme.surface.opacity(0.22))
+                        }
+                    }
+                } header: {
+                    HStack(spacing: 0) {
+                        Label("Guide", systemImage: "clock")
+                            .font(.headline)
+                            .foregroundStyle(AppTheme.accent)
+                            .padding(.horizontal, 18)
+                            .frame(width: GuideGridMetrics.channelWidth, height: GuideGridMetrics.headerHeight, alignment: .leading)
+                            .background(AppTheme.chrome)
+
+                        ZStack(alignment: .topLeading) {
+                            ForEach(timeline.halfHourMarks, id: \.self) { mark in
+                                Text(mark.formatted(date: .omitted, time: .shortened))
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(AppTheme.secondaryText)
+                                    .offset(x: timeline.xOffset(for: mark) + 10, y: 10)
+                            }
+                        }
+                        .frame(width: timeline.width, height: GuideGridMetrics.headerHeight)
+                        .background(AppTheme.chrome)
+                    }
+                }
+            }
+        }
+        .background(AppTheme.background)
+        .onAppear {
+            if focusedProgramID == nil { focusedProgramID = preferredProgramID }
+            onReady()
+        }
+        .onChange(of: focusRestoreRequest) { _, _ in
+            focusedProgramID = preferredProgramID ?? focusedProgramID
+        }
+        .onChange(of: recenterRequest) { _, _ in
+            focusedProgramID = preferredProgramID ?? focusedProgramID
+        }
+    }
+
+    private func channelLabel(_ channel: GuideChannel) -> some View {
+        HStack(spacing: 12) {
+            ChannelBadge(channel: channel, diameter: 52)
+            Text(channel.name)
+                .font(.headline)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .frame(width: GuideGridMetrics.channelWidth, height: GuideGridMetrics.rowHeight)
+        .background(AppTheme.chrome)
+    }
+}
+#endif

@@ -1,7 +1,24 @@
 import CryptoKit
 import Foundation
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+typealias PlatformImage = UIImage
+#elseif os(macOS)
+import AppKit
+typealias PlatformImage = NSImage
+#endif
+
+private extension PlatformImage {
+    var channelLogoCGImage: CGImage? {
+#if canImport(UIKit)
+        cgImage
+#else
+        var proposedRect = CGRect(origin: .zero, size: size)
+        return cgImage(forProposedRect: &proposedRect, context: nil, hints: nil)
+#endif
+    }
+}
 
 struct ChannelBadge: View {
     let channel: GuideChannel
@@ -113,7 +130,7 @@ private struct ChannelLogoLoadID: Hashable {
 }
 
 struct ChannelLogoArtwork: @unchecked Sendable {
-    let image: UIImage
+    let image: PlatformImage
     let backgroundTone: ChannelLogoBackgroundTone?
 }
 
@@ -237,7 +254,7 @@ final class ChannelLogoImageCache: @unchecked Sendable {
         memory.setObject(
             ArtworkBox(artwork),
             forKey: key as NSString,
-            cost: max(dataCost, artwork.image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0)
+            cost: max(dataCost, artwork.image.channelLogoCGImage.map { $0.bytesPerRow * $0.height } ?? 0)
         )
     }
 
@@ -246,10 +263,10 @@ final class ChannelLogoImageCache: @unchecked Sendable {
     }
 
     private static func decode(_ data: Data) -> ChannelLogoArtwork? {
-        guard let image = UIImage(data: data) else { return nil }
+        guard let image = PlatformImage(data: data) else { return nil }
         return ChannelLogoArtwork(
             image: image,
-            backgroundTone: image.cgImage.flatMap(ChannelLogoContrast.backgroundTone)
+            backgroundTone: image.channelLogoCGImage.flatMap(ChannelLogoContrast.backgroundTone)
         )
     }
 }
@@ -320,12 +337,20 @@ private struct AdaptiveChannelLogo: View {
         ZStack {
             Circle().fill(backgroundColor)
 
-            Image(uiImage: artwork.image)
+            platformImage
                 .resizable()
                 .scaledToFit()
                 .padding(diameter * 0.12)
                 .shadow(color: foregroundEdgeColor, radius: 0.8)
         }
+    }
+
+    private var platformImage: Image {
+#if canImport(UIKit)
+        Image(uiImage: artwork.image)
+#else
+        Image(nsImage: artwork.image)
+#endif
     }
 
     private var backgroundColor: Color {

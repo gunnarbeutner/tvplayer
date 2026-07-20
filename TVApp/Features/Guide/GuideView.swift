@@ -5,6 +5,9 @@ struct GuideView: View {
     let onOpenSettings: () -> Void
 
     @Environment(\.scenePhase) private var scenePhase
+#if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+#endif
     @EnvironmentObject private var model: GuideViewModel
     @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var playback: PlaybackCoordinator
@@ -70,44 +73,44 @@ struct GuideView: View {
                 )
             } else {
                 ZStack {
-                    VStack(spacing: 0) {
-                        GuideInformationPanel(
-                            program: presentedProgram,
-                            channel: model.channel(containing: presentedProgram),
-                            now: model.now,
-                            loadState: model.loadState,
-                            recordingState: presentedProgram.flatMap { recordings.scheduledRecording(for: $0)?.state }
-                        )
-
-                        GuideGridView(
+                    if usesCompactGuide {
+                        CompactGuideList(
                             channels: model.channels,
-                            timeline: model.timeline,
                             now: model.now,
-                            guideRevision: model.guideRevision,
-                            preferredProgramID: preferredFocusProgramID,
-                            focusScope: guideFocusScope,
                             focusedProgramID: $focusedProgramID,
-                            recenterRequest: recenterRequest,
-                            focusRestoreRequest: focusRestoreRequest,
-                            recordingsRevision: recordings.guideRevision,
-                            configuration: settings.configuration,
                             recordingState: { recordings.scheduledRecording(for: $0)?.state },
-                            onActivate: { program in
-                                guard let channel = model.channel(containing: program) else { return }
-                                detail = ProgrammeDetailPresentation(program: program, channel: channel)
-                            },
-                            onPlay: { program in
-                                guard let channel = model.channel(containing: program) else { return }
-                                playback.start(
-                                    channel: channel,
-                                    program: program,
-                                    configuration: settings.configuration
-                                )
-                            },
-                            onReady: {
-                                hasRenderedGuide = true
-                            }
+                            onActivate: presentDetails,
+                            onPlay: play,
+                            onReady: { hasRenderedGuide = true }
                         )
+                    } else {
+                        VStack(spacing: 0) {
+                            GuideInformationPanel(
+                                program: presentedProgram,
+                                channel: model.channel(containing: presentedProgram),
+                                now: model.now,
+                                loadState: model.loadState,
+                                recordingState: presentedProgram.flatMap { recordings.scheduledRecording(for: $0)?.state }
+                            )
+
+                            GuideGridView(
+                                channels: model.channels,
+                                timeline: model.timeline,
+                                now: model.now,
+                                guideRevision: model.guideRevision,
+                                preferredProgramID: preferredFocusProgramID,
+                                focusScope: guideFocusScope,
+                                focusedProgramID: $focusedProgramID,
+                                recenterRequest: recenterRequest,
+                                focusRestoreRequest: focusRestoreRequest,
+                                recordingsRevision: recordings.guideRevision,
+                                configuration: settings.configuration,
+                                recordingState: { recordings.scheduledRecording(for: $0)?.state },
+                                onActivate: presentDetails,
+                                onPlay: play,
+                                onReady: { hasRenderedGuide = true }
+                            )
+                        }
                     }
 
                     if !hasRenderedGuide {
@@ -128,8 +131,8 @@ struct GuideView: View {
         // guide is an edge-to-edge television surface; keeping tvOS's large
         // horizontal and bottom content margins here wastes almost a full
         // programme column and one row.
-        .ignoresSafeArea(.container, edges: [.horizontal, .bottom])
-        .fullScreenCover(item: $detail) { presentation in
+        .televisionGuideEdges()
+        .platformDetailPresentation(item: $detail) { presentation in
             ProgrammeDetailView(presentation: presentation)
         }
         .onChange(of: scenePhase) { _, newPhase in
@@ -159,7 +162,7 @@ struct GuideView: View {
                 hasRenderedGuide = false
             }
         }
-        .onPlayPauseCommand {
+        .televisionPlayPauseCommand {
             guard let program = presentedProgram,
                   let channel = model.channel(containing: program)
             else { return }
@@ -196,6 +199,28 @@ struct GuideView: View {
         applyInitialFocusIfAvailable()
     }
 
+    private var usesCompactGuide: Bool {
+#if os(iOS)
+        horizontalSizeClass == .compact
+#else
+        false
+#endif
+    }
+
+    private func presentDetails(_ program: GuideProgram) {
+        guard let channel = model.channel(containing: program) else { return }
+        detail = ProgrammeDetailPresentation(program: program, channel: channel)
+    }
+
+    private func play(_ program: GuideProgram) {
+        guard let channel = model.channel(containing: program) else { return }
+        playback.start(
+            channel: channel,
+            program: program,
+            configuration: settings.configuration
+        )
+    }
+
     private func applyInitialFocusIfAvailable() {
         guard let programID = preferredFocusProgramID else { return }
 
@@ -227,6 +252,80 @@ struct GuideView: View {
             // re-request UIKit focus regardless.
             focusRestoreRequest = UUID()
         }
+    }
+}
+
+private struct CompactGuideList: View {
+    let channels: [GuideChannel]
+    let now: Date
+    @Binding var focusedProgramID: GuideProgram.ID?
+    let recordingState: (GuideProgram) -> TVRecordingState?
+    let onActivate: (GuideProgram) -> Void
+    let onPlay: (GuideProgram) -> Void
+    let onReady: () -> Void
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 24) {
+                ForEach(channels) { channel in
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 12) {
+                            ChannelBadge(channel: channel, diameter: 44)
+                            Text(channel.name)
+                                .font(.headline)
+                            Spacer()
+                        }
+
+                        ForEach(upcomingPrograms(for: channel)) { program in
+                            HStack(spacing: 10) {
+                                Button {
+                                    focusedProgramID = program.id
+                                    onActivate(program)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        HStack(spacing: 7) {
+                                            if let state = recordingState(program) {
+                                                Image(systemName: state == .recording ? "record.circle.fill" : "clock.fill")
+                                                    .foregroundStyle(state == .recording ? .red : AppTheme.accent)
+                                            }
+                                            Text(program.title)
+                                                .font(.body.weight(.semibold))
+                                                .lineLimit(2)
+                                        }
+                                        Text("\(program.start.formatted(date: .omitted, time: .shortened))–\(program.end.formatted(date: .omitted, time: .shortened))")
+                                            .font(.caption.monospacedDigit())
+                                            .foregroundStyle(AppTheme.secondaryText)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+
+                                if program.isAiring(at: now) {
+                                    Button {
+                                        onPlay(program)
+                                    } label: {
+                                        Image(systemName: "play.fill")
+                                            .frame(width: 44, height: 44)
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .accessibilityLabel("Watch \(program.title)")
+                                }
+                            }
+                            .padding(14)
+                            .background(AppTheme.surface, in: RoundedRectangle(cornerRadius: 14))
+                        }
+                    }
+                }
+            }
+            .padding(PlatformLayout.contentPadding)
+        }
+        .navigationTitle("Guide")
+        .onAppear(perform: onReady)
+    }
+
+    private func upcomingPrograms(for channel: GuideChannel) -> [GuideProgram] {
+        Array(channel.programs.filter { $0.end > now }.prefix(4))
     }
 }
 

@@ -1,8 +1,15 @@
 import Foundation
 import OSLog
 import SwiftUI
+#if os(tvOS)
 @preconcurrency import TVVLCKit
+#elseif os(iOS)
+@preconcurrency import MobileVLCKit
 import UIKit
+#elseif os(macOS)
+@preconcurrency import VLCKit
+import AppKit
+#endif
 
 enum PlaybackState: Equatable {
     case idle
@@ -1013,6 +1020,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     }
 }
 
+#if canImport(UIKit)
 struct VLCVideoSurface: UIViewRepresentable {
     let mediaPlayer: VLCMediaPlayer
     let attachmentRevision: Int
@@ -1091,3 +1099,77 @@ private final class VLCVideoContainerView: UIView {
         mediaPlayer.drawable = nil
     }
 }
+#elseif os(macOS)
+struct VLCVideoSurface: NSViewRepresentable {
+    let mediaPlayer: VLCMediaPlayer
+    let attachmentRevision: Int
+
+    init(mediaPlayer: VLCMediaPlayer, attachmentRevision: Int = 0) {
+        self.mediaPlayer = mediaPlayer
+        self.attachmentRevision = attachmentRevision
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        VLCVideoContainerView(
+            mediaPlayer: mediaPlayer,
+            attachmentRevision: attachmentRevision
+        )
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? VLCVideoContainerView)?.updateAttachment(revision: attachmentRevision)
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: ()) {
+        (nsView as? VLCVideoContainerView)?.detachIfOwned()
+    }
+}
+
+private final class VLCVideoContainerView: NSView {
+    private weak var mediaPlayer: VLCMediaPlayer?
+    private var attachmentRevision: Int
+
+    init(mediaPlayer: VLCMediaPlayer, attachmentRevision: Int) {
+        self.mediaPlayer = mediaPlayer
+        self.attachmentRevision = attachmentRevision
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.cgColor
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            detachIfOwned()
+        } else {
+            attachIfVisible()
+        }
+    }
+
+    func updateAttachment(revision: Int) {
+        let mustReattach = revision != attachmentRevision
+        attachmentRevision = revision
+        attachIfVisible(force: mustReattach)
+    }
+
+    private func attachIfVisible(force: Bool = false) {
+        guard window != nil, let mediaPlayer else { return }
+        if !force, let current = mediaPlayer.drawable as? NSView, current === self { return }
+        mediaPlayer.drawable = nil
+        mediaPlayer.drawable = self
+    }
+
+    func detachIfOwned() {
+        guard let mediaPlayer,
+              let current = mediaPlayer.drawable as? NSView,
+              current === self
+        else { return }
+        mediaPlayer.drawable = nil
+    }
+}
+#endif

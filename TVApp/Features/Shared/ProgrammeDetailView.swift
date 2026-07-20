@@ -8,6 +8,9 @@ struct ProgrammeDetailPresentation: Identifiable {
 
 struct ProgrammeDetailView: View {
     @Environment(\.dismiss) private var dismiss
+#if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+#endif
     @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var playback: PlaybackCoordinator
     @EnvironmentObject private var recordings: RecordingStore
@@ -48,6 +51,32 @@ struct ProgrammeDetailView: View {
         return labels
     }
 
+    private var detailLayout: AnyLayout {
+        usesCompactLayout
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 28))
+            : AnyLayout(HStackLayout(alignment: .top, spacing: 54))
+    }
+
+    private var usesCompactLayout: Bool {
+#if os(iOS)
+        horizontalSizeClass == .compact
+#else
+        false
+#endif
+    }
+
+    private var detailPadding: CGFloat {
+#if os(tvOS)
+        80
+#else
+        PlatformLayout.contentPadding
+#endif
+    }
+
+    private let actionColumns = [
+        GridItem(.adaptive(minimum: 170), spacing: 14, alignment: .leading)
+    ]
+
     private enum RecordingConfirmation: String, Identifiable {
         case cancel = "Cancel Recording"
         case stop = "Stop Recording"
@@ -58,14 +87,15 @@ struct ProgrammeDetailView: View {
         ZStack {
             AppTheme.background.ignoresSafeArea()
 
-            HStack(spacing: 54) {
+            ScrollView {
+                detailLayout {
                 VStack(spacing: 22) {
                     ChannelBadge(channel: channel, diameter: 132)
 
                     Text(channel.name)
                         .font(.title2.bold())
                 }
-                .frame(width: 280)
+                .frame(width: usesCompactLayout ? nil : 280)
 
                 VStack(alignment: .leading, spacing: 20) {
                     if let program, program.isAiring(at: Date()) {
@@ -119,7 +149,7 @@ struct ProgrammeDetailView: View {
                             .foregroundStyle(AppTheme.secondaryText)
                     }
 
-                    HStack(spacing: 20) {
+                    LazyVGrid(columns: actionColumns, alignment: .leading, spacing: 14) {
                         Button {
                             watchLive()
                         } label: {
@@ -195,14 +225,15 @@ struct ProgrammeDetailView: View {
                     .padding(.top, 10)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxWidth: 1_720, alignment: .leading)
+                .padding(detailPadding)
             }
-            .frame(maxWidth: 1_720, alignment: .leading)
-            .padding(80)
         }
-        .onPlayPauseCommand {
+        .televisionPlayPauseCommand {
             watchLive()
         }
-        .onExitCommand { dismiss() }
+        .platformExitCommand { dismiss() }
         .confirmationDialog(
             confirmRecordingAction?.rawValue ?? "Confirm",
             isPresented: Binding(
