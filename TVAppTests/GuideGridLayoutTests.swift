@@ -3,6 +3,71 @@ import XCTest
 @testable import TVApp
 
 final class GuideGridLayoutTests: XCTestCase {
+    func testChannelLogoCacheKeyDoesNotPersistCredentials() throws {
+        let first = try XCTUnwrap(URL(string: "http://alice:secret@example.test:9981/imagecache/42?ticket=first&variant=dark"))
+        let renewedTicket = try XCTUnwrap(URL(string: "http://bob:different@example.test:9981/imagecache/42?ticket=second&variant=dark"))
+
+        let firstKey = ChannelLogoImageCache.cacheKey(for: first)
+        let renewedKey = ChannelLogoImageCache.cacheKey(for: renewedTicket)
+
+        XCTAssertEqual(firstKey, renewedKey)
+        XCTAssertEqual(firstKey.count, 64)
+        XCTAssertFalse(firstKey.contains("secret"))
+        XCTAssertFalse(firstKey.contains("ticket"))
+    }
+
+    func testChannelLogoCacheKeySeparatesServersAndImageVariants() throws {
+        let first = try XCTUnwrap(URL(string: "http://one.example.test/imagecache/42?variant=dark"))
+        let otherServer = try XCTUnwrap(URL(string: "http://two.example.test/imagecache/42?variant=dark"))
+        let otherVariant = try XCTUnwrap(URL(string: "http://one.example.test/imagecache/42?variant=light"))
+
+        XCTAssertNotEqual(
+            ChannelLogoImageCache.cacheKey(for: first),
+            ChannelLogoImageCache.cacheKey(for: otherServer)
+        )
+        XCTAssertNotEqual(
+            ChannelLogoImageCache.cacheKey(for: first),
+            ChannelLogoImageCache.cacheKey(for: otherVariant)
+        )
+    }
+
+    func testPausedLiveDelayContinuesGrowingWhileIngestionContinues() {
+        let pauseDate = Date(timeIntervalSince1970: 10_000)
+
+        XCTAssertEqual(
+            LivePlaybackClock.delay(
+                accumulatedDelay: 12,
+                pauseBeganAt: pauseDate,
+                at: pauseDate.addingTimeInterval(18)
+            ),
+            30,
+            accuracy: 0.001
+        )
+    }
+
+    func testPausedProgrammeClockRemainsFixedAsWallClockAdvances() {
+        let pauseDate = Date(timeIntervalSince1970: 10_000)
+        let expectedPlaybackDate = pauseDate.addingTimeInterval(-12)
+
+        let initial = LivePlaybackClock.playbackDate(
+            at: pauseDate,
+            publishedDelay: 12,
+            accumulatedDelay: 12,
+            pauseBeganAt: pauseDate,
+            bufferStartedAt: pauseDate.addingTimeInterval(-60)
+        )
+        let later = LivePlaybackClock.playbackDate(
+            at: pauseDate.addingTimeInterval(18),
+            publishedDelay: 30,
+            accumulatedDelay: 12,
+            pauseBeganAt: pauseDate,
+            bufferStartedAt: pauseDate.addingTimeInterval(-60)
+        )
+
+        XCTAssertEqual(initial, expectedPlaybackDate)
+        XCTAssertEqual(later, expectedPlaybackDate)
+    }
+
     func testPlaybackFocusRestoresThePlayingChannelAndCurrentProgramme() throws {
         let now = Date(timeIntervalSince1970: 10_000)
         let firstChannel = channel(
@@ -324,6 +389,57 @@ final class GuideGridLayoutTests: XCTestCase {
                 at: now
             )?.id,
             overlapping.id
+        )
+    }
+
+    func testMovingUpSkipsIntermediateChannelWithoutVisibleProgramme() throws {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let first = channel(
+            id: "first",
+            programs: [program(id: "first-current", channelID: "first", around: now)]
+        )
+        let empty = channel(id: "empty", programs: [])
+        let third = channel(
+            id: "third",
+            programs: [program(id: "third-current", channelID: "third", around: now)]
+        )
+
+        XCTAssertEqual(
+            GuideGridNavigation.destinationProgram(
+                in: [first, empty, third],
+                timeline: timeline(around: now),
+                from: "third-current",
+                direction: .up,
+                at: now
+            )?.id,
+            "first-current"
+        )
+    }
+
+    func testOnlyFirstChannelMayExitGuideUpward() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let first = channel(
+            id: "first",
+            programs: [program(id: "first-current", channelID: "first", around: now)]
+        )
+        let second = channel(
+            id: "second",
+            programs: [program(id: "second-current", channelID: "second", around: now)]
+        )
+
+        XCTAssertTrue(
+            GuideGridNavigation.isAtBoundary(
+                in: [first, second],
+                from: "first-current",
+                direction: .up
+            )
+        )
+        XCTAssertFalse(
+            GuideGridNavigation.isAtBoundary(
+                in: [first, second],
+                from: "second-current",
+                direction: .up
+            )
         )
     }
 

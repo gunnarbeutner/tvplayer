@@ -56,6 +56,33 @@ struct PlaybackTechnicalDetail: Identifiable, Equatable {
     var id: String { label }
 }
 
+enum LivePlaybackClock {
+    static func delay(
+        accumulatedDelay: TimeInterval,
+        pauseBeganAt: Date?,
+        at date: Date
+    ) -> TimeInterval {
+        max(
+            0,
+            accumulatedDelay
+                + (pauseBeganAt.map { date.timeIntervalSince($0) } ?? 0)
+        )
+    }
+
+    static func playbackDate(
+        at date: Date,
+        publishedDelay: TimeInterval,
+        accumulatedDelay: TimeInterval,
+        pauseBeganAt: Date?,
+        bufferStartedAt: Date?
+    ) -> Date {
+        let candidate = pauseBeganAt.map {
+            $0.addingTimeInterval(-accumulatedDelay)
+        } ?? date.addingTimeInterval(-publishedDelay)
+        return max(candidate, bufferStartedAt ?? candidate)
+    }
+}
+
 @MainActor
 protocol PlaybackEngine: AnyObject {
     var state: PlaybackState { get }
@@ -91,6 +118,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     let mediaPlayer: VLCMediaPlayer
 
     private var liveInputStream: BufferedLiveInputStream?
+    private var pauseRequested = false
     private var pauseBeganAt: Date?
     private var accumulatedLiveDelay: TimeInterval = 0
     private var timeshiftBeganAt: Date?
@@ -168,12 +196,14 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
             accumulatedLiveDelay += Date().timeIntervalSince(pauseBeganAt)
             self.pauseBeganAt = nil
         }
+        pauseRequested = false
         mediaPlayer.play()
         setState(wasPaused ? .playing : .preparing)
         lastMetricsUpdate = Date()
     }
 
     func pause() {
+        pauseRequested = true
         if activeRequest?.kind.isLive == true, pauseBeganAt == nil {
             pauseBeganAt = Date()
             timeshiftBeganAt = timeshiftBeganAt ?? pauseBeganAt
@@ -198,7 +228,21 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     }
 
     func togglePlayPause() {
-        mediaPlayer.isPlaying ? pause() : play()
+        pauseRequested || state == .paused ? play() : pause()
+    }
+
+    /// The programme-clock position represented by VLC's current live-buffer
+    /// read position. While paused this is anchored to the instant at which
+    /// playback stopped, even if VLC subsequently reports a transient
+    /// buffering/playing state while the upstream stream keeps downloading.
+    func livePlaybackDate(at date: Date = Date()) -> Date {
+        LivePlaybackClock.playbackDate(
+            at: date,
+            publishedDelay: liveDelaySeconds,
+            accumulatedDelay: accumulatedLiveDelay,
+            pauseBeganAt: pauseBeganAt,
+            bufferStartedAt: bufferStartedAt
+        )
     }
 
     /// Returns true when the caller should reconnect at the live edge.
@@ -281,8 +325,12 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
             pauseBeganAt = nil
             timeshiftBeganAt = nil
         } else
-        if state == .paused, let pauseBeganAt {
-            updatedLiveDelay = accumulatedLiveDelay + date.timeIntervalSince(pauseBeganAt)
+        if let pauseBeganAt {
+            updatedLiveDelay = LivePlaybackClock.delay(
+                accumulatedDelay: accumulatedLiveDelay,
+                pauseBeganAt: pauseBeganAt,
+                at: date
+            )
         } else {
             if playbackRate > 1, accumulatedLiveDelay > 0 {
                 let gained = delta * TimeInterval(playbackRate - 1)
@@ -396,10 +444,14 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         logger.info("VLC state changed: \(String(describing: playerState), privacy: .public)")
         switch playerState {
         case .opening, .buffering:
-            setState(hasStartedPlayback || mediaPlayer.hasVideoOut ? .playing : .preparing)
+            setState(
+                pauseRequested
+                    ? .paused
+                    : (hasStartedPlayback || mediaPlayer.hasVideoOut ? .playing : .preparing)
+            )
         case .playing, .esAdded:
             hasStartedPlayback = true
-            setState(.playing)
+            setState(pauseRequested ? .paused : .playing)
         case .paused:
             setState(.paused)
         case .error:
@@ -408,6 +460,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
             setState(.failed(detail ?? "VLC could not play this TVHeadend stream."))
         case .stopped, .ended:
             hasStartedPlayback = false
+            pauseRequested = false
             setState(.idle)
         default:
             break
@@ -538,6 +591,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         liveDelaySeconds = 0
         timeshiftWindowSeconds = 0
         playbackRate = 1
+        pauseRequested = false
         pauseBeganAt = nil
         accumulatedLiveDelay = 0
         timeshiftBeganAt = nil

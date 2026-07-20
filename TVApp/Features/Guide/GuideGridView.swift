@@ -51,7 +51,7 @@ enum GuideGridChromeLayout {
     }
 }
 
-enum GuideGridNavigationDirection {
+enum GuideGridNavigationDirection: Equatable {
     case up
     case down
 }
@@ -70,16 +70,40 @@ enum GuideGridNavigation {
         let currentProgram = channels[channelIndex].programs.first(where: { $0.id == programID })
         else { return nil }
 
-        let destinationIndex = direction == .up ? channelIndex - 1 : channelIndex + 1
-        guard channels.indices.contains(destinationIndex) else { return nil }
-
-        let programs = visiblePrograms(in: channels[destinationIndex], timeline: timeline)
-        guard !programs.isEmpty else { return nil }
-
         let referenceDate = currentProgram.isAiring(at: now)
             ? now
             : currentProgram.start.addingTimeInterval(currentProgram.duration / 2)
 
+        let step = direction == .up ? -1 : 1
+        var destinationIndex = channelIndex + step
+        while channels.indices.contains(destinationIndex) {
+            let programs = visiblePrograms(in: channels[destinationIndex], timeline: timeline)
+            if let destination = closestProgram(in: programs, to: referenceDate) {
+                return destination
+            }
+            destinationIndex += step
+        }
+
+        return nil
+    }
+
+    static func isAtBoundary(
+        in channels: [GuideChannel],
+        from programID: GuideProgram.ID,
+        direction: GuideGridNavigationDirection
+    ) -> Bool {
+        guard let channelIndex = channels.firstIndex(where: { channel in
+            channel.programs.contains(where: { $0.id == programID })
+        }) else { return false }
+        return direction == .up
+            ? channelIndex == channels.startIndex
+            : channelIndex == channels.index(before: channels.endIndex)
+    }
+
+    private static func closestProgram(
+        in programs: [GuideProgram],
+        to referenceDate: Date
+    ) -> GuideProgram? {
         if let intersecting = programs.first(where: {
             $0.start <= referenceDate && referenceDate < $0.end
         }) {
@@ -247,7 +271,6 @@ struct GuideGridView: View {
             timeline: timeline,
             now: now,
             contentOffsetX: contentOffset.x,
-            focusedProgramID: focusedProgramID,
             recordingsFingerprint: recordingsFingerprint,
             isFocusEnabled: isEnabled,
             focusTargets: focusTargets,
@@ -256,7 +279,8 @@ struct GuideGridView: View {
             onFocused: { focusedProgramID = $0 },
             onActivate: onActivate,
             onPlay: onPlay,
-            onMove: { moveFocus(from: $0, direction: $1) }
+            onMove: { moveFocus(from: $0, direction: $1) },
+            shouldConsumeExternalFocus: { shouldConsumeExternalFocus(from: $0, direction: $1) }
         )
         .offset(x: GuideGridMetrics.channelWidth, y: GuideGridMetrics.headerHeight)
     }
@@ -394,20 +418,47 @@ struct GuideGridView: View {
         from programID: GuideProgram.ID,
         direction: GuideGridNavigationDirection
     ) -> Bool {
+        // UIKit focus can still be animating toward the preceding target when
+        // another press arrives. Navigate from the logical pending target so
+        // every physical press advances exactly one row.
+        let originID = focusTargets.navigationOrigin(fallback: programID)
         guard let destination = GuideGridNavigation.destinationProgram(
             in: channels,
             timeline: timeline,
-            from: programID,
+            from: originID,
             direction: direction,
             at: Date()
         ) else {
-            // Prevent Down from wrapping at the final channel. Up from the
-            // first row remains native so it can return to the tab bar.
-            return direction == .down
+            // Down never leaves the guide. Up may hand focus to the tab bar,
+            // but only from the actual first channel. Missing guide data in
+            // an intermediate row is not a boundary.
+            if direction == .down {
+                return true
+            }
+            return !GuideGridNavigation.isAtBoundary(
+                in: channels,
+                from: originID,
+                direction: .up
+            )
         }
 
-        focusedProgramID = destination.id
+        // Constrain the focus engine to the deterministic destination, then
+        // let the physical press perform the native tvOS focus transition.
+        // Native movement supplies smooth scrolling and built-in key repeat.
+        focusTargets.prepareFocus(on: destination.id)
         return true
+    }
+
+    private func shouldConsumeExternalFocus(
+        from programID: GuideProgram.ID,
+        direction: GuideGridNavigationDirection
+    ) -> Bool {
+        if direction == .down { return true }
+        return !GuideGridNavigation.isAtBoundary(
+            in: channels,
+            from: programID,
+            direction: .up
+        )
     }
 
 }
@@ -423,7 +474,6 @@ private struct GuideProgrammeRows: View, Equatable {
     let timeline: GuideTimeline
     let now: Date
     let contentOffsetX: CGFloat
-    let focusedProgramID: GuideProgram.ID?
     let recordingsFingerprint: Int
     let isFocusEnabled: Bool
     let focusTargets: GuideFocusTargetRegistry
@@ -433,10 +483,10 @@ private struct GuideProgrammeRows: View, Equatable {
     let onActivate: (GuideProgram) -> Void
     let onPlay: (GuideProgram) -> Void
     let onMove: (GuideProgram.ID, GuideGridNavigationDirection) -> Bool
+    let shouldConsumeExternalFocus: (GuideProgram.ID, GuideGridNavigationDirection) -> Bool
 
     nonisolated static func == (lhs: GuideProgrammeRows, rhs: GuideProgrammeRows) -> Bool {
         lhs.contentOffsetX == rhs.contentOffsetX
-            && lhs.focusedProgramID == rhs.focusedProgramID
             && lhs.isFocusEnabled == rhs.isFocusEnabled
             && lhs.now == rhs.now
             && lhs.recordingsFingerprint == rhs.recordingsFingerprint
@@ -465,8 +515,6 @@ private struct GuideProgrammeRows: View, Equatable {
                         let cardWidth = max(28, timeline.width(for: interval) - GuideGridMetrics.cardInset)
                         let programmeOffset = timeline.xOffset(for: visibleStart) + 2
                         let leadingOcclusion = max(0, contentOffsetX - programmeOffset)
-                        let isFocused = focusedProgramID == program.id
-
                         let focusFrame = GuideProgramFocusLayout.targetFrame(
                             cardWidth: cardWidth,
                             programmeOffset: programmeOffset,
@@ -475,43 +523,25 @@ private struct GuideProgrammeRows: View, Equatable {
                             now: now
                         )
 
-                        ZStack(alignment: .topLeading) {
-                            GuideProgramCard(
-                                program: program,
-                                now: now,
-                                isFocused: isFocused,
-                                recordingState: recordingState(program),
-                                leadingContentInset: leadingOcclusion
-                            )
-                            .frame(width: cardWidth, height: GuideGridMetrics.cardHeight)
-
-                            // Keep the focus geometry compact even when one
-                            // programme spans most of the night. For a live
-                            // programme the target sits on the current-time
-                            // line, making vertical focus movement unambiguous.
-                            GuideProgramFocusTarget(
-                                id: program.id,
-                                registry: focusTargets,
-                                accessibilityLabel: accessibilityLabel(program, channel),
-                                onFocused: {
-                                    onFocused(program.id)
-                                },
-                                onActivate: {
-                                    onActivate(program)
-                                },
-                                onPlay: {
-                                    onPlay(program)
-                                },
-                                onMove: { direction in
-                                    onMove(program.id, direction)
-                                }
-                            )
-                                .frame(width: focusFrame.width, height: focusFrame.height)
-                                .offset(x: focusFrame.minX)
-                        }
+                        GuideProgrammeFocusCell(
+                            program: program,
+                            now: now,
+                            recordingState: recordingState(program),
+                            leadingContentInset: leadingOcclusion,
+                            cardWidth: cardWidth,
+                            focusFrame: focusFrame,
+                            registry: focusTargets,
+                            accessibilityLabel: accessibilityLabel(program, channel),
+                            onFocused: { onFocused(program.id) },
+                            onActivate: { onActivate(program) },
+                            onPlay: { onPlay(program) },
+                            onMove: { direction in onMove(program.id, direction) },
+                            shouldConsumeExternalFocus: { direction in
+                                shouldConsumeExternalFocus(program.id, direction)
+                            }
+                        )
                         .frame(width: cardWidth, height: GuideGridMetrics.cardHeight)
                         .offset(x: programmeOffset, y: GuideGridMetrics.rowInset)
-                        .zIndex(isFocused ? 20 : 2)
                     }
                 }
                 .frame(width: timeline.width, height: GuideGridMetrics.rowHeight, alignment: .topLeading)
@@ -522,6 +552,58 @@ private struct GuideProgrammeRows: View, Equatable {
 
     private func isVisible(_ program: GuideProgram) -> Bool {
         program.end > timeline.start && program.start < timeline.end
+    }
+}
+
+/// Own focus styling at the individual card level. Keeping this state out of
+/// `GuideProgrammeRows` means a channel change redraws two cards instead of
+/// every programme in the non-lazy guide.
+private struct GuideProgrammeFocusCell: View {
+    let program: GuideProgram
+    let now: Date
+    let recordingState: TVRecordingState?
+    let leadingContentInset: CGFloat
+    let cardWidth: CGFloat
+    let focusFrame: CGRect
+    let registry: GuideFocusTargetRegistry
+    let accessibilityLabel: String
+    let onFocused: () -> Void
+    let onActivate: () -> Void
+    let onPlay: () -> Void
+    let onMove: (GuideGridNavigationDirection) -> Bool
+    let shouldConsumeExternalFocus: (GuideGridNavigationDirection) -> Bool
+
+    @State private var isFocused = false
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            GuideProgramCard(
+                program: program,
+                now: now,
+                isFocused: isFocused,
+                recordingState: recordingState,
+                leadingContentInset: leadingContentInset
+            )
+            .frame(width: cardWidth, height: GuideGridMetrics.cardHeight)
+
+            // Keep the focus geometry compact even when one programme spans
+            // most of the night. A live target sits on the current-time line,
+            // making vertical movement unambiguous.
+            GuideProgramFocusTarget(
+                id: program.id,
+                registry: registry,
+                accessibilityLabel: accessibilityLabel,
+                onFocusChanged: { isFocused = $0 },
+                onFocused: onFocused,
+                onActivate: onActivate,
+                onPlay: onPlay,
+                onMove: onMove,
+                shouldConsumeExternalFocus: shouldConsumeExternalFocus
+            )
+            .frame(width: focusFrame.width, height: focusFrame.height)
+            .offset(x: focusFrame.minX)
+        }
+        .zIndex(isFocused ? 20 : 2)
     }
 }
 
@@ -537,8 +619,7 @@ private final class GuideFocusTargetRegistry: ObservableObject {
 
     private var targets: [GuideProgram.ID: WeakTarget] = [:]
     private var pendingID: GuideProgram.ID?
-    private var blockedDirectionalPress: UIPress.PressType?
-    private var blockGeneration = 0
+    private var focusRetryTask: Task<Void, Never>?
 
     var focusedProgramID: GuideProgram.ID? {
         targets.first(where: { $0.value.view?.isFocused == true })?.key
@@ -567,6 +648,12 @@ private final class GuideFocusTargetRegistry: ObservableObject {
 
     func requestFocus(on id: GuideProgram.ID) {
         pendingID = id
+        focusRetryTask?.cancel()
+        attemptFocus(on: id, retriesRemaining: 8)
+    }
+
+    private func attemptFocus(on id: GuideProgram.ID, retriesRemaining: Int) {
+        guard pendingID == id else { return }
         guard let view = targets[id]?.view, view.window != nil,
               let focusSystem = UIFocusSystem.focusSystem(for: view)
         else {
@@ -577,16 +664,47 @@ private final class GuideFocusTargetRegistry: ObservableObject {
         if let focusedView = focusSystem.focusedItem as? UIView, focusedView === view {
             guideFocusLogger.debug("requestFocus(\(id, privacy: .public)): already focused")
             pendingID = nil
+            focusRetryTask = nil
             return
         }
 
         guideFocusLogger.debug("requestFocus(\(id, privacy: .public)): requesting, focusAllowed=\(view.isFocusAllowed), currentFocus=\(String(describing: focusSystem.focusedItem), privacy: .public)")
         focusSystem.requestFocusUpdate(to: view)
         focusSystem.updateFocusIfNeeded()
+
+        // Restoring focus can arrive while UIKit is completing a transition.
+        // Retry the pending target on subsequent run-loop turns rather than
+        // leaving the guide visually selected while focus remains elsewhere.
+        guard pendingID == id, retriesRemaining > 0 else { return }
+        focusRetryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(35))
+                guard !Task.isCancelled else { return }
+                self?.attemptFocus(on: id, retriesRemaining: retriesRemaining - 1)
+            } catch {
+                // Superseded by a newer target or fulfilled focus request.
+            }
+        }
     }
 
     func didFocus(id: GuideProgram.ID) {
-        if pendingID == id { pendingID = nil }
+        if pendingID == id {
+            pendingID = nil
+            focusRetryTask?.cancel()
+            focusRetryTask = nil
+        }
+    }
+
+    func navigationOrigin(fallback: GuideProgram.ID) -> GuideProgram.ID {
+        pendingID ?? focusedProgramID ?? fallback
+    }
+
+    var hasPreparedFocus: Bool {
+        pendingID != nil
+    }
+
+    func prepareFocus(on id: GuideProgram.ID) {
+        pendingID = id
     }
 
     func allowsFocus(on id: GuideProgram.ID) -> Bool {
@@ -604,55 +722,12 @@ private final class GuideFocusTargetRegistry: ObservableObject {
         return false
     }
 
-    func beginBlockingDirectionalFocus(_ pressType: UIPress.PressType) {
-        blockedDirectionalPress = pressType
-        blockGeneration += 1
-    }
-
-    func supersedeDirectionalFocusBlock(_ pressType: UIPress.PressType) {
-        // A new physical press of the same type means the previous press is
-        // finished; its stray focus updates are no longer worth blocking and
-        // the new press must be handled instead of being swallowed.
-        guard blockedDirectionalPress == pressType else { return }
-        blockedDirectionalPress = nil
-    }
-
-    func endBlockingDirectionalFocus(_ pressType: UIPress.PressType) {
-        guard blockedDirectionalPress == pressType else { return }
-        let generation = blockGeneration
-        Task { @MainActor [weak self] in
-            // tvOS can deliver the geometric focus update for a press well
-            // after pressesEnded. Keep same-heading updates blocked briefly
-            // so a single physical press cannot move a second row; a fresh
-            // press lifts the block immediately via pressesBegan.
-            try? await Task.sleep(for: .milliseconds(250))
-            guard let self,
-                  self.blockGeneration == generation,
-                  self.blockedDirectionalPress == pressType
-            else { return }
-            self.blockedDirectionalPress = nil
-        }
-    }
-
-    func cancelDirectionalFocusBlock() {
-        blockedDirectionalPress = nil
-    }
-
-    func blocksFocusUpdate(_ context: UIFocusUpdateContext) -> Bool {
-        let matchesDirection = switch blockedDirectionalPress {
-        case .upArrow: context.focusHeading.contains(.up)
-        case .downArrow: context.focusHeading.contains(.down)
-        default: false
-        }
-        guard matchesDirection else { return false }
-
-        if let pendingID,
-           let pendingView = targets[pendingID]?.view,
-           let nextView = context.nextFocusedItem as? UIView,
-           nextView === pendingView {
-            return false
-        }
-        return true
+    func isPreparedFocusUpdate(_ context: UIFocusUpdateContext) -> Bool {
+        guard let pendingID,
+              let pendingView = targets[pendingID]?.view,
+              let nextView = context.nextFocusedItem as? UIView
+        else { return false }
+        return nextView === pendingView
     }
 }
 
@@ -660,10 +735,12 @@ private struct GuideProgramFocusTarget: UIViewRepresentable {
     let id: GuideProgram.ID
     let registry: GuideFocusTargetRegistry
     let accessibilityLabel: String
+    let onFocusChanged: (Bool) -> Void
     let onFocused: () -> Void
     let onActivate: () -> Void
     let onPlay: () -> Void
     let onMove: (GuideGridNavigationDirection) -> Bool
+    let shouldConsumeExternalFocus: (GuideGridNavigationDirection) -> Bool
 
     func makeUIView(context: Context) -> GuideProgramFocusUIView {
         let view = GuideProgramFocusUIView()
@@ -698,10 +775,12 @@ private struct GuideProgramFocusTarget: UIViewRepresentable {
     private func configure(_ view: GuideProgramFocusUIView) {
         view.programID = id
         view.registry = registry
+        view.onFocusChanged = onFocusChanged
         view.onFocused = onFocused
         view.onActivate = onActivate
         view.onPlay = onPlay
         view.onMove = onMove
+        view.shouldConsumeExternalFocus = shouldConsumeExternalFocus
         view.isAccessibilityElement = true
         view.accessibilityLabel = accessibilityLabel
         view.accessibilityHint = "Select for programme details. Press Play to watch this channel live."
@@ -713,10 +792,12 @@ private struct GuideProgramFocusTarget: UIViewRepresentable {
 private final class GuideProgramFocusUIView: UIView {
     var programID: GuideProgram.ID = ""
     weak var registry: GuideFocusTargetRegistry?
+    var onFocusChanged: ((Bool) -> Void)?
     var onFocused: (() -> Void)?
     var onActivate: (() -> Void)?
     var onPlay: (() -> Void)?
     var onMove: ((GuideGridNavigationDirection) -> Bool)?
+    var shouldConsumeExternalFocus: ((GuideGridNavigationDirection) -> Bool)?
     private var consumedDirectionalPress: UIPress.PressType?
     var isFocusAllowed = true
 
@@ -745,6 +826,7 @@ private final class GuideProgramFocusUIView: UIView {
         with coordinator: UIFocusAnimationCoordinator
     ) {
         super.didUpdateFocus(in: context, with: coordinator)
+        onFocusChanged?(isFocused)
         guard isFocused else { return }
         guideFocusLogger.debug("didUpdateFocus: now focused \(self.programID, privacy: .public), heading=\(context.focusHeading.rawValue)")
         registry?.didFocus(id: programID)
@@ -752,8 +834,28 @@ private final class GuideProgramFocusUIView: UIView {
     }
 
     override func shouldUpdateFocus(in context: UIFocusUpdateContext) -> Bool {
-        if registry?.blocksFocusUpdate(context) == true {
+        // The deterministic navigator's prepared destination is the one
+        // constrained vertical focus update that must pass through.
+        if registry?.isPreparedFocusUpdate(context) == true {
+            return super.shouldUpdateFocus(in: context)
+        }
+
+        // While a destination is prepared, do not let the geometric resolver
+        // substitute a different programme.
+        if registry?.hasPreparedFocus == true {
             return false
+        }
+
+        // Native focus movement within the guide supplies smooth animation
+        // and held-button repeat. Only reject an escape to outside chrome
+        // when the current row is not a legitimate boundary.
+        if !(context.nextFocusedItem is GuideProgramFocusUIView) {
+            if context.focusHeading.contains(.up), shouldConsumeExternalFocus?(.up) == true {
+                return false
+            }
+            if context.focusHeading.contains(.down), shouldConsumeExternalFocus?(.down) == true {
+                return false
+            }
         }
         return super.shouldUpdateFocus(in: context)
     }
@@ -761,7 +863,6 @@ private final class GuideProgramFocusUIView: UIView {
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         if let consumedDirectionalPress,
            presses.contains(where: { $0.type == consumedDirectionalPress }) {
-            registry?.endBlockingDirectionalFocus(consumedDirectionalPress)
             self.consumedDirectionalPress = nil
             return
         }
@@ -777,19 +878,13 @@ private final class GuideProgramFocusUIView: UIView {
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         if presses.contains(where: { $0.type == .upArrow }) {
-            registry?.supersedeDirectionalFocusBlock(.upArrow)
-            if onMove?(.up) == true {
-                consumedDirectionalPress = .upArrow
-                registry?.beginBlockingDirectionalFocus(.upArrow)
+            if consumeDirectionalPress(.upArrow, direction: .up) {
                 return
             }
         }
 
         if presses.contains(where: { $0.type == .downArrow }) {
-            registry?.supersedeDirectionalFocusBlock(.downArrow)
-            if onMove?(.down) == true {
-                consumedDirectionalPress = .downArrow
-                registry?.beginBlockingDirectionalFocus(.downArrow)
+            if consumeDirectionalPress(.downArrow, direction: .down) {
                 return
             }
         }
@@ -799,8 +894,24 @@ private final class GuideProgramFocusUIView: UIView {
 
     override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         consumedDirectionalPress = nil
-        registry?.cancelDirectionalFocusBlock()
         super.pressesCancelled(presses, with: event)
+    }
+
+    private func consumeDirectionalPress(
+        _ pressType: UIPress.PressType,
+        direction: GuideGridNavigationDirection
+    ) -> Bool {
+        guard onMove?(direction) == true else { return false }
+
+        if registry?.hasPreparedFocus == true {
+            // Pass the event into UIKit. Only the prepared target can become
+            // focused, so tvOS performs exactly one correctly-routed move.
+            return false
+        }
+
+        // A consumed move without a prepared target is the lower boundary.
+        consumedDirectionalPress = pressType
+        return true
     }
 
 }
@@ -926,171 +1037,5 @@ private struct GuideChannelHeader: View {
         .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.divider).frame(height: 1) }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(channel.name)
-    }
-}
-
-struct ChannelBadge: View {
-    let channel: GuideChannel
-    let diameter: CGFloat
-
-    var body: some View {
-        ZStack {
-            Circle().fill(channel.tint.gradient)
-
-            if let iconURL = channel.iconURL {
-                AsyncImage(url: iconURL) { phase in
-                    if let image = phase.image {
-                        AdaptiveChannelLogo(
-                            image: image,
-                            fallbackTint: channel.tint,
-                            diameter: diameter
-                        )
-                    } else {
-                        monogram
-                    }
-                }
-            } else {
-                monogram
-            }
-        }
-        .frame(width: diameter, height: diameter)
-        .clipShape(Circle())
-        .overlay { Circle().stroke(.white.opacity(0.24), lineWidth: 1) }
-        .accessibilityHidden(true)
-    }
-
-    private var monogram: some View {
-        Text(channel.monogram)
-            .font(.system(size: diameter * 0.31, weight: .black, design: .rounded))
-            .foregroundStyle(.white)
-            .minimumScaleFactor(0.6)
-    }
-}
-
-/// Channel logos are commonly transparent artwork intended for either a light
-/// or a dark surface. A channel-derived accent can therefore make parts of a
-/// logo disappear. Render a tiny copy once, measure the visible pixels, and
-/// choose the neutral surface with the stronger average WCAG contrast.
-private struct AdaptiveChannelLogo: View {
-    let image: Image
-    let fallbackTint: Color
-    let diameter: CGFloat
-
-    @State private var backgroundTone: ChannelLogoBackgroundTone?
-
-    var body: some View {
-        ZStack {
-            Circle().fill(backgroundColor)
-
-            image
-                .resizable()
-                .scaledToFit()
-                .padding(diameter * 0.12)
-                .shadow(color: foregroundEdgeColor, radius: 0.8)
-        }
-        .task {
-            guard backgroundTone == nil else { return }
-            backgroundTone = renderedBackgroundTone()
-        }
-    }
-
-    private var backgroundColor: Color {
-        switch backgroundTone {
-        case .light:
-            Color(red: 0.94, green: 0.95, blue: 0.97)
-        case .dark:
-            Color(red: 0.055, green: 0.065, blue: 0.085)
-        case nil:
-            fallbackTint
-        }
-    }
-
-    private var foregroundEdgeColor: Color {
-        switch backgroundTone {
-        case .light: .black.opacity(0.22)
-        case .dark: .white.opacity(0.18)
-        case nil: .clear
-        }
-    }
-
-    @MainActor
-    private func renderedBackgroundTone() -> ChannelLogoBackgroundTone? {
-        let sampleSize: CGFloat = 64
-        let renderer = ImageRenderer(
-            content: image
-                .resizable()
-                .scaledToFit()
-                .padding(sampleSize * 0.12)
-                .frame(width: sampleSize, height: sampleSize)
-        )
-        renderer.scale = 1
-        guard let cgImage = renderer.uiImage?.cgImage else { return nil }
-        return ChannelLogoContrast.backgroundTone(for: cgImage)
-    }
-}
-
-private enum ChannelLogoBackgroundTone {
-    case light
-    case dark
-}
-
-private enum ChannelLogoContrast {
-    static func backgroundTone(for image: CGImage) -> ChannelLogoBackgroundTone? {
-        let width = image.width
-        let height = image.height
-        guard width > 0, height > 0 else { return nil }
-
-        var pixels = [UInt8](repeating: 0, count: width * height * 4)
-        guard let context = CGContext(
-            data: &pixels,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: width * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
-
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-
-        let lightBackgroundLuminance = 0.90
-        let darkBackgroundLuminance = 0.006
-        var lightScore = 0.0
-        var darkScore = 0.0
-        var totalWeight = 0.0
-
-        for index in stride(from: 0, to: pixels.count, by: 4) {
-            let alpha = Double(pixels[index + 3]) / 255
-            guard alpha >= 0.08 else { continue }
-
-            // CGContext gave us premultiplied components, so recover the
-            // original logo colour before measuring its luminance.
-            let red = min(1, Double(pixels[index]) / 255 / alpha)
-            let green = min(1, Double(pixels[index + 1]) / 255 / alpha)
-            let blue = min(1, Double(pixels[index + 2]) / 255 / alpha)
-            let luminance = relativeLuminance(red: red, green: green, blue: blue)
-            let weight = alpha * alpha
-
-            lightScore += log(contrastRatio(luminance, lightBackgroundLuminance)) * weight
-            darkScore += log(contrastRatio(luminance, darkBackgroundLuminance)) * weight
-            totalWeight += weight
-        }
-
-        guard totalWeight > 1 else { return nil }
-        return lightScore >= darkScore ? .light : .dark
-    }
-
-    private static func contrastRatio(_ first: Double, _ second: Double) -> Double {
-        (max(first, second) + 0.05) / (min(first, second) + 0.05)
-    }
-
-    private static func relativeLuminance(red: Double, green: Double, blue: Double) -> Double {
-        (0.2126 * linearized(red)) + (0.7152 * linearized(green)) + (0.0722 * linearized(blue))
-    }
-
-    private static func linearized(_ component: Double) -> Double {
-        component <= 0.04045
-            ? component / 12.92
-            : pow((component + 0.055) / 1.055, 2.4)
     }
 }

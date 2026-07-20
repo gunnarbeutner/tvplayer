@@ -57,10 +57,7 @@ struct PlaybackView: View {
                     .accessibilityLabel("Show playback timeline")
             }
 
-            switch chromeMode {
-            case .hidden:
-                EmptyView()
-            case .timeline:
+            if chromeMode == .timeline {
                 VStack {
                     Spacer()
                     if let recording = presentation.recording {
@@ -77,6 +74,9 @@ struct PlaybackView: View {
                         ProgrammePlaybackTimeline(
                             channel: presentation.channel,
                             fallbackProgram: presentation.program,
+                            pausedPlaybackDate: engine.state == .paused
+                                ? engine.livePlaybackDate()
+                                : nil,
                             liveDelaySeconds: engine.liveDelaySeconds,
                             bufferStartedAt: engine.bufferStartedAt,
                             canSeek: engine.isSeekable,
@@ -88,23 +88,33 @@ struct PlaybackView: View {
                     }
                 }
                 .transition(.opacity)
-            case .panel:
-                VStack {
-                    PlayerTabbedOverlay(
-                        presentation: presentation,
-                        engine: engine,
-                        profiles: profiles,
-                        selectedTab: $selectedTab,
-                        selectProfile: { profile in
-                            Task { await switchProfile(to: profile) }
-                        },
-                        dismiss: { hideChrome(automatically: false) },
-                        noteActivity: noteActivity
-                    )
-                    Spacer()
-                }
-                .transition(.move(edge: .top).combined(with: .opacity))
             }
+
+            // Keep the panel mounted for the lifetime of PlaybackView. In
+            // particular, this lets ChannelBadge finish loading before the
+            // first presentation and preserves its decoded image while the
+            // timeline or another panel tab is visible. Recreating the panel
+            // caused a one-frame monogram/logo flash even when the response
+            // data was already in the authenticated channel-logo cache.
+            VStack {
+                PlayerTabbedOverlay(
+                    presentation: presentation,
+                    engine: engine,
+                    profiles: profiles,
+                    selectedTab: $selectedTab,
+                    selectProfile: { profile in
+                        Task { await switchProfile(to: profile) }
+                    },
+                    dismiss: { hideChrome(automatically: false) },
+                    noteActivity: noteActivity
+                )
+                Spacer()
+            }
+            .opacity(chromeMode == .panel ? 1 : 0)
+            .offset(y: chromeMode == .panel ? 0 : -28)
+            .allowsHitTesting(chromeMode == .panel)
+            .disabled(chromeMode != .panel)
+            .accessibilityHidden(chromeMode != .panel)
 
             if case let .failed(message) = engine.state {
                 Label(message, systemImage: "exclamationmark.triangle.fill")
@@ -445,6 +455,7 @@ private struct RecordingPlaybackTimeline: View {
 private struct ProgrammePlaybackTimeline: View {
     let channel: GuideChannel
     let fallbackProgram: GuideProgram?
+    let pausedPlaybackDate: Date?
     let liveDelaySeconds: TimeInterval
     let bufferStartedAt: Date?
     let canSeek: Bool
@@ -472,7 +483,8 @@ private struct ProgrammePlaybackTimeline: View {
     }
 
     private func timeline(at liveDate: Date) -> some View {
-        let playbackDate = liveDate.addingTimeInterval(-liveDelaySeconds)
+        let playbackDate = pausedPlaybackDate
+            ?? liveDate.addingTimeInterval(-liveDelaySeconds)
         let program = channel.programs.first { $0.start <= playbackDate && playbackDate < $0.end } ?? fallbackProgram
         let next = program.flatMap { current in
             channel.programs.first { $0.start >= current.end && $0.id != current.id }
@@ -505,6 +517,14 @@ private struct ProgrammePlaybackTimeline: View {
                 HStack {
                     Text("\(clock(program.start))–\(clock(program.end))")
                     Spacer()
+                    if canSeek, let bufferStartedAt {
+                        Label(
+                            "Timeshift from \(clock(bufferStartedAt))",
+                            systemImage: "clock.arrow.circlepath"
+                        )
+                        .foregroundStyle(AppTheme.accent)
+                        Spacer()
+                    }
                     if let next { Text("Next · \(clock(next.start))") }
                 }
                 .font(.callout.monospacedDigit())
@@ -530,7 +550,11 @@ private struct ProgrammePlaybackTimeline: View {
             default: break
             }
         }
-        .accessibilityHint(canSeek ? "Swipe left or right to move 15 seconds" : "Live playback")
+        .accessibilityHint(
+            canSeek
+                ? "Timeshift is available from \(bufferStartedAt.map(clock) ?? "the start of playback"). Swipe left or right to move 15 seconds"
+                : "Live playback"
+        )
     }
 
     private func clock(_ date: Date) -> String {
@@ -627,15 +651,13 @@ private struct PlayerTabbedOverlay: View {
 
             Divider().overlay(.white.opacity(0.2))
 
-            Group {
-                switch selectedTab {
-                case .details:
-                    details
-                case .playback:
-                    playbackSettings
-                case .technical:
-                    technicalDetails
-                }
+            // Keep each tab subtree alive while switching. The Details tab
+            // owns the asynchronously loaded channel badge; tearing it down
+            // briefly exposed its fallback whenever the tab was revisited.
+            ZStack(alignment: .topLeading) {
+                tabContent(details, for: .details)
+                tabContent(playbackSettings, for: .playback)
+                tabContent(technicalDetails, for: .technical)
             }
             .frame(maxWidth: .infinity, minHeight: 300, maxHeight: 420, alignment: .topLeading)
         }
@@ -671,7 +693,18 @@ private struct PlayerTabbedOverlay: View {
         noteActivity()
     }
 
-    private var playbackDate: Date { Date().addingTimeInterval(-engine.liveDelaySeconds) }
+    private func tabContent<Content: View>(
+        _ content: Content,
+        for tab: PlayerOverlayTab
+    ) -> some View {
+        content
+            .opacity(selectedTab == tab ? 1 : 0)
+            .allowsHitTesting(selectedTab == tab)
+            .disabled(selectedTab != tab)
+            .accessibilityHidden(selectedTab != tab)
+    }
+
+    private var playbackDate: Date { engine.livePlaybackDate() }
 
     private var currentProgram: GuideProgram? {
         presentation.channel.programs.first {
@@ -680,45 +713,64 @@ private struct PlayerTabbedOverlay: View {
     }
 
     private var details: some View {
-        HStack(alignment: .top, spacing: 42) {
-            ChannelBadge(channel: presentation.channel, diameter: 112)
+        ScrollView(.vertical) {
+            HStack(alignment: .top, spacing: 42) {
+                ChannelBadge(channel: presentation.channel, diameter: 112)
 
-            VStack(alignment: .leading, spacing: 12) {
-                Text(presentation.recording?.title ?? currentProgram?.title ?? presentation.channel.name)
-                    .font(.largeTitle.bold())
-                    .foregroundStyle(.white)
-                if let subtitle = presentation.recording?.subtitle ?? currentProgram?.subtitle, !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(AppTheme.secondaryText)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(presentation.recording?.title ?? currentProgram?.title ?? presentation.channel.name)
+                        .font(.largeTitle.bold())
+                        .foregroundStyle(.white)
+                    if let subtitle = presentation.recording?.subtitle ?? currentProgram?.subtitle, !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(AppTheme.secondaryText)
+                    }
+                    if let recording = presentation.recording {
+                        Text("\(recording.start.formatted(date: .abbreviated, time: .shortened))–\(recording.end.formatted(date: .omitted, time: .shortened)) · \(recording.channelName)")
+                            .font(.headline.monospacedDigit())
+                            .foregroundStyle(AppTheme.secondaryText)
+                        programmeOverview(recording.overview)
+                    } else if let program = currentProgram {
+                        Text("\(program.start.formatted(date: .abbreviated, time: .shortened))–\(program.end.formatted(date: .omitted, time: .shortened)) · \(presentation.channel.name)")
+                            .font(.headline.monospacedDigit())
+                            .foregroundStyle(AppTheme.secondaryText)
+                        programmeOverview(program.overview)
+                    }
                 }
-                if let recording = presentation.recording {
-                    Text("\(recording.start.formatted(date: .abbreviated, time: .shortened))–\(recording.end.formatted(date: .omitted, time: .shortened)) · \(recording.channelName)")
-                        .font(.headline.monospacedDigit())
-                        .foregroundStyle(AppTheme.secondaryText)
-                    Text(recording.overview)
-                        .font(.title3)
-                        .foregroundStyle(.white.opacity(0.9))
-                        .lineLimit(6)
-                } else if let program = currentProgram {
-                    Text("\(program.start.formatted(date: .abbreviated, time: .shortened))–\(program.end.formatted(date: .omitted, time: .shortened)) · \(presentation.channel.name)")
-                        .font(.headline.monospacedDigit())
-                        .foregroundStyle(AppTheme.secondaryText)
-                    Text(program.overview)
-                        .font(.title3)
-                        .foregroundStyle(.white.opacity(0.9))
-                        .lineLimit(6)
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.trailing, 12)
         }
+        .scrollIndicators(.visible)
+        .contentMargins(.vertical, 4, for: .scrollContent)
+        .focusable()
+        .focusEffectDisabled()
+        .accessibilityLabel("Programme details")
+        .accessibilityHint("Swipe up or down to read the full description")
+    }
+
+    private func programmeOverview(_ overview: String) -> some View {
+        Text(overview.isEmpty ? "No description available." : overview)
+            .font(.title3)
+            .foregroundStyle(.white.opacity(overview.isEmpty ? 0.62 : 0.9))
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private var playbackSettings: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 18) {
                 if !presentation.isRecording {
-                    settingSection("Quality") {
-                        HStack(spacing: 14) {
+                    playbackSettingCard(
+                        title: "Stream quality",
+                        systemImage: "sparkles.tv"
+                    ) {
+                        LazyVGrid(
+                            columns: [GridItem(.adaptive(minimum: 230, maximum: 360), spacing: 12)],
+                            alignment: .leading,
+                            spacing: 12
+                        ) {
                             ForEach(profiles) { profile in
                                 choiceButton(
                                     title: profile.name == "pass" ? "Original" : profile.name,
@@ -727,53 +779,81 @@ private struct PlayerTabbedOverlay: View {
                                 ) { selectProfile(profile) }
                             }
                             if profiles.isEmpty {
-                                Text("\(engine.activeProfile) · Direct stream")
-                                    .foregroundStyle(.white.opacity(0.8))
+                                unavailable("\(engine.activeProfile) · Direct stream")
                             }
                         }
                     }
                 }
 
-                settingSection("Audio stream") {
-                    HStack(spacing: 14) {
-                        ForEach(engine.audioTracks) { track in
-                            choiceButton(
-                                title: track.name,
-                                subtitle: nil,
-                                selected: engine.selectedAudioTrackID == track.id
-                            ) { engine.selectAudioTrack(track.id); noteActivity() }
-                        }
-                        if engine.audioTracks.isEmpty { unavailable("No audio streams reported yet") }
-                    }
-                }
+                HStack(alignment: .top, spacing: 18) {
+                    playbackSettingCard(
+                        title: "Audio",
+                        systemImage: "speaker.wave.2.fill"
+                    ) {
+                        VStack(alignment: .leading, spacing: 16) {
+                            LazyVGrid(
+                                columns: [GridItem(.adaptive(minimum: 210, maximum: 340), spacing: 12)],
+                                alignment: .leading,
+                                spacing: 12
+                            ) {
+                                ForEach(engine.audioTracks) { track in
+                                    choiceButton(
+                                        title: track.name,
+                                        subtitle: nil,
+                                        selected: engine.selectedAudioTrackID == track.id
+                                    ) { engine.selectAudioTrack(track.id); noteActivity() }
+                                }
+                                if engine.audioTracks.isEmpty {
+                                    unavailable("No audio streams reported yet")
+                                }
+                            }
 
-                settingSection("Subtitles") {
-                    HStack(spacing: 14) {
-                        ForEach(engine.subtitleTracks) { track in
-                            choiceButton(
-                                title: track.name,
-                                subtitle: nil,
-                                selected: engine.selectedSubtitleTrackID == track.id
-                            ) { engine.selectSubtitleTrack(track.id); noteActivity() }
+                            Divider().overlay(.white.opacity(0.12))
+                            compactDelayControl(
+                                title: "Synchronization",
+                                value: engine.audioDelayMilliseconds,
+                                change: engine.adjustAudioDelay
+                            )
                         }
-                        if engine.subtitleTracks.isEmpty { unavailable("No subtitle streams") }
                     }
-                }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
 
-                HStack(spacing: 42) {
-                    delayControl(
-                        title: "Audio timing",
-                        value: engine.audioDelayMilliseconds,
-                        change: engine.adjustAudioDelay
-                    )
-                    delayControl(
-                        title: "Subtitle timing",
-                        value: engine.subtitleDelayMilliseconds,
-                        change: engine.adjustSubtitleDelay
-                    )
+                    playbackSettingCard(
+                        title: "Subtitles",
+                        systemImage: "captions.bubble.fill"
+                    ) {
+                        VStack(alignment: .leading, spacing: 16) {
+                            LazyVGrid(
+                                columns: [GridItem(.adaptive(minimum: 210, maximum: 340), spacing: 12)],
+                                alignment: .leading,
+                                spacing: 12
+                            ) {
+                                ForEach(engine.subtitleTracks) { track in
+                                    choiceButton(
+                                        title: track.name,
+                                        subtitle: nil,
+                                        selected: engine.selectedSubtitleTrackID == track.id
+                                    ) { engine.selectSubtitleTrack(track.id); noteActivity() }
+                                }
+                                if engine.subtitleTracks.isEmpty {
+                                    unavailable("No subtitle streams")
+                                }
+                            }
+
+                            Divider().overlay(.white.opacity(0.12))
+                            compactDelayControl(
+                                title: "Synchronization",
+                                value: engine.subtitleDelayMilliseconds,
+                                change: engine.adjustSubtitleDelay
+                            )
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
             }
+            .padding(.bottom, 8)
         }
+        .scrollIndicators(.hidden)
     }
 
     private var technicalDetails: some View {
@@ -819,16 +899,23 @@ private struct PlayerTabbedOverlay: View {
         .scrollIndicators(.hidden)
     }
 
-    private func settingSection<Content: View>(
-        _ title: String,
+    private func playbackSettingCard<Content: View>(
+        title: String,
+        systemImage: String,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title.uppercased())
-                .font(.caption.bold())
-                .tracking(1.3)
-                .foregroundStyle(AppTheme.secondaryText)
+        VStack(alignment: .leading, spacing: 15) {
+            Label(title, systemImage: systemImage)
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(.white)
             content()
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .strokeBorder(.white.opacity(0.08), lineWidth: 1)
         }
     }
 
@@ -853,24 +940,28 @@ private struct PlayerTabbedOverlay: View {
             .padding(.vertical, 12)
     }
 
-    private func delayControl(
+    private func compactDelayControl(
         title: String,
         value: Int,
         change: @escaping (Int) -> Void
     ) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text(title.uppercased())
-                .font(.caption.bold())
-                .tracking(1.3)
+        HStack(spacing: 12) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(AppTheme.secondaryText)
-            HStack(spacing: 10) {
-                Button { change(-50); noteActivity() } label: { Image(systemName: "minus") }
-                Text(value == 0 ? "0 ms" : String(format: "%+d ms", value))
-                    .font(.headline.monospacedDigit())
-                    .frame(minWidth: 110)
-                Button { change(50); noteActivity() } label: { Image(systemName: "plus") }
+            Spacer(minLength: 10)
+            PlayerStepButton(systemImage: "minus") {
+                change(-50)
+                noteActivity()
             }
-            .buttonStyle(.bordered)
+            Text(value == 0 ? "0 ms" : String(format: "%+d ms", value))
+                .font(.headline.monospacedDigit())
+                .foregroundStyle(.white)
+                .frame(minWidth: 105)
+            PlayerStepButton(systemImage: "plus") {
+                change(50)
+                noteActivity()
+            }
         }
     }
 }
@@ -886,8 +977,11 @@ private struct PlayerChoiceButton: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack {
-                Text(title).font(.headline)
-                if selected { Image(systemName: "checkmark") }
+                Text(title)
+                    .font(.headline)
+                    .lineLimit(1)
+                Spacer(minLength: 12)
+                if selected { Image(systemName: "checkmark.circle.fill") }
             }
             if let subtitle {
                 Text(subtitle).font(.caption).foregroundStyle(.white.opacity(0.7))
@@ -896,6 +990,7 @@ private struct PlayerChoiceButton: View {
         .foregroundStyle(.white)
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
         .background(
             selected || isFocused ? AppTheme.focused : Color.white.opacity(0.1),
             in: RoundedRectangle(cornerRadius: 10)
@@ -907,5 +1002,35 @@ private struct PlayerChoiceButton: View {
         .onTapGesture(perform: action)
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { action() }
+    }
+}
+
+private struct PlayerStepButton: View {
+    let systemImage: String
+    let action: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Image(systemName: systemImage)
+            .font(.headline.bold())
+            .foregroundStyle(.white)
+            .frame(width: 48, height: 38)
+            .background(
+                isFocused ? AppTheme.focused : Color.white.opacity(0.1),
+                in: RoundedRectangle(cornerRadius: 9)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 9)
+                    .strokeBorder(isFocused ? AppTheme.focusBorder : Color.clear, lineWidth: 2)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 9))
+            .focusable()
+            .focused($isFocused)
+            .focusEffectDisabled()
+            .onTapGesture(perform: action)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel(systemImage == "minus" ? "Decrease delay" : "Increase delay")
+            .accessibilityAction { action() }
     }
 }

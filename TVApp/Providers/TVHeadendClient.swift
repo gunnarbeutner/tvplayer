@@ -146,6 +146,28 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
         return [info.name, info.version].compactMap { $0 }.joined(separator: " ")
     }
 
+    /// Loads artwork exposed by TVHeadend's protected `/imagecache` endpoint.
+    /// `AsyncImage` uses the shared URL session and cannot answer TVHeadend's
+    /// authentication challenge, so channel badges must use the client's
+    /// credential-aware session instead.
+    func fetchChannelIcon(at url: URL) async throws -> Data {
+        if Self.hasSameOrigin(url, configuration.baseURL) {
+            return try await fetchData(at: url)
+        }
+
+        // TVHeadend may advertise an externally hosted public icon. Do not
+        // offer the server password to authentication challenges from a
+        // different origin.
+        let (data, response) = try await URLSession.shared.data(from: url)
+        guard let response = response as? HTTPURLResponse else {
+            throw TVProviderError.invalidResponse
+        }
+        guard (200..<300).contains(response.statusCode) else {
+            throw TVProviderError.httpStatus(response.statusCode)
+        }
+        return data
+    }
+
     func fetchRecordings() async throws -> TVRecordingSnapshot {
         guard configuration.isComplete else { throw TVProviderError.incompleteConfiguration }
 
@@ -372,6 +394,22 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
         components.queryItems = queryItems.isEmpty ? nil : queryItems
         guard let url = components.url else { throw TVProviderError.invalidEndpoint }
         return url
+    }
+
+    private static func hasSameOrigin(_ first: URL, _ second: URL?) -> Bool {
+        guard let second else { return false }
+        return first.scheme?.lowercased() == second.scheme?.lowercased()
+            && first.host?.lowercased() == second.host?.lowercased()
+            && effectivePort(for: first) == effectivePort(for: second)
+    }
+
+    private static func effectivePort(for url: URL) -> Int? {
+        if let port = url.port { return port }
+        switch url.scheme?.lowercased() {
+        case "http": return 80
+        case "https": return 443
+        default: return nil
+        }
     }
 
     private static func mapEPG(
