@@ -159,6 +159,25 @@ final class GuideGridLayoutTests: XCTestCase {
         )
     }
 
+    func testPendingFocusDoesNotBecomeTheNextDirectionalInputOrigin() {
+        XCTAssertEqual(
+            GuideFocusNavigation.inputOrigin(
+                confirmedProgramID: "row-1",
+                pendingProgramID: "row-2",
+                eventProgramID: "row-1"
+            ),
+            "row-1"
+        )
+        XCTAssertEqual(
+            GuideFocusNavigation.inputOrigin(
+                confirmedProgramID: nil,
+                pendingProgramID: "row-2",
+                eventProgramID: "row-1"
+            ),
+            "row-1"
+        )
+    }
+
     func testMovingDownSelectsCurrentProgrammeOnNextChannel() throws {
         let now = Date(timeIntervalSince1970: 10_000)
         let first = channel(

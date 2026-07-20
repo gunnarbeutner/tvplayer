@@ -47,6 +47,19 @@ enum GuideCollectionNavigationDirection: Equatable {
 #endif
 }
 
+enum GuideFocusNavigation {
+    /// Directional input must start from confirmed focus. A pending target has
+    /// not moved onscreen yet, so treating it as the origin makes a repeated
+    /// key press skip over the row the user is still looking at.
+    static func inputOrigin(
+        confirmedProgramID: GuideProgram.ID?,
+        pendingProgramID _: GuideProgram.ID?,
+        eventProgramID: GuideProgram.ID
+    ) -> GuideProgram.ID {
+        confirmedProgramID ?? eventProgramID
+    }
+}
+
 /// Immutable, indexed input for the collection view. Expensive date
 /// formatting and geometry are computed once per guide revision rather than
 /// while cells are scrolling on the main thread.
@@ -835,7 +848,14 @@ private final class GuideCollectionView: UICollectionView,
             updateFocusIfNeeded()
         }
 
-        guard currentlyFocusedProgramID != programID, retriesRemaining > 0 else { return }
+        guard currentlyFocusedProgramID != programID else { return }
+        guard retriesRemaining > 0 else {
+            if pendingFocusProgramID == programID {
+                pendingFocusProgramID = nil
+                updateFocusAvailability()
+            }
+            return
+        }
         focusRetryTask?.cancel()
         focusRetryTask = Task { @MainActor [weak self] in
             do {
@@ -892,7 +912,11 @@ private final class GuideCollectionView: UICollectionView,
             os_signpost(.end, log: guidePerformanceLog, name: "GuideInputToFocus", signpostID: navigationSignpostID)
             self.navigationSignpostID = nil
         }
-        let origin = pendingFocusProgramID ?? currentlyFocusedProgramID ?? programID
+        let origin = GuideFocusNavigation.inputOrigin(
+            confirmedProgramID: currentlyFocusedProgramID,
+            pendingProgramID: pendingFocusProgramID,
+            eventProgramID: programID
+        )
         guard let snapshot = guideSnapshot else { return .native }
         guard let destination = snapshot.destinationProgramID(
                 from: origin,
