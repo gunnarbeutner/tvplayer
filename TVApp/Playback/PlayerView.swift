@@ -128,25 +128,28 @@ struct PlaybackView: View {
             }
 
 #if !os(tvOS)
-            VStack {
-                HStack {
-                    Button {
-                        playback.leavePlayer()
-                    } label: {
-                        Label("Close Player", systemImage: "xmark")
-                            .labelStyle(.iconOnly)
-                            .frame(width: 36, height: 36)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.black.opacity(0.72))
-                    .accessibilityLabel("Close Player")
-                    .keyboardShortcut(.cancelAction)
+            if chromeMode != .hidden {
+                VStack {
+                    HStack {
+                        Button {
+                            playback.leavePlayer()
+                        } label: {
+                            Label("Close Player", systemImage: "xmark")
+                                .labelStyle(.iconOnly)
+                                .frame(width: 36, height: 36)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.black.opacity(0.72))
+                        .accessibilityLabel("Close Player")
+                        .keyboardShortcut(.cancelAction)
 
+                        Spacer()
+                    }
                     Spacer()
                 }
-                Spacer()
+                .padding(20)
+                .transition(.opacity)
             }
-            .padding(20)
 #endif
 
             if case let .recovering(reason, attempt) = engine.state {

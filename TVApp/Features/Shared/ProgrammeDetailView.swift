@@ -54,7 +54,7 @@ struct ProgrammeDetailView: View {
     private var detailLayout: AnyLayout {
         usesCompactLayout
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: 28))
-            : AnyLayout(HStackLayout(alignment: .top, spacing: 54))
+            : AnyLayout(HStackLayout(alignment: .top, spacing: detailColumnSpacing))
     }
 
     private var usesCompactLayout: Bool {
@@ -73,8 +73,64 @@ struct ProgrammeDetailView: View {
 #endif
     }
 
-    private let actionColumns = [
-        GridItem(.adaptive(minimum: 170), spacing: 14, alignment: .leading)
+    private var detailColumnSpacing: CGFloat {
+#if os(macOS)
+        32
+#else
+        54
+#endif
+    }
+
+    private var channelBadgeDiameter: CGFloat {
+#if os(macOS)
+        104
+#else
+        132
+#endif
+    }
+
+    private var channelColumnWidth: CGFloat {
+#if os(macOS)
+        180
+#else
+        280
+#endif
+    }
+
+    private var detailMaximumWidth: CGFloat {
+#if os(macOS)
+        840
+#else
+        1_720
+#endif
+    }
+
+    private var titleFont: Font {
+#if os(macOS)
+        .title.bold()
+#else
+        .largeTitle.bold()
+#endif
+    }
+
+    private var overviewFont: Font {
+#if os(macOS)
+        .body
+#else
+        .title3
+#endif
+    }
+
+    private var actionColumns: [GridItem] {
+#if os(macOS)
+        [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 12, alignment: .leading)]
+#else
+        [GridItem(.adaptive(minimum: 170), spacing: 14, alignment: .leading)]
+#endif
+    }
+
+    private let metadataColumns = [
+        GridItem(.adaptive(minimum: 90, maximum: 190), spacing: 8, alignment: .leading)
     ]
 
     private enum RecordingConfirmation: String, Identifiable {
@@ -90,14 +146,14 @@ struct ProgrammeDetailView: View {
             ScrollView {
                 detailLayout {
                 VStack(spacing: 22) {
-                    ChannelBadge(channel: channel, diameter: 132)
+                    ChannelBadge(channel: channel, diameter: channelBadgeDiameter)
 
                     Text(channel.name)
                         .font(.title2.bold())
                 }
-                .frame(width: usesCompactLayout ? nil : 280)
+                .frame(width: usesCompactLayout ? nil : channelColumnWidth)
 
-                VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: usesCompactLayout ? 20 : 16) {
                     if let program, program.isAiring(at: Date()) {
                         Text("LIVE NOW")
                             .font(.caption.bold())
@@ -109,7 +165,7 @@ struct ProgrammeDetailView: View {
                     }
 
                     Text(program?.title ?? channel.name)
-                        .font(.largeTitle.bold())
+                        .font(titleFont)
 
                     if let subtitle = program?.subtitle, !subtitle.isEmpty {
                         Text(subtitle)
@@ -126,21 +182,24 @@ struct ProgrammeDetailView: View {
                         .foregroundStyle(AppTheme.secondaryText)
 
                         if !metadataLabels.isEmpty {
+#if os(macOS)
+                            LazyVGrid(columns: metadataColumns, alignment: .leading, spacing: 8) {
+                                ForEach(metadataLabels, id: \.self) { label in
+                                    metadataBadge(label)
+                                }
+                            }
+#else
                             HStack(spacing: 10) {
                                 ForEach(metadataLabels, id: \.self) { label in
-                                    Text(label)
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(.white.opacity(0.9))
-                                        .padding(.horizontal, 11)
-                                        .padding(.vertical, 6)
-                                        .background(AppTheme.surfaceRaised, in: Capsule())
+                                    metadataBadge(label)
                                 }
                             }
                             .lineLimit(1)
+#endif
                         }
 
                         Text(program.overview)
-                            .font(.title3)
+                            .font(overviewFont)
                             .foregroundStyle(.white.opacity(0.9))
                             .lineLimit(8)
                     } else {
@@ -226,10 +285,11 @@ struct ProgrammeDetailView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: 1_720, alignment: .leading)
+                .frame(maxWidth: detailMaximumWidth, alignment: .leading)
                 .padding(detailPadding)
             }
         }
+        .programmeDetailWindowSizing()
         .televisionPlayPauseCommand {
             watchLive()
         }
@@ -295,5 +355,26 @@ struct ProgrammeDetailView: View {
             configuration: settings.configuration
         )
         dismiss()
+    }
+
+    private func metadataBadge(_ label: String) -> some View {
+        Text(label)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.white.opacity(0.9))
+            .lineLimit(1)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .background(AppTheme.surfaceRaised, in: Capsule())
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func programmeDetailWindowSizing() -> some View {
+#if os(macOS)
+        frame(width: 900, height: 620)
+#else
+        self
+#endif
     }
 }

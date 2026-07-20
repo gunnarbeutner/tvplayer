@@ -1683,6 +1683,8 @@ struct GuideGridView: View {
                     ForEach(Array(channels.enumerated()), id: \.element.id) { row, channel in
                         HStack(spacing: 0) {
                             channelLabel(channel)
+                                .guidePinnedToLeadingEdge()
+                                .zIndex(1)
 
                             ZStack(alignment: .topLeading) {
                                 ForEach(visiblePrograms[row]) { program in
@@ -1718,7 +1720,11 @@ struct GuideGridView: View {
                                     }
                                 }
                             }
-                            .frame(width: timeline.width, height: GuideGridMetrics.rowHeight)
+                            .frame(
+                                width: timeline.width,
+                                height: GuideGridMetrics.rowHeight,
+                                alignment: .topLeading
+                            )
                             .background(row.isMultiple(of: 2) ? AppTheme.background : AppTheme.surface.opacity(0.22))
                         }
                     }
@@ -1730,6 +1736,8 @@ struct GuideGridView: View {
                             .padding(.horizontal, 18)
                             .frame(width: GuideGridMetrics.channelWidth, height: GuideGridMetrics.headerHeight, alignment: .leading)
                             .background(AppTheme.chrome)
+                            .guidePinnedToLeadingEdge()
+                            .zIndex(1)
 
                         ZStack(alignment: .topLeading) {
                             ForEach(timeline.halfHourMarks, id: \.self) { mark in
@@ -1739,7 +1747,11 @@ struct GuideGridView: View {
                                     .offset(x: timeline.xOffset(for: mark) + 10, y: 10)
                             }
                         }
-                        .frame(width: timeline.width, height: GuideGridMetrics.headerHeight)
+                        .frame(
+                            width: timeline.width,
+                            height: GuideGridMetrics.headerHeight,
+                            alignment: .topLeading
+                        )
                         .background(AppTheme.chrome)
                     }
                 }
@@ -1769,6 +1781,21 @@ struct GuideGridView: View {
         .padding(.horizontal, 14)
         .frame(width: GuideGridMetrics.channelWidth, height: GuideGridMetrics.rowHeight)
         .background(AppTheme.chrome)
+    }
+}
+
+private extension View {
+    /// Keeps the channel column fixed while the surrounding two-axis guide
+    /// scroll view moves its timeline content horizontally.
+    func guidePinnedToLeadingEdge() -> some View {
+        visualEffect { content, geometry in
+            content.offset(
+                x: max(
+                    0,
+                    -geometry.frame(in: .scrollView(axis: .horizontal)).minX
+                )
+            )
+        }
     }
 }
 #endif
