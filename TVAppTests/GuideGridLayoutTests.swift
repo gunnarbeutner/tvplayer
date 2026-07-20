@@ -159,11 +159,11 @@ final class GuideGridLayoutTests: XCTestCase {
         )
     }
 
-    func testPendingFocusDoesNotBecomeTheNextDirectionalInputOrigin() {
+    func testDirectionalInputUsesItsEventCellDuringFocusTransitions() {
         XCTAssertEqual(
             GuideFocusNavigation.inputOrigin(
-                confirmedProgramID: "row-1",
-                pendingProgramID: "row-2",
+                confirmedProgramID: "stale-row",
+                pendingProgramID: "pending-row",
                 eventProgramID: "row-1"
             ),
             "row-1"

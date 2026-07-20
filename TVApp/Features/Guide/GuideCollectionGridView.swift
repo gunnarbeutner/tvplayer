@@ -48,15 +48,15 @@ enum GuideCollectionNavigationDirection: Equatable {
 }
 
 enum GuideFocusNavigation {
-    /// Directional input must start from confirmed focus. A pending target has
-    /// not moved onscreen yet, so treating it as the origin makes a repeated
-    /// key press skip over the row the user is still looking at.
+    /// The cell receiving the press is the only synchronous source of truth.
+    /// UIKit's visible-cell focus flags and our pending target can both be in
+    /// transition while that press is being delivered.
     static func inputOrigin(
-        confirmedProgramID: GuideProgram.ID?,
+        confirmedProgramID _: GuideProgram.ID?,
         pendingProgramID _: GuideProgram.ID?,
         eventProgramID: GuideProgram.ID
     ) -> GuideProgram.ID {
-        confirmedProgramID ?? eventProgramID
+        eventProgramID
     }
 }
 
@@ -949,10 +949,14 @@ private final class GuideCollectionView: UICollectionView,
             directionName
         )
 
-        // Consume every in-grid move and request its indexed destination
-        // directly. Mixing native focus for mounted cells with programmatic
-        // focus for unmounted cells left selection state dependent on the
-        // virtualization window and focus-engine timing.
+        // UIKit is most reliable when it can perform a normal adjacent focus
+        // move. Intervene only when virtualization has not mounted the indexed
+        // destination yet; shouldAllowFocusUpdate still verifies that UIKit's
+        // geometric candidate matches our time-based navigation target.
+        if let indexPath = snapshot.indexPath(for: destination),
+           cellForItem(at: indexPath) != nil {
+            return .native
+        }
         requestFocus(on: destination, animated: true, retriesRemaining: 8)
         return .consumed
     }
@@ -971,7 +975,7 @@ private final class GuideCollectionView: UICollectionView,
         ), let snapshot = guideSnapshot
         else { return true }
 
-        let origin = currentlyFocusedProgramID ?? programID
+        let origin = programID
         guard let destination = snapshot.destinationProgramID(
             from: origin,
             direction: direction,
