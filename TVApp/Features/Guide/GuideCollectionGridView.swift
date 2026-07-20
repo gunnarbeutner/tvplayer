@@ -1719,13 +1719,13 @@ private final class GuideTimelineHeaderReusableView: UICollectionReusableView {
             height: GuideGridMetrics.headerHeight
         )
         for mark in snapshot.marks {
-            let label = UILabel(frame: CGRect(x: mark.x + 10, y: 7, width: 170, height: 27))
+            let label = UILabel(frame: CGRect(x: mark.x + 10, y: 12, width: 170, height: 34))
             label.text = mark.title
             label.textColor = .white
             label.font = .monospacedDigitSystemFont(ofSize: 19, weight: .semibold)
             content.addSubview(label)
 
-            let tick = UIView(frame: CGRect(x: mark.x + 10, y: 36, width: 1, height: 13))
+            let tick = UIView(frame: CGRect(x: mark.x + 10, y: 43, width: 1, height: 14))
             tick.backgroundColor = UIColor(AppTheme.divider)
             content.addSubview(tick)
         }
