@@ -7,6 +7,7 @@ struct ChannelsView: View {
     @EnvironmentObject private var model: GuideViewModel
     @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var playback: PlaybackCoordinator
+    @EnvironmentObject private var channelPreferences: ChannelPreferencesStore
     @FocusState private var focusedChannelID: GuideChannel.ID?
     @State private var detail: ProgrammeDetailPresentation?
 
@@ -16,6 +17,10 @@ struct ChannelsView: View {
             spacing: PlatformLayout.gridSpacing
         )
     ]
+
+    private var displayedChannels: [GuideChannel] {
+        channelPreferences.displayedChannels(from: model.channels)
+    }
 
     var body: some View {
         ZStack {
@@ -44,10 +49,11 @@ struct ChannelsView: View {
                         }
 
                         LazyVGrid(columns: columns, alignment: .leading, spacing: 30) {
-                            ForEach(model.channels) { channel in
+                            ForEach(displayedChannels) { channel in
                                 ChannelCard(
                                     channel: channel,
                                     currentProgram: currentProgram(for: channel),
+                                    isFavorite: channelPreferences.isFavorite(channel.id),
                                     isFocused: focusedChannelID == channel.id,
                                     onWatch: {
                                         playback.start(
@@ -67,12 +73,33 @@ struct ChannelsView: View {
                                         channel: channel
                                     )
                                 }
+                                .contextMenu {
+                                    Button {
+                                        channelPreferences.toggleFavorite(channel.id)
+                                    } label: {
+                                        Label(
+                                            channelPreferences.isFavorite(channel.id)
+                                                ? "Remove Channel from Favourites"
+                                                : "Add Channel to Favourites",
+                                            systemImage: channelPreferences.isFavorite(channel.id)
+                                                ? "star.slash"
+                                                : "star"
+                                        )
+                                    }
+                                }
                                 .accessibilityAddTraits(.isButton)
                                 .accessibilityAction {
                                     detail = ProgrammeDetailPresentation(
                                         program: currentProgram(for: channel),
                                         channel: channel
                                     )
+                                }
+                                .accessibilityAction(
+                                    named: channelPreferences.isFavorite(channel.id)
+                                        ? "Remove Channel from Favourites"
+                                        : "Add Channel to Favourites"
+                                ) {
+                                    channelPreferences.toggleFavorite(channel.id)
                                 }
                             }
                         }
@@ -106,11 +133,17 @@ struct ChannelsView: View {
             guard isSelected else { return }
             restorePlaybackFocusIfAvailable()
         }
+        .onChange(of: channelPreferences.revision) { _, _ in
+            guard let focusedChannelID,
+                  !displayedChannels.contains(where: { $0.id == focusedChannelID })
+            else { return }
+            self.focusedChannelID = displayedChannels.first?.id
+        }
     }
 
     private var focusedChannel: GuideChannel? {
-        guard let focusedChannelID else { return model.channels.first }
-        return model.channels.first { $0.id == focusedChannelID }
+        guard let focusedChannelID else { return displayedChannels.first }
+        return displayedChannels.first { $0.id == focusedChannelID }
     }
 
     private func currentProgram(for channel: GuideChannel) -> GuideProgram? {
@@ -119,7 +152,7 @@ struct ChannelsView: View {
 
     private func restorePlaybackFocusIfAvailable() {
         guard let channelID = PlaybackFocusSelection.channelID(
-            in: model.channels,
+            in: displayedChannels,
             selection: playback.navigationSelection
         ) else { return }
 
@@ -134,6 +167,7 @@ struct ChannelsView: View {
 private struct ChannelCard: View {
     let channel: GuideChannel
     let currentProgram: GuideProgram?
+    let isFavorite: Bool
     let isFocused: Bool
     let onWatch: () -> Void
 
@@ -149,6 +183,12 @@ private struct ChannelCard: View {
                     .minimumScaleFactor(0.8)
 
                 Spacer(minLength: 0)
+
+                if isFavorite {
+                    Image(systemName: "star.fill")
+                        .foregroundStyle(AppTheme.accent)
+                        .accessibilityLabel("Favourite channel")
+                }
             }
 
             Rectangle()

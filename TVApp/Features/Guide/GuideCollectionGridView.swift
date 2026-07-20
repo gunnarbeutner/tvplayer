@@ -273,6 +273,7 @@ struct GuideGridView: View {
     let timeline: GuideTimeline
     let now: Date
     let guideRevision: Int
+    let channelPreferencesRevision: Int
     let preferredProgramID: GuideProgram.ID?
     let focusScope: Namespace.ID
     @Binding var focusedProgramID: GuideProgram.ID?
@@ -280,6 +281,8 @@ struct GuideGridView: View {
     let focusRestoreRequest: UUID
     let recordingsRevision: Int
     let configuration: TVHeadendConfiguration
+    let isFavorite: (GuideChannel.ID) -> Bool
+    let onToggleFavorite: (GuideChannel.ID) -> Void
     let recordingState: (GuideProgram) -> TVRecordingState?
     let onActivate: (GuideProgram) -> Void
     let onPlay: (GuideProgram) -> Void
@@ -293,12 +296,15 @@ struct GuideGridView: View {
             timeline: timeline,
             now: now,
             guideRevision: guideRevision,
+            channelPreferencesRevision: channelPreferencesRevision,
             preferredProgramID: preferredProgramID,
             focusedProgramID: $focusedProgramID,
             recenterRequest: recenterRequest,
             focusRestoreRequest: focusRestoreRequest,
             recordingsRevision: recordingsRevision,
             configuration: configuration,
+            isFavorite: isFavorite,
+            onToggleFavorite: onToggleFavorite,
             recordingState: recordingState,
             onActivate: onActivate,
             onPlay: onPlay,
@@ -314,12 +320,15 @@ private struct GuideCollectionRepresentable: UIViewRepresentable {
     let timeline: GuideTimeline
     let now: Date
     let guideRevision: Int
+    let channelPreferencesRevision: Int
     let preferredProgramID: GuideProgram.ID?
     @Binding var focusedProgramID: GuideProgram.ID?
     let recenterRequest: UUID
     let focusRestoreRequest: UUID
     let recordingsRevision: Int
     let configuration: TVHeadendConfiguration
+    let isFavorite: (GuideChannel.ID) -> Bool
+    let onToggleFavorite: (GuideChannel.ID) -> Void
     let recordingState: (GuideProgram) -> TVRecordingState?
     let onActivate: (GuideProgram) -> Void
     let onPlay: (GuideProgram) -> Void
@@ -336,12 +345,15 @@ private struct GuideCollectionRepresentable: UIViewRepresentable {
             timeline: timeline,
             now: now,
             guideRevision: guideRevision,
+            channelPreferencesRevision: channelPreferencesRevision,
             preferredProgramID: preferredProgramID,
             focusedProgramID: focusedProgramID,
             recenterRequest: recenterRequest,
             focusRestoreRequest: focusRestoreRequest,
             recordingsRevision: recordingsRevision,
             configuration: configuration,
+            isFavorite: isFavorite,
+            onToggleFavorite: onToggleFavorite,
             recordingState: recordingState,
             onFocused: { focusedProgramID = $0 },
             onActivate: onActivate,
@@ -602,19 +614,28 @@ private final class GuideCollectionView: UICollectionView,
     private var guideSnapshot: GuideGridSnapshot?
     private var snapshotBuildTask: Task<Void, Never>?
     private var focusRetryTask: Task<Void, Never>?
+    private var channelFocusRetryTask: Task<Void, Never>?
     private var requestedGuideRevision: Int?
+    private var requestedChannelPreferencesRevision: Int?
     private var appliedRecordingsRevision: Int?
     private var appliedRecenterRequest: UUID?
     private var appliedFocusRestoreRequest: UUID?
     private var requestedFocusedProgramID: GuideProgram.ID?
     private var preferredProgramID: GuideProgram.ID?
     private var pendingFocusProgramID: GuideProgram.ID?
+    private var pendingChannelProgramID: GuideProgram.ID?
+    private var focusedChannelID: GuideChannel.ID?
+    private var focusedChannelReturnProgramID: GuideProgram.ID?
+    private var channelIDAwaitingSnapshotFocus: GuideChannel.ID?
+    private var channelReturnProgramIDAwaitingSnapshotFocus: GuideProgram.ID?
     private var navigationSignpostID: OSSignpostID?
     private var currentNow = Date()
     private var currentConfiguration: TVHeadendConfiguration?
     private var isGuideEnabled = true
 
     private var recordingState: (GuideProgram) -> TVRecordingState? = { _ in nil }
+    private var isFavorite: (GuideChannel.ID) -> Bool = { _ in false }
+    private var onToggleFavorite: (GuideChannel.ID) -> Void = { _ in }
     private var onFocused: (GuideProgram.ID) -> Void = { _ in }
     private var onActivate: (GuideProgram) -> Void = { _ in }
     private var onPlay: (GuideProgram) -> Void = { _ in }
@@ -676,6 +697,14 @@ private final class GuideCollectionView: UICollectionView,
     }
 
     override var preferredFocusEnvironments: [UIFocusEnvironment] {
+        if let pendingChannelProgramID,
+           let section = guideSnapshot?.indexPath(for: pendingChannelProgramID)?.section,
+           let header = supplementaryView(
+                forElementKind: GuideCollectionElementKind.channelHeader,
+                at: IndexPath(item: 0, section: section)
+           ) {
+            return [header]
+        }
         if let pendingFocusProgramID,
            let indexPath = guideSnapshot?.indexPath(for: pendingFocusProgramID),
            let cell = cellForItem(at: indexPath) {
@@ -689,12 +718,15 @@ private final class GuideCollectionView: UICollectionView,
         timeline: GuideTimeline,
         now: Date,
         guideRevision: Int,
+        channelPreferencesRevision: Int,
         preferredProgramID: GuideProgram.ID?,
         focusedProgramID: GuideProgram.ID?,
         recenterRequest: UUID,
         focusRestoreRequest: UUID,
         recordingsRevision: Int,
         configuration: TVHeadendConfiguration,
+        isFavorite: @escaping (GuideChannel.ID) -> Bool,
+        onToggleFavorite: @escaping (GuideChannel.ID) -> Void,
         recordingState: @escaping (GuideProgram) -> TVRecordingState?,
         onFocused: @escaping (GuideProgram.ID) -> Void,
         onActivate: @escaping (GuideProgram) -> Void,
@@ -706,6 +738,8 @@ private final class GuideCollectionView: UICollectionView,
         let previousRequestedFocusedProgramID = requestedFocusedProgramID
         requestedFocusedProgramID = focusedProgramID
         currentConfiguration = configuration
+        self.isFavorite = isFavorite
+        self.onToggleFavorite = onToggleFavorite
         self.recordingState = recordingState
         self.onFocused = onFocused
         self.onActivate = onActivate
@@ -719,12 +753,15 @@ private final class GuideCollectionView: UICollectionView,
             reconfigureVisibleProgrammeCells()
         }
 
-        if requestedGuideRevision != guideRevision {
+        if requestedGuideRevision != guideRevision
+            || requestedChannelPreferencesRevision != channelPreferencesRevision {
             requestedGuideRevision = guideRevision
+            requestedChannelPreferencesRevision = channelPreferencesRevision
             buildSnapshot(
                 channels: channels,
                 timeline: timeline,
-                revision: guideRevision
+                revision: guideRevision,
+                channelPreferencesRevision: channelPreferencesRevision
             )
         }
 
@@ -766,12 +803,14 @@ private final class GuideCollectionView: UICollectionView,
     func cancelPendingWork() {
         snapshotBuildTask?.cancel()
         focusRetryTask?.cancel()
+        channelFocusRetryTask?.cancel()
     }
 
     private func buildSnapshot(
         channels: [GuideChannel],
         timeline: GuideTimeline,
-        revision: Int
+        revision: Int,
+        channelPreferencesRevision: Int
     ) {
         snapshotBuildTask?.cancel()
         os_signpost(.begin, log: guidePerformanceLog, name: "GuideSnapshotBuild", "revision=%d", revision)
@@ -785,7 +824,8 @@ private final class GuideCollectionView: UICollectionView,
             }.value
             guard !Task.isCancelled,
                   let self,
-                  self.requestedGuideRevision == revision
+                  self.requestedGuideRevision == revision,
+                  self.requestedChannelPreferencesRevision == channelPreferencesRevision
             else { return }
             os_signpost(.end, log: guidePerformanceLog, name: "GuideSnapshotBuild", "revision=%d", revision)
             self.apply(snapshot)
@@ -794,6 +834,9 @@ private final class GuideCollectionView: UICollectionView,
 
     private func apply(_ snapshot: GuideGridSnapshot) {
         os_signpost(.begin, log: guidePerformanceLog, name: "GuideSnapshotApply", "rows=%d", snapshot.rows.count)
+        let channelFocusToRestore = channelIDAwaitingSnapshotFocus ?? focusedChannelID
+        let returnProgramID = channelReturnProgramIDAwaitingSnapshotFocus
+            ?? focusedChannelReturnProgramID
         guideSnapshot = snapshot
         guideLayout.snapshot = snapshot
         guideLayout.now = currentNow
@@ -810,6 +853,16 @@ private final class GuideCollectionView: UICollectionView,
         if !hasReportedFirstSnapshot {
             hasReportedFirstSnapshot = true
             onFirstSnapshotApplied()
+        }
+
+        if let channelFocusToRestore,
+           let returnProgramID,
+           snapshot.channels.contains(where: { $0.id == channelFocusToRestore }) {
+            requestFocusOnChannel(
+                channelFocusToRestore,
+                returningTo: returnProgramID
+            )
+            return
         }
 
         let focusID = requestedFocusedProgramID ?? preferredProgramID
@@ -836,6 +889,8 @@ private final class GuideCollectionView: UICollectionView,
         retriesRemaining: Int,
         directly: Bool = false
     ) {
+        channelFocusRetryTask?.cancel()
+        channelFocusRetryTask = nil
         guard let snapshot = guideSnapshot,
               let indexPath = snapshot.indexPath(for: programID),
               let item = snapshot.item(at: indexPath)
@@ -846,6 +901,9 @@ private final class GuideCollectionView: UICollectionView,
         }
 
         pendingFocusProgramID = programID
+        pendingChannelProgramID = nil
+        focusedChannelID = nil
+        focusedChannelReturnProgramID = nil
         updateFocusAvailability()
         // Custom layouts only materialize items returned by the visible
         // attributes query. If the destination is outside that window, move
@@ -942,6 +1000,10 @@ private final class GuideCollectionView: UICollectionView,
                 at: currentNow
               )
         else {
+            if direction == .left {
+                requestFocusOnChannel(for: origin)
+                return .consumed
+            }
             // Up is the only legitimate way out of the guide, and only from
             // the actual first channel. Every other edge stays in the grid.
             return direction == .up
@@ -974,6 +1036,83 @@ private final class GuideCollectionView: UICollectionView,
         return .consumed
     }
 
+    private func requestFocusOnChannel(for programID: GuideProgram.ID) {
+        guard let snapshot = guideSnapshot,
+              let programIndexPath = snapshot.indexPath(for: programID),
+              let channel = snapshot.channels[safe: programIndexPath.section]
+        else { return }
+        requestFocusOnChannel(channel.id, returningTo: programID)
+    }
+
+    private func requestFocusOnChannel(
+        _ channelID: GuideChannel.ID,
+        returningTo programID: GuideProgram.ID,
+        retriesRemaining: Int = 16
+    ) {
+        guard let section = guideSnapshot?.channels.firstIndex(where: { $0.id == channelID })
+        else { return }
+        let headerIndexPath = IndexPath(item: 0, section: section)
+        layoutIfNeeded()
+        guard let header = supplementaryView(
+            forElementKind: GuideCollectionElementKind.channelHeader,
+            at: headerIndexPath
+        ) as? GuideChannelHeaderReusableView,
+              let focusSystem = UIFocusSystem.focusSystem(for: header)
+        else {
+            scheduleChannelFocusRetry(
+                channelID,
+                returningTo: programID,
+                retriesRemaining: retriesRemaining
+            )
+            return
+        }
+
+        pendingFocusProgramID = nil
+        pendingChannelProgramID = programID
+        focusedChannelID = channelID
+        focusedChannelReturnProgramID = programID
+        header.returnProgramID = programID
+        updateFocusAvailability()
+        setNeedsFocusUpdate()
+        updateFocusIfNeeded()
+        focusSystem.requestFocusUpdate(to: header)
+        focusSystem.updateFocusIfNeeded()
+        scheduleChannelFocusRetry(
+            channelID,
+            returningTo: programID,
+            retriesRemaining: retriesRemaining
+        )
+    }
+
+    private func scheduleChannelFocusRetry(
+        _ channelID: GuideChannel.ID,
+        returningTo programID: GuideProgram.ID,
+        retriesRemaining: Int
+    ) {
+        guard retriesRemaining > 0 else {
+            if channelIDAwaitingSnapshotFocus == channelID {
+                channelIDAwaitingSnapshotFocus = nil
+                channelReturnProgramIDAwaitingSnapshotFocus = nil
+            }
+            channelFocusRetryTask = nil
+            return
+        }
+        channelFocusRetryTask?.cancel()
+        channelFocusRetryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(50))
+                guard !Task.isCancelled else { return }
+                self?.requestFocusOnChannel(
+                    channelID,
+                    returningTo: programID,
+                    retriesRemaining: retriesRemaining - 1
+                )
+            } catch {
+                // A programme focus request superseded this retry.
+            }
+        }
+    }
+
     fileprivate func shouldAllowFocusUpdate(
         from programID: GuideProgram.ID,
         context: UIFocusUpdateContext
@@ -994,6 +1133,19 @@ private final class GuideCollectionView: UICollectionView,
             direction: direction,
             at: currentNow
         ) else {
+            if direction == .left {
+                let originChannelID = snapshot.indexPath(for: origin)
+                    .flatMap { snapshot.channels[safe: $0.section]?.id }
+                if let header = context.nextFocusedItem as? GuideChannelHeaderReusableView,
+                   header.representedChannelID == originChannelID {
+                    header.returnProgramID = origin
+                    return true
+                }
+                Task { @MainActor [weak self] in
+                    self?.requestFocusOnChannel(for: origin)
+                }
+                return false
+            }
             return direction == .up
                 && snapshot.isAtBoundary(programID: origin, direction: .up)
         }
@@ -1022,6 +1174,8 @@ private final class GuideCollectionView: UICollectionView,
     }
 
     private func didFocus(programID: GuideProgram.ID) {
+        focusedChannelID = nil
+        focusedChannelReturnProgramID = nil
         requestedFocusedProgramID = programID
         pendingFocusProgramID = nil
         updateFocusAvailability()
@@ -1112,6 +1266,13 @@ private final class GuideCollectionView: UICollectionView,
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+        // UICollectionView may retain its last selected programme while focus is
+        // on a supplementary channel header. Do not let a Select press intended
+        // for that header activate the stale programme selection.
+        guard focusedChannelID == nil else {
+            collectionView.deselectItem(at: indexPath, animated: false)
+            return
+        }
         guard isGuideEnabled, let item = guideSnapshot?.item(at: indexPath) else { return }
         requestedFocusedProgramID = item.id
         onFocused(item.id)
@@ -1151,7 +1312,24 @@ private final class GuideCollectionView: UICollectionView,
                 for: indexPath
             ) as! GuideChannelHeaderReusableView
             if let channel = guideSnapshot?.channels[safe: indexPath.section] {
-                view.configure(channel: channel, configuration: currentConfiguration)
+                view.configure(
+                    channel: channel,
+                    configuration: currentConfiguration,
+                    isFavorite: isFavorite(channel.id),
+                    onActivate: { [weak self] returnProgramID in
+                        self?.channelIDAwaitingSnapshotFocus = channel.id
+                        self?.channelReturnProgramIDAwaitingSnapshotFocus = returnProgramID
+                        self?.onToggleFavorite(channel.id)
+                    },
+                    onFocused: { [weak self] returnProgramID in
+                        self?.pendingChannelProgramID = nil
+                        self?.focusedChannelID = channel.id
+                        self?.focusedChannelReturnProgramID = returnProgramID
+                    },
+                    onMoveRight: { [weak self] programID in
+                        self?.requestFocus(on: programID, animated: true, retriesRemaining: 8)
+                    }
+                )
             }
             return view
         case GuideCollectionElementKind.timelineHeader:
@@ -1584,8 +1762,15 @@ private final class GuideChannelHeaderReusableView: UICollectionReusableView {
     private let logoView = UIImageView()
     private let monogramLabel = UILabel()
     private let nameLabel = UILabel()
+    private let favoriteImageView = UIImageView(image: UIImage(systemName: "star.fill"))
     private var logoTask: Task<Void, Never>?
-    private var representedChannelID: GuideChannel.ID?
+    fileprivate var representedChannelID: GuideChannel.ID?
+    fileprivate var returnProgramID: GuideProgram.ID?
+    private var onActivate: (GuideProgram.ID?) -> Void = { _ in }
+    private var onFocused: (GuideProgram.ID?) -> Void = { _ in }
+    private var onMoveRight: (GuideProgram.ID) -> Void = { _ in }
+
+    override var canBecomeFocused: Bool { true }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -1614,6 +1799,10 @@ private final class GuideChannelHeaderReusableView: UICollectionReusableView {
         nameLabel.minimumScaleFactor = 0.65
         addSubview(nameLabel)
 
+        favoriteImageView.contentMode = .scaleAspectFit
+        favoriteImageView.tintColor = UIColor(AppTheme.accent)
+        addSubview(favoriteImageView)
+
         let trailing = UIView()
         trailing.backgroundColor = UIColor(AppTheme.divider)
         trailing.tag = 1
@@ -1632,14 +1821,29 @@ private final class GuideChannelHeaderReusableView: UICollectionReusableView {
         super.prepareForReuse()
         logoTask?.cancel()
         representedChannelID = nil
+        returnProgramID = nil
         logoView.image = nil
     }
 
-    func configure(channel: GuideChannel, configuration: TVHeadendConfiguration?) {
+    func configure(
+        channel: GuideChannel,
+        configuration: TVHeadendConfiguration?,
+        isFavorite: Bool,
+        onActivate: @escaping (GuideProgram.ID?) -> Void,
+        onFocused: @escaping (GuideProgram.ID?) -> Void,
+        onMoveRight: @escaping (GuideProgram.ID) -> Void
+    ) {
         representedChannelID = channel.id
+        self.onActivate = onActivate
+        self.onFocused = onFocused
+        self.onMoveRight = onMoveRight
         nameLabel.text = channel.name
         monogramLabel.text = channel.monogram
-        accessibilityLabel = channel.name
+        favoriteImageView.isHidden = !isFavorite
+        accessibilityLabel = isFavorite ? "\(channel.name), favourite" : channel.name
+        accessibilityHint = isFavorite
+            ? "Press Select to remove this channel from favourites"
+            : "Press Select to add this channel to favourites"
         badgeView.backgroundColor = UIColor(channel.tint)
         logoView.image = nil
         monogramLabel.isHidden = false
@@ -1672,9 +1876,58 @@ private final class GuideChannelHeaderReusableView: UICollectionReusableView {
         badgeView.frame = CGRect(x: 14, y: (bounds.height - 48) / 2, width: 48, height: 48)
         logoView.frame = badgeView.bounds.insetBy(dx: 6, dy: 6)
         monogramLabel.frame = badgeView.bounds
-        nameLabel.frame = CGRect(x: 74, y: 6, width: max(0, bounds.width - 88), height: bounds.height - 12)
+        let favoriteWidth: CGFloat = favoriteImageView.isHidden ? 0 : 24
+        favoriteImageView.frame = CGRect(
+            x: bounds.width - 38,
+            y: (bounds.height - 22) / 2,
+            width: 22,
+            height: 22
+        )
+        nameLabel.frame = CGRect(
+            x: 74,
+            y: 6,
+            width: max(0, bounds.width - 88 - favoriteWidth),
+            height: bounds.height - 12
+        )
         viewWithTag(1)?.frame = CGRect(x: bounds.width - 1, y: 0, width: 1, height: bounds.height)
         viewWithTag(2)?.frame = CGRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1)
+    }
+
+    override func didUpdateFocus(
+        in context: UIFocusUpdateContext,
+        with coordinator: UIFocusAnimationCoordinator
+    ) {
+        super.didUpdateFocus(in: context, with: coordinator)
+        if isFocused { onFocused(returnProgramID) }
+        coordinator.addCoordinatedAnimations { [self] in
+            backgroundColor = isFocused ? UIColor(AppTheme.focused) : UIColor(AppTheme.chrome)
+            layer.borderColor = isFocused
+                ? UIColor(AppTheme.focusBorder).cgColor
+                : UIColor.clear.cgColor
+            layer.borderWidth = isFocused ? 4 : 0
+        }
+    }
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let movesRight = presses.contains { press in
+            press.type == .rightArrow || press.key?.keyCode == .keyboardRightArrow
+        }
+        if movesRight, let returnProgramID {
+            onMoveRight(returnProgramID)
+            return
+        }
+        super.pressesBegan(presses, with: event)
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if presses.contains(where: { $0.type == .select }) {
+            onActivate(returnProgramID)
+            return
+        }
+        if presses.contains(where: { $0.type == .rightArrow || $0.key?.keyCode == .keyboardRightArrow }) {
+            return
+        }
+        super.pressesEnded(presses, with: event)
     }
 
     private func apply(artwork: ChannelLogoArtwork, channelID: GuideChannel.ID) {
@@ -1700,6 +1953,7 @@ struct GuideGridView: View {
     let timeline: GuideTimeline
     let now: Date
     let guideRevision: Int
+    let channelPreferencesRevision: Int
     let preferredProgramID: GuideProgram.ID?
     let focusScope: Namespace.ID
     @Binding var focusedProgramID: GuideProgram.ID?
@@ -1707,6 +1961,8 @@ struct GuideGridView: View {
     let focusRestoreRequest: UUID
     let recordingsRevision: Int
     let configuration: TVHeadendConfiguration
+    let isFavorite: (GuideChannel.ID) -> Bool
+    let onToggleFavorite: (GuideChannel.ID) -> Void
     let recordingState: (GuideProgram) -> TVRecordingState?
     let onActivate: (GuideProgram) -> Void
     let onPlay: (GuideProgram) -> Void
@@ -1813,16 +2069,31 @@ struct GuideGridView: View {
     }
 
     private func channelLabel(_ channel: GuideChannel) -> some View {
-        HStack(spacing: 12) {
-            ChannelBadge(channel: channel, diameter: 52)
-            Text(channel.name)
-                .font(.headline)
-                .lineLimit(2)
-            Spacer(minLength: 0)
+        Button {
+            onToggleFavorite(channel.id)
+        } label: {
+            HStack(spacing: 12) {
+                ChannelBadge(channel: channel, diameter: 52)
+                Text(channel.name)
+                    .font(.headline)
+                    .lineLimit(2)
+                if isFavorite(channel.id) {
+                    Image(systemName: "star.fill")
+                        .foregroundStyle(AppTheme.accent)
+                        .accessibilityLabel("Favourite channel")
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 14)
+            .frame(width: GuideGridMetrics.channelWidth, height: GuideGridMetrics.rowHeight)
+            .background(AppTheme.chrome)
         }
-        .padding(.horizontal, 14)
-        .frame(width: GuideGridMetrics.channelWidth, height: GuideGridMetrics.rowHeight)
-        .background(AppTheme.chrome)
+        .buttonStyle(.plain)
+        .accessibilityHint(
+            isFavorite(channel.id)
+                ? "Remove this channel from favourites"
+                : "Add this channel to favourites"
+        )
     }
 }
 

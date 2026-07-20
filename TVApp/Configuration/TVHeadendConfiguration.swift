@@ -41,6 +41,31 @@ struct TVHeadendConfiguration: Equatable, Sendable {
             xmltvURL?.absoluteString ?? "",
         ].joined(separator: "|")
     }
+
+    /// Keeps device-local channel preferences isolated by TVHeadend server and
+    /// account without including the password or guide-source overrides.
+    var channelPreferencesIdentifier: String? {
+        guard let baseURL else { return nil }
+        var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+        components?.user = nil
+        components?.password = nil
+        components?.query = nil
+        components?.fragment = nil
+        let normalizedScheme = components?.scheme?.lowercased()
+        let normalizedHost = components?.host?.lowercased()
+        components?.scheme = normalizedScheme
+        components?.host = normalizedHost
+        if components?.path == "/" {
+            components?.path = ""
+        } else {
+            while components?.path.hasSuffix("/") == true {
+                components?.path.removeLast()
+            }
+        }
+        let normalizedURL = components?.url?.absoluteString
+            ?? baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return "\(normalizedURL)|\(username.trimmingCharacters(in: .whitespacesAndNewlines))"
+    }
 }
 
 enum ConfigurationError: LocalizedError {

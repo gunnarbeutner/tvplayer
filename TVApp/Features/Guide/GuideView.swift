@@ -13,6 +13,7 @@ struct GuideView: View {
     @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var playback: PlaybackCoordinator
     @EnvironmentObject private var recordings: RecordingStore
+    @EnvironmentObject private var channelPreferences: ChannelPreferencesStore
 #if os(tvOS)
     @Environment(\.resetFocus) private var resetFocus
 #endif
@@ -25,19 +26,26 @@ struct GuideView: View {
     @State private var showLoadingSkeleton = false
     @State private var hasRenderedGuide = false
 
+    private var displayedChannels: [GuideChannel] {
+        channelPreferences.displayedChannels(from: model.channels)
+    }
+
     private var presentedProgram: GuideProgram? {
-        model.program(withID: focusedProgramID)
-            ?? model.channels.lazy.flatMap(\.programs).first { $0.isAiring(at: Date()) }
+        if let focused = model.program(withID: focusedProgramID),
+           displayedChannels.contains(where: { $0.id == focused.channelID }) {
+            return focused
+        }
+        return displayedChannels.lazy.flatMap(\.programs).first { $0.isAiring(at: Date()) }
     }
 
     private var preferredFocusProgramID: GuideProgram.ID? {
         let currentDate = Date()
         return PlaybackFocusSelection.programID(
-            in: model.channels,
+            in: displayedChannels,
             selection: playback.navigationSelection,
             at: currentDate
         ) ?? GuideFocusSelection.initialProgram(
-            in: model.channels.first?.programs ?? [],
+            in: displayedChannels.first?.programs ?? [],
             at: currentDate
         )?.id
     }
@@ -79,9 +87,10 @@ struct GuideView: View {
                 ZStack {
                     if usesCompactGuide {
                         CompactGuideList(
-                            channels: model.channels,
+                            channels: displayedChannels,
                             now: model.now,
                             focusedProgramID: $focusedProgramID,
+                            isFavorite: channelPreferences.isFavorite,
                             recordingState: { recordings.scheduledRecording(for: $0)?.state },
                             onActivate: presentDetails,
                             onPlay: play,
@@ -99,10 +108,11 @@ struct GuideView: View {
                             )
 
                             GuideGridView(
-                                channels: model.channels,
+                                channels: displayedChannels,
                                 timeline: model.timeline,
                                 now: model.now,
                                 guideRevision: model.guideRevision,
+                                channelPreferencesRevision: channelPreferences.revision,
                                 preferredProgramID: preferredFocusProgramID,
                                 focusScope: guideFocusScope,
                                 focusedProgramID: $focusedProgramID,
@@ -110,6 +120,8 @@ struct GuideView: View {
                                 focusRestoreRequest: focusRestoreRequest,
                                 recordingsRevision: recordings.guideRevision,
                                 configuration: settings.configuration,
+                                isFavorite: channelPreferences.isFavorite,
+                                onToggleFavorite: channelPreferences.toggleFavorite,
                                 recordingState: { recordings.scheduledRecording(for: $0)?.state },
                                 onActivate: presentDetails,
                                 onPlay: play,
@@ -172,6 +184,10 @@ struct GuideView: View {
             hasRenderedGuide = false
             recenterRequest = UUID()
             requestInitialFocus()
+        }
+        .onChange(of: channelPreferences.revision) { _, _ in
+            recenterRequest = UUID()
+            restoreVisibleFocusOrSelectInitial()
         }
         .televisionPlayPauseCommand {
             guard let program = presentedProgram,
@@ -255,7 +271,7 @@ struct GuideView: View {
 
     private func restorePlaybackFocusIfAvailable() {
         guard let programID = PlaybackFocusSelection.programID(
-            in: model.channels,
+            in: displayedChannels,
             selection: playback.navigationSelection,
             at: model.now
         ) else { return }
@@ -280,12 +296,24 @@ struct GuideView: View {
 #endif
         }
     }
+
+    private func restoreVisibleFocusOrSelectInitial() {
+        if let focusedProgramID,
+           displayedChannels.lazy.flatMap(\.programs).contains(where: { $0.id == focusedProgramID }) {
+            needsInitialFocus = false
+            focusRestoreRequest = UUID()
+        } else {
+            self.focusedProgramID = nil
+            requestInitialFocus()
+        }
+    }
 }
 
 private struct CompactGuideList: View {
     let channels: [GuideChannel]
     let now: Date
     @Binding var focusedProgramID: GuideProgram.ID?
+    let isFavorite: (GuideChannel.ID) -> Bool
     let recordingState: (GuideProgram) -> TVRecordingState?
     let onActivate: (GuideProgram) -> Void
     let onPlay: (GuideProgram) -> Void
@@ -300,6 +328,11 @@ private struct CompactGuideList: View {
                             ChannelBadge(channel: channel, diameter: 44)
                             Text(channel.name)
                                 .font(.headline)
+                            if isFavorite(channel.id) {
+                                Image(systemName: "star.fill")
+                                    .foregroundStyle(AppTheme.accent)
+                                    .accessibilityLabel("Favourite channel")
+                            }
                             Spacer()
                         }
 

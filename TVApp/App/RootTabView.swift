@@ -11,6 +11,7 @@ struct RootTabView: View {
     @State private var selection: AppTab = .guide
     @StateObject private var settings: ServerSettingsStore
     @StateObject private var guide: GuideViewModel
+    @StateObject private var channelPreferences: ChannelPreferencesStore
     @StateObject private var recordings = RecordingStore()
     @StateObject private var playback = PlaybackCoordinator()
     @State private var playbackAlertMessage: String?
@@ -24,6 +25,9 @@ struct RootTabView: View {
             : GuideSnapshotStore.loadLatestSynchronously()
 
         _settings = StateObject(wrappedValue: settings)
+        let channelPreferences = ChannelPreferencesStore()
+        channelPreferences.activate(serverIdentifier: configuration.channelPreferencesIdentifier)
+        _channelPreferences = StateObject(wrappedValue: channelPreferences)
         _guide = StateObject(
             wrappedValue: GuideViewModel(
                 configuration: configuration,
@@ -65,6 +69,7 @@ struct RootTabView: View {
         .tint(AppTheme.accent)
         .environmentObject(settings)
         .environmentObject(guide)
+        .environmentObject(channelPreferences)
         .environmentObject(recordings)
         .environmentObject(playback)
         .onChange(of: playback.isPlayerPresented) { wasPresented, isPresented in
@@ -111,10 +116,12 @@ struct RootTabView: View {
             Task { await recordings.load(configuration: settings.configuration, force: true) }
         }
         .task(id: settings.revision) {
+            channelPreferences.activate(
+                serverIdentifier: settings.configuration.channelPreferencesIdentifier
+            )
             async let guideLoad: Void = guide.load(configuration: settings.configuration, force: true)
             async let recordingLoad: Void = recordings.load(configuration: settings.configuration, force: true)
             _ = await (guideLoad, recordingLoad)
-
 #if DEBUG
             if ProcessInfo.processInfo.environment["TVPLAYER_AUTOPLAY"] == "1",
                !playback.isPlayerPresented,

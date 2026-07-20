@@ -13,6 +13,7 @@ The application bundle identifier is `de.beutner.TVPlayer`.
 - Remote-first focus navigation on Apple TV, touch-first compact layouts on iPhone,
   sidebar and pointer support on iPad, and native split-view, keyboard, and window behavior on Mac
 - TVheadend channels, channel icons, and EPG data loaded directly or through the persistent rich guide cache
+- Device-local favourite channels pinned above the normal TVHeadend order in Channels and Guide, stored separately per server/account
 - No bundled demo guide: Channels and Guide require a configured, reachable TVheadend server
 - Optional rich JSON guide cache with an external XMLTV fallback; both URLs are empty by default
 - High-contrast timeline guide with clear focus styling and programme details
