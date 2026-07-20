@@ -217,7 +217,12 @@ struct RecordingsView: View {
     }
 
     private func focusFirstRecordingElement() {
-        let target = store.recordings.first?.id
+        // Match the order rendered above rather than the store's underlying
+        // aggregate order, which can put the second visible card first.
+        let target = store.recordingNow.first?.id
+            ?? store.upcoming.first?.id
+            ?? store.completed.first?.id
+            ?? store.failed.first?.id
             ?? store.rules.first.map { "rule:\($0.id)" }
         guard let target else { return }
 

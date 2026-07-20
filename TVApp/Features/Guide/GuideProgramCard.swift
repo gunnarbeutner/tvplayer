@@ -20,25 +20,14 @@ struct GuideProgramCard: View {
         }
     }
 
-    private var progress: CGFloat {
-        guard phase == .current, program.duration > 0 else { return 0 }
-        return min(max(0, now.timeIntervalSince(program.start) / program.duration), 1)
-    }
-
     var body: some View {
         GeometryReader { geometry in
             let safeLeadingInset = min(max(0, leadingContentInset), geometry.size.width)
             let visibleContentWidth = max(0, geometry.size.width - safeLeadingInset)
 
-            ZStack(alignment: .bottomLeading) {
+            ZStack {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(background)
-
-                if phase == .current, !isFocused {
-                    Rectangle()
-                        .fill(AppTheme.accent)
-                        .frame(width: geometry.size.width * progress, height: 5)
-                }
 
                 if visibleContentWidth >= 46 {
                     VStack(alignment: .leading, spacing: 6) {

@@ -42,6 +42,7 @@ struct RootTabView: View {
     @State private var recordingsFocusRequest: UUID?
     @State private var settingsFocusRequest: UUID?
     @State private var guideHeaderChannelID: GuideChannel.ID?
+    @State private var allowsSectionNavigatorFocus = false
 #endif
 
     init() {
@@ -96,6 +97,12 @@ struct RootTabView: View {
                 .disabled(playback.isPlayerPresented)
                 .opacity(playback.isPlayerPresented ? 0 : 1)
                 .zIndex(2)
+
+            SectionFocusBridge(
+                isEnabled: allowsSectionNavigatorFocus && !playback.isPlayerPresented,
+                onFocused: { navigationFocusRequest = selection }
+            )
+            .zIndex(3)
 #endif
 
             if playback.isPlayerPresented, let presentation = playback.presentation {
@@ -219,6 +226,7 @@ struct RootTabView: View {
         TVSectionNavigator(
             selection: $selection,
             focusRequest: $navigationFocusRequest,
+            allowsFocus: allowsSectionNavigatorFocus,
             onFocusChanged: { isSectionNavigatorFocused = $0 },
             onEnterContent: { tab in
                 switch tab {
@@ -296,7 +304,9 @@ struct RootTabView: View {
                     isSelected: selection == .guide,
                     onOpenSettings: { selection = .settings },
                     focusRequest: guideFocusRequest,
-                    onPresentedChannelChange: { guideHeaderChannelID = $0 }
+                    onPresentedChannelChange: { guideHeaderChannelID = $0 },
+                    onInitialFocusResolved: { allowsSectionNavigatorFocus = true },
+                    onExitToNavigator: { navigationFocusRequest = .guide }
                 )
             }
 
@@ -390,9 +400,35 @@ struct RootTabView: View {
 }
 
 #if os(tvOS)
+private struct SectionFocusBridge: View {
+    let isEnabled: Bool
+    let onFocused: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Color.clear
+            .frame(height: 12)
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+            .focusable(isEnabled)
+            .focusEffectDisabled()
+            .focused($isFocused)
+            .onChange(of: isFocused) { _, focused in
+                guard focused else { return }
+                onFocused()
+            }
+            .frame(maxHeight: .infinity, alignment: .top)
+            .offset(y: 84)
+            .ignoresSafeArea(.container, edges: [.top, .horizontal])
+            .accessibilityHidden(true)
+    }
+}
+
 private struct TVSectionNavigator: View {
     @Binding var selection: AppTab
     @Binding var focusRequest: AppTab?
+    let allowsFocus: Bool
     let onFocusChanged: (Bool) -> Void
     let onEnterContent: (AppTab) -> Void
 
@@ -487,7 +523,7 @@ private struct TVSectionNavigator: View {
                 .strokeBorder(isFocused ? AppTheme.focusBorder : Color.clear, lineWidth: 3)
         }
         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .focusable()
+        .focusable(allowsFocus)
         .focusEffectDisabled()
         .focused($focusedTab, equals: tab)
         .onTapGesture { enterContent(from: tab) }
@@ -519,7 +555,7 @@ private struct TVSectionNavigator: View {
                     .strokeBorder(isFocused ? AppTheme.focusBorder : Color.clear, lineWidth: 3)
             }
         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .focusable()
+        .focusable(allowsFocus)
         .focusEffectDisabled()
         .focused($focusedTab, equals: .settings)
         .onTapGesture { enterContent(from: .settings) }

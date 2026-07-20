@@ -287,6 +287,8 @@ struct GuideGridView: View {
     let onActivate: (GuideProgram) -> Void
     let onPlay: (GuideProgram) -> Void
     let onReady: () -> Void
+    let onFocusAcquired: () -> Void
+    let onExitToNavigator: () -> Void
 
     @Environment(\.isEnabled) private var isEnabled
 
@@ -309,6 +311,8 @@ struct GuideGridView: View {
             onActivate: onActivate,
             onPlay: onPlay,
             onFirstSnapshotApplied: onReady,
+            onFocusAcquired: onFocusAcquired,
+            onExitToNavigator: onExitToNavigator,
             isEnabled: isEnabled
         )
         .televisionFocusScope(focusScope)
@@ -333,6 +337,8 @@ private struct GuideCollectionRepresentable: UIViewRepresentable {
     let onActivate: (GuideProgram) -> Void
     let onPlay: (GuideProgram) -> Void
     let onFirstSnapshotApplied: () -> Void
+    let onFocusAcquired: () -> Void
+    let onExitToNavigator: () -> Void
     let isEnabled: Bool
 
     func makeUIView(context: Context) -> GuideCollectionView {
@@ -355,10 +361,14 @@ private struct GuideCollectionRepresentable: UIViewRepresentable {
             isFavorite: isFavorite,
             onToggleFavorite: onToggleFavorite,
             recordingState: recordingState,
-            onFocused: { focusedProgramID = $0 },
+            onFocused: {
+                focusedProgramID = $0
+                onFocusAcquired()
+            },
             onActivate: onActivate,
             onPlay: onPlay,
             onFirstSnapshotApplied: onFirstSnapshotApplied,
+            onExitToNavigator: onExitToNavigator,
             isEnabled: isEnabled
         )
     }
@@ -640,6 +650,7 @@ private final class GuideCollectionView: UICollectionView,
     private var onActivate: (GuideProgram) -> Void = { _ in }
     private var onPlay: (GuideProgram) -> Void = { _ in }
     private var onFirstSnapshotApplied: () -> Void = {}
+    private var onExitToNavigator: () -> Void = {}
     private var hasReportedFirstSnapshot = false
 
     init() {
@@ -732,6 +743,7 @@ private final class GuideCollectionView: UICollectionView,
         onActivate: @escaping (GuideProgram) -> Void,
         onPlay: @escaping (GuideProgram) -> Void,
         onFirstSnapshotApplied: @escaping () -> Void,
+        onExitToNavigator: @escaping () -> Void,
         isEnabled: Bool
     ) {
         self.preferredProgramID = preferredProgramID
@@ -745,6 +757,7 @@ private final class GuideCollectionView: UICollectionView,
         self.onActivate = onActivate
         self.onPlay = onPlay
         self.onFirstSnapshotApplied = onFirstSnapshotApplied
+        self.onExitToNavigator = onExitToNavigator
         isGuideEnabled = isEnabled
 
         if currentNow != now {
@@ -1023,12 +1036,14 @@ private final class GuideCollectionView: UICollectionView,
                 requestFocusOnChannel(for: origin)
                 return .consumed
             }
-            // Up is the only legitimate way out of the guide, and only from
-            // the actual first channel. Every other edge stays in the grid.
-            return direction == .up
-                && snapshot.isAtBoundary(programID: origin, direction: .up)
-                ? .native
-                : .consumed
+            if direction == .up,
+               snapshot.isAtBoundary(programID: origin, direction: .up) {
+                // Never let tvOS choose a tab geometrically. Cards far to the
+                // right have no tab directly above them, and native focus can
+                // either fail or briefly land on a neighbouring section.
+                onExitToNavigator()
+            }
+            return .consumed
         }
         let signpostID = OSSignpostID(log: guidePerformanceLog)
         navigationSignpostID = signpostID
@@ -1165,8 +1180,13 @@ private final class GuideCollectionView: UICollectionView,
                 }
                 return false
             }
-            return direction == .up
-                && snapshot.isAtBoundary(programID: origin, direction: .up)
+            if direction == .up,
+               snapshot.isAtBoundary(programID: origin, direction: .up) {
+                Task { @MainActor [weak self] in
+                    self?.onExitToNavigator()
+                }
+            }
+            return false
         }
 
         if (context.nextFocusedItem as? GuideProgrammeCollectionCell)?.programID == destination {
@@ -1347,7 +1367,10 @@ private final class GuideCollectionView: UICollectionView,
                     },
                     onMoveRight: { [weak self] programID in
                         self?.requestFocus(on: programID, animated: true, retriesRemaining: 8)
-                    }
+                    },
+                    onMoveUp: indexPath.section == 0
+                        ? { [weak self] in self?.onExitToNavigator() }
+                        : nil
                 )
             }
             return view
@@ -1392,7 +1415,6 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
     private let titleLabel = UILabel()
     private let timeLabel = UILabel()
     private let recordingImageView = UIImageView()
-    private let progressLayer = CALayer()
     private var item: GuideGridSnapshot.Item?
     private var now = Date()
     private var recordingState: TVRecordingState?
@@ -1425,7 +1447,6 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
         timeLabel.lineBreakMode = .byTruncatingTail
         recordingImageView.contentMode = .scaleAspectFit
 
-        contentView.layer.addSublayer(progressLayer)
         contentView.addSubview(recordingImageView)
         contentView.addSubview(titleLabel)
         contentView.addSubview(timeLabel)
@@ -1512,7 +1533,6 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
             width: max(0, availableWidth - horizontalPadding * 2),
             height: availableWidth >= 118 ? 20 : 0
         )
-        progressLayer.frame = progressFrame()
         titleLabel.isHidden = availableWidth < 46
         timeLabel.isHidden = availableWidth < 118
     }
@@ -1606,9 +1626,6 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
         ).cgColor
         contentView.layer.borderWidth = isFocused ? 4 : 1
         timeLabel.textColor = isFocused ? .white : UIColor(AppTheme.secondaryText)
-        progressLayer.backgroundColor = UIColor(AppTheme.accent).cgColor
-        progressLayer.isHidden = phase != .current || isFocused
-
         switch recordingState {
         case .recording:
             recordingImageView.image = UIImage(systemName: "record.circle.fill")
@@ -1620,12 +1637,6 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
             recordingImageView.image = nil
         }
         if animated { setNeedsLayout() }
-    }
-
-    private func progressFrame() -> CGRect {
-        guard let program = item?.program, program.duration > 0 else { return .zero }
-        let progress = min(max(0, now.timeIntervalSince(program.start) / program.duration), 1)
-        return CGRect(x: 0, y: bounds.height - 5, width: bounds.width * progress, height: 5)
     }
 
     private func accessibilityLabel(for program: GuideProgram, timeText: String) -> String {
@@ -1788,6 +1799,7 @@ private final class GuideChannelHeaderReusableView: UICollectionReusableView {
     private var onActivate: (GuideProgram.ID?) -> Void = { _ in }
     private var onFocused: (GuideProgram.ID?) -> Void = { _ in }
     private var onMoveRight: (GuideProgram.ID) -> Void = { _ in }
+    private var onMoveUp: (() -> Void)?
 
     override var canBecomeFocused: Bool { true }
 
@@ -1841,6 +1853,7 @@ private final class GuideChannelHeaderReusableView: UICollectionReusableView {
         logoTask?.cancel()
         representedChannelID = nil
         returnProgramID = nil
+        onMoveUp = nil
         logoView.image = nil
     }
 
@@ -1850,12 +1863,14 @@ private final class GuideChannelHeaderReusableView: UICollectionReusableView {
         isFavorite: Bool,
         onActivate: @escaping (GuideProgram.ID?) -> Void,
         onFocused: @escaping (GuideProgram.ID?) -> Void,
-        onMoveRight: @escaping (GuideProgram.ID) -> Void
+        onMoveRight: @escaping (GuideProgram.ID) -> Void,
+        onMoveUp: (() -> Void)?
     ) {
         representedChannelID = channel.id
         self.onActivate = onActivate
         self.onFocused = onFocused
         self.onMoveRight = onMoveRight
+        self.onMoveUp = onMoveUp
         nameLabel.text = channel.name
         monogramLabel.text = channel.monogram
         favoriteImageView.isHidden = !isFavorite
@@ -1928,6 +1943,13 @@ private final class GuideChannelHeaderReusableView: UICollectionReusableView {
     }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let movesUp = presses.contains { press in
+            press.type == .upArrow || press.key?.keyCode == .keyboardUpArrow
+        }
+        if movesUp, let onMoveUp {
+            onMoveUp()
+            return
+        }
         let movesRight = presses.contains { press in
             press.type == .rightArrow || press.key?.keyCode == .keyboardRightArrow
         }
@@ -1941,6 +1963,10 @@ private final class GuideChannelHeaderReusableView: UICollectionReusableView {
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         if presses.contains(where: { $0.type == .select }) {
             onActivate(returnProgramID)
+            return
+        }
+        if onMoveUp != nil,
+           presses.contains(where: { $0.type == .upArrow || $0.key?.keyCode == .keyboardUpArrow }) {
             return
         }
         if presses.contains(where: { $0.type == .rightArrow || $0.key?.keyCode == .keyboardRightArrow }) {
@@ -1986,6 +2012,8 @@ struct GuideGridView: View {
     let onActivate: (GuideProgram) -> Void
     let onPlay: (GuideProgram) -> Void
     let onReady: () -> Void
+    let onFocusAcquired: () -> Void
+    let onExitToNavigator: () -> Void
 
     private var visiblePrograms: [[GuideProgram]] {
         channels.map { channel in
@@ -2078,6 +2106,7 @@ struct GuideGridView: View {
         .onAppear {
             if focusedProgramID == nil { focusedProgramID = preferredProgramID }
             onReady()
+            onFocusAcquired()
         }
         .onChange(of: focusRestoreRequest) { _, _ in
             focusedProgramID = preferredProgramID ?? focusedProgramID

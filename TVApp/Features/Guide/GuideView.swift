@@ -5,17 +5,23 @@ struct GuideView: View {
     let onOpenSettings: () -> Void
     let focusRequest: UUID?
     let onPresentedChannelChange: (GuideChannel.ID?) -> Void
+    let onInitialFocusResolved: () -> Void
+    let onExitToNavigator: () -> Void
 
     init(
         isSelected: Bool,
         onOpenSettings: @escaping () -> Void,
         focusRequest: UUID? = nil,
-        onPresentedChannelChange: @escaping (GuideChannel.ID?) -> Void = { _ in }
+        onPresentedChannelChange: @escaping (GuideChannel.ID?) -> Void = { _ in },
+        onInitialFocusResolved: @escaping () -> Void = {},
+        onExitToNavigator: @escaping () -> Void = {}
     ) {
         self.isSelected = isSelected
         self.onOpenSettings = onOpenSettings
         self.focusRequest = focusRequest
         self.onPresentedChannelChange = onPresentedChannelChange
+        self.onInitialFocusResolved = onInitialFocusResolved
+        self.onExitToNavigator = onExitToNavigator
     }
 
     @Environment(\.scenePhase) private var scenePhase
@@ -141,7 +147,9 @@ struct GuideView: View {
                             recordingState: { recordings.scheduledRecording(for: $0)?.state },
                             onActivate: presentDetails,
                             onPlay: play,
-                            onReady: {}
+                            onReady: focusGuideAfterInitialLayout,
+                            onFocusAcquired: onInitialFocusResolved,
+                            onExitToNavigator: onExitToNavigator
                         )
                         .televisionDefaultFocus(true, in: guideFocusScope)
                     }
@@ -163,7 +171,14 @@ struct GuideView: View {
         }
         .onAppear {
             onPresentedChannelChange(presentedChannelID)
+            resolveInitialFocusWithoutGuideIfNeeded()
             requestInitialFocus()
+        }
+        .onChange(of: model.isColdLoading) { _, _ in
+            resolveInitialFocusWithoutGuideIfNeeded()
+        }
+        .onChange(of: model.hasUsableGuide) { _, _ in
+            resolveInitialFocusWithoutGuideIfNeeded()
         }
         .onChange(of: presentedChannelID) { _, channelID in
             onPresentedChannelChange(channelID)
@@ -315,6 +330,29 @@ struct GuideView: View {
             resetFocus(in: guideFocusScope)
 #endif
         }
+    }
+
+    private func focusGuideAfterInitialLayout() {
+        Task { @MainActor in
+            // The top navigator and guide are installed in the same initial
+            // focus pass. Wait until the collection has applied its first
+            // snapshot, then explicitly hand focus to its preferred card.
+            await Task.yield()
+            guard isSelected, let programID = preferredFocusProgramID else { return }
+            needsInitialFocus = false
+            focusedProgramID = programID
+            focusRestoreRequest = UUID()
+#if os(tvOS)
+            await Task.yield()
+            guard isSelected else { return }
+            resetFocus(in: guideFocusScope)
+#endif
+        }
+    }
+
+    private func resolveInitialFocusWithoutGuideIfNeeded() {
+        guard !model.isColdLoading, !model.hasUsableGuide else { return }
+        onInitialFocusResolved()
     }
 
     private func restoreVisibleFocusOrSelectInitial() {
