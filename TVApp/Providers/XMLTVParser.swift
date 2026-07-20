@@ -11,6 +11,7 @@ struct XMLTVProgramme: Sendable {
     let title: String
     let subtitle: String?
     let description: String?
+    let imageURL: String?
     let start: Date
     let end: Date
 }
@@ -57,6 +58,7 @@ private final class XMLTVParserDelegate: NSObject, XMLParserDelegate {
         var title = ""
         var subtitle: String?
         var description: String?
+        var imageURL: String?
     }
 
     private(set) var channels: [XMLTVChannel] = []
@@ -88,7 +90,11 @@ private final class XMLTVParserDelegate: NSObject, XMLParserDelegate {
             else { return }
             programme = ProgrammeBuilder(channelID: channelID, start: start, end: end)
         case "icon":
-            if channel != nil { channel?.iconURL = attributeDict["src"] }
+            if programme != nil {
+                programme?.imageURL = attributeDict["src"]
+            } else if channel != nil {
+                channel?.iconURL = attributeDict["src"]
+            }
         default:
             break
         }
@@ -128,6 +134,7 @@ private final class XMLTVParserDelegate: NSObject, XMLParserDelegate {
                         title: programme.title,
                         subtitle: programme.subtitle,
                         description: programme.description,
+                        imageURL: programme.imageURL,
                         start: programme.start,
                         end: programme.end
                     )

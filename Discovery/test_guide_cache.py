@@ -188,6 +188,7 @@ class GuideCacheTests(unittest.TestCase):
                             "subtitled": 1,
                             "dvrUuid": "recording-uuid",
                             "dvrState": "scheduled",
+                            "image": "http://images.example/show.jpg",
                             "futureMetadata": {"value": "retained"},
                         }
                     ],
@@ -206,6 +207,7 @@ class GuideCacheTests(unittest.TestCase):
             self.assertEqual(event["seasonNumber"], 3)
             self.assertEqual(event["genre"], [16, 17])
             self.assertEqual(event["dvrState"], "scheduled")
+            self.assertEqual(event["image"], "http://images.example/show.jpg")
             self.assertEqual(event["futureMetadata"], {"value": "retained"})
 
 

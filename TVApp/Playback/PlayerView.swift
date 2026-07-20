@@ -255,6 +255,10 @@ struct PlaybackView: View {
             hideChrome(automatically: true)
         }
         .onDisappear {
+            // Back intentionally collapses live playback into the guide
+            // header. Only pause when the player view disappears for another
+            // reason (or when the coordinator already paused a recording).
+            guard playback.isPlayerPresented else { return }
             switch engine.state {
             case .playing, .preparing, .recovering:
                 engine.pause()

@@ -2,6 +2,12 @@ import SwiftUI
 
 struct RecordingsView: View {
     let onOpenSettings: () -> Void
+    let focusRequest: UUID?
+
+    init(onOpenSettings: @escaping () -> Void, focusRequest: UUID? = nil) {
+        self.onOpenSettings = onOpenSettings
+        self.focusRequest = focusRequest
+    }
 
     @EnvironmentObject private var store: RecordingStore
     @EnvironmentObject private var settings: ServerSettingsStore
@@ -72,6 +78,10 @@ struct RecordingsView: View {
                 channel: channel(for: recording),
                 configuration: settings.configuration
             )
+        }
+        .onChange(of: focusRequest) { _, request in
+            guard request != nil else { return }
+            focusFirstRecordingElement()
         }
     }
 
@@ -182,6 +192,7 @@ struct RecordingsView: View {
                             .background(AppTheme.surface, in: RoundedRectangle(cornerRadius: 14))
                         }
                         .buttonStyle(.plain)
+                        .focused($focusedRecordingID, equals: "rule:\(rule.id)")
                     }
                 }
             }
@@ -203,6 +214,17 @@ struct RecordingsView: View {
             return channel.name
         }
         return rule.seriesLink == nil ? "Selected channel" : "Series link"
+    }
+
+    private func focusFirstRecordingElement() {
+        let target = store.recordings.first?.id
+            ?? store.rules.first.map { "rule:\($0.id)" }
+        guard let target else { return }
+
+        Task { @MainActor in
+            await Task.yield()
+            focusedRecordingID = target
+        }
     }
 }
 

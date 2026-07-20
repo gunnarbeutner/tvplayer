@@ -262,6 +262,7 @@ final class GuideTimelineTests: XCTestCase {
             <title>Tagesschau</title>
             <sub-title>Nachrichten</sub-title>
             <desc>Die Nachrichten des Tages.</desc>
+            <icon src="https://example.test/tagesschau.jpg" />
           </programme>
         </tv>
         """
@@ -275,6 +276,7 @@ final class GuideTimelineTests: XCTestCase {
         XCTAssertEqual(document.programmes.first?.title, "Tagesschau")
         XCTAssertEqual(document.programmes.first?.subtitle, "Nachrichten")
         XCTAssertEqual(document.programmes.first?.description, "Die Nachrichten des Tages.")
+        XCTAssertEqual(document.programmes.first?.imageURL, "https://example.test/tagesschau.jpg")
         XCTAssertEqual(document.programmes.first?.end.timeIntervalSince(document.programmes.first!.start), 3_600)
     }
 
@@ -424,7 +426,8 @@ final class GuideTimelineTests: XCTestCase {
               "hd": 1,
               "subtitled": true,
               "dvrUuid": "recording-uuid",
-              "dvrState": "scheduled"
+              "dvrState": "scheduled",
+              "image": "http://images.example/show.jpg"
             }
           ]
         }
@@ -450,6 +453,26 @@ final class GuideTimelineTests: XCTestCase {
         XCTAssertTrue(event.isSubtitled)
         XCTAssertEqual(event.dvrUUID, "recording-uuid")
         XCTAssertEqual(event.dvrState, "scheduled")
+        XCTAssertEqual(event.imageURL, "http://images.example/show.jpg")
+    }
+
+    func testExternalHTTPArtworkPrefersHTTPSWithoutRewritingLocalTVHeadend() throws {
+        let serverURL = try XCTUnwrap(URL(string: "http://tvheadend.local:9981"))
+
+        XCTAssertEqual(
+            TVHeadendClient.resolvedArtworkURLString(
+                "http://ngiss.t-online.de/cm1s/media/gracenote/show.jpg",
+                relativeTo: serverURL
+            ),
+            "https://ngiss.t-online.de/cm1s/media/gracenote/show.jpg"
+        )
+        XCTAssertEqual(
+            TVHeadendClient.resolvedArtworkURLString(
+                "http://tvheadend.local:9981/imagecache/52",
+                relativeTo: serverURL
+            ),
+            "http://tvheadend.local:9981/imagecache/52"
+        )
     }
 
     private func dvrEntry(

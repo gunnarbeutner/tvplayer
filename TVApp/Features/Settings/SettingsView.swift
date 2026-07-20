@@ -1,12 +1,23 @@
 import SwiftUI
 
 struct SettingsView: View {
+    let focusRequest: UUID?
+
 #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 #endif
     @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var playback: PlaybackCoordinator
     @State private var saveError: String?
+    @FocusState private var focusedControl: FocusControl?
+
+    private enum FocusControl: Hashable {
+        case serverURL
+    }
+
+    init(focusRequest: UUID? = nil) {
+        self.focusRequest = focusRequest
+    }
 
     var body: some View {
         ZStack {
@@ -45,6 +56,7 @@ struct SettingsView: View {
                         hint: "For example: http://tvheadend.local:9981"
                     ) {
                         TextField("http://tvheadend.local:9981", text: $settings.baseURLText)
+                            .focused($focusedControl, equals: .serverURL)
                     }
 
                     adaptiveLayout {
@@ -128,6 +140,13 @@ struct SettingsView: View {
             if settings.configuration.isComplete,
                settings.connectionStatus == .notTested {
                 await settings.testConnection()
+            }
+        }
+        .onChange(of: focusRequest) { _, request in
+            guard request != nil else { return }
+            Task { @MainActor in
+                await Task.yield()
+                focusedControl = .serverURL
             }
         }
     }

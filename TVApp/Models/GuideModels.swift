@@ -30,25 +30,45 @@ struct GuideProgramMetadata: Hashable, Codable, Sendable {
     let dvrUUID: String?
     let dvrState: String?
 
-    static let empty = GuideProgramMetadata(
-        episodeURI: nil,
-        seasonNumber: nil,
-        episodeNumber: nil,
-        partNumber: nil,
-        genres: [],
-        categories: [],
-        ageRating: nil,
-        ratingLabel: nil,
-        ratingLabelIcon: nil,
-        starRating: nil,
-        imageURL: nil,
-        isHD: false,
-        isWidescreen: false,
-        isSubtitled: false,
-        isNew: false,
-        dvrUUID: nil,
-        dvrState: nil
-    )
+    init(
+        episodeURI: String? = nil,
+        seasonNumber: String? = nil,
+        episodeNumber: String? = nil,
+        partNumber: String? = nil,
+        genres: [Int] = [],
+        categories: [String] = [],
+        ageRating: String? = nil,
+        ratingLabel: String? = nil,
+        ratingLabelIcon: String? = nil,
+        starRating: String? = nil,
+        imageURL: String? = nil,
+        isHD: Bool = false,
+        isWidescreen: Bool = false,
+        isSubtitled: Bool = false,
+        isNew: Bool = false,
+        dvrUUID: String? = nil,
+        dvrState: String? = nil
+    ) {
+        self.episodeURI = episodeURI
+        self.seasonNumber = seasonNumber
+        self.episodeNumber = episodeNumber
+        self.partNumber = partNumber
+        self.genres = genres
+        self.categories = categories
+        self.ageRating = ageRating
+        self.ratingLabel = ratingLabel
+        self.ratingLabelIcon = ratingLabelIcon
+        self.starRating = starRating
+        self.imageURL = imageURL
+        self.isHD = isHD
+        self.isWidescreen = isWidescreen
+        self.isSubtitled = isSubtitled
+        self.isNew = isNew
+        self.dvrUUID = dvrUUID
+        self.dvrState = dvrState
+    }
+
+    static let empty = GuideProgramMetadata()
 }
 
 struct GuideProgram: Identifiable, Hashable, Codable, Sendable {

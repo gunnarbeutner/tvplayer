@@ -13,3 +13,42 @@ enum AppTheme {
     static let divider = Color.white.opacity(0.14)
     static let secondaryText = Color.white.opacity(0.76)
 }
+
+enum GuideArtworkStyle {
+    // tvOS lays out full-screen content in a 1920-point coordinate space,
+    // including on 4K hardware where the backing scale is higher.
+    static let televisionCanvasWidth: CGFloat = 1920
+    static let televisionWidth: CGFloat = 680
+    static let fadeMidpoint: CGFloat = 0.14
+    static let fadeCompletion: CGFloat = 0.28
+
+    static func backgroundClearWidth(for artworkWidth: CGFloat) -> CGFloat {
+        artworkWidth * (1 - fadeCompletion)
+    }
+}
+
+/// The shared backdrop behind the guide's information and navigation rows.
+/// Keeping the gradient at full-screen width before clipping gives both rows
+/// identical color stops while leaving the artwork region untouched.
+struct GuideAmbientBackground: View {
+    let tint: Color?
+    var trailingClearWidth: CGFloat = 0
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                AppTheme.background
+                LinearGradient(
+                    colors: [tint?.opacity(0.18) ?? .clear, AppTheme.chrome, AppTheme.chrome],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .mask(alignment: .leading) {
+                Rectangle()
+                    .frame(width: max(0, proxy.size.width - trailingClearWidth))
+            }
+        }
+    }
+}

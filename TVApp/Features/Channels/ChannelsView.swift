@@ -3,6 +3,17 @@ import SwiftUI
 struct ChannelsView: View {
     let isSelected: Bool
     let onOpenSettings: () -> Void
+    let focusRequest: UUID?
+
+    init(
+        isSelected: Bool,
+        onOpenSettings: @escaping () -> Void,
+        focusRequest: UUID? = nil
+    ) {
+        self.isSelected = isSelected
+        self.onOpenSettings = onOpenSettings
+        self.focusRequest = focusRequest
+    }
 
     @EnvironmentObject private var model: GuideViewModel
     @EnvironmentObject private var settings: ServerSettingsStore
@@ -133,6 +144,10 @@ struct ChannelsView: View {
             guard isSelected else { return }
             restorePlaybackFocusIfAvailable()
         }
+        .onChange(of: focusRequest) { _, request in
+            guard request != nil else { return }
+            focusFirstChannel()
+        }
         .onChange(of: channelPreferences.revision) { _, _ in
             guard let focusedChannelID,
                   !displayedChannels.contains(where: { $0.id == focusedChannelID })
@@ -155,6 +170,20 @@ struct ChannelsView: View {
             in: displayedChannels,
             selection: playback.navigationSelection
         ) else { return }
+
+        Task { @MainActor in
+            await Task.yield()
+            guard isSelected else { return }
+            focusedChannelID = channelID
+        }
+    }
+
+    private func focusFirstChannel() {
+        let channelID = PlaybackFocusSelection.channelID(
+            in: displayedChannels,
+            selection: playback.navigationSelection
+        ) ?? displayedChannels.first?.id
+        guard let channelID else { return }
 
         Task { @MainActor in
             await Task.yield()

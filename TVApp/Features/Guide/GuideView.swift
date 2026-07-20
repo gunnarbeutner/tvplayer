@@ -3,6 +3,20 @@ import SwiftUI
 struct GuideView: View {
     let isSelected: Bool
     let onOpenSettings: () -> Void
+    let focusRequest: UUID?
+    let onPresentedChannelChange: (GuideChannel.ID?) -> Void
+
+    init(
+        isSelected: Bool,
+        onOpenSettings: @escaping () -> Void,
+        focusRequest: UUID? = nil,
+        onPresentedChannelChange: @escaping (GuideChannel.ID?) -> Void = { _ in }
+    ) {
+        self.isSelected = isSelected
+        self.onOpenSettings = onOpenSettings
+        self.focusRequest = focusRequest
+        self.onPresentedChannelChange = onPresentedChannelChange
+    }
 
     @Environment(\.scenePhase) private var scenePhase
 #if os(iOS)
@@ -47,6 +61,10 @@ struct GuideView: View {
             in: displayedChannels.first?.programs ?? [],
             at: currentDate
         )?.id
+    }
+
+    private var presentedChannelID: GuideChannel.ID? {
+        model.channel(containing: presentedProgram)?.id
     }
 
     var body: some View {
@@ -130,10 +148,8 @@ struct GuideView: View {
                 }
             }
         }
-        // The tab bar already reserves its own top region. The remaining
-        // guide is an edge-to-edge television surface; keeping tvOS's large
-        // horizontal and bottom content margins here wastes almost a full
-        // programme column and one row.
+        // The root television header reserves its own vertical region. The
+        // guide can still use the full horizontal and bottom television area.
         .televisionGuideEdges()
         .platformDetailPresentation(item: $detail) { presentation in
             ProgrammeDetailView(presentation: presentation)
@@ -146,7 +162,11 @@ struct GuideView: View {
             }
         }
         .onAppear {
+            onPresentedChannelChange(presentedChannelID)
             requestInitialFocus()
+        }
+        .onChange(of: presentedChannelID) { _, channelID in
+            onPresentedChannelChange(channelID)
         }
         .onChange(of: isSelected) { _, selected in
             guard selected else { return }
@@ -159,6 +179,10 @@ struct GuideView: View {
         .onChange(of: playback.focusReturnRevision) { _, _ in
             guard isSelected else { return }
             restorePlaybackFocusIfAvailable()
+        }
+        .onChange(of: focusRequest) { _, request in
+            guard request != nil else { return }
+            focusGuideFromNavigator()
         }
         .onChange(of: usesCompactGuide) { _, _ in
             recenterRequest = UUID()
@@ -269,6 +293,23 @@ struct GuideView: View {
             // Re-enabling the underlying TabView can otherwise let its tab bar
             // win the first focus update before the guide is ready. Reset the
             // guide's scope after the representable has received this request.
+            await Task.yield()
+            guard isSelected else { return }
+            resetFocus(in: guideFocusScope)
+#endif
+        }
+    }
+
+    private func focusGuideFromNavigator() {
+        guard let programID = preferredFocusProgramID else { return }
+        needsInitialFocus = false
+
+        Task { @MainActor in
+            await Task.yield()
+            guard isSelected else { return }
+            focusedProgramID = programID
+            focusRestoreRequest = UUID()
+#if os(tvOS)
             await Task.yield()
             guard isSelected else { return }
             resetFocus(in: guideFocusScope)
@@ -387,7 +428,20 @@ private struct GuideLoadingSkeleton: View {
     }
 
     private var informationPanelHeight: CGFloat {
-        usesCompactLayout ? 100 : 154
+        guard !usesCompactLayout else { return 100 }
+#if os(tvOS)
+        return 340
+#else
+        return 270
+#endif
+    }
+
+    private var artworkPlaceholderWidth: CGFloat {
+#if os(tvOS)
+        GuideArtworkStyle.televisionWidth
+#else
+        440
+#endif
     }
 
     var body: some View {
@@ -460,17 +514,12 @@ private struct GuideLoadingSkeleton: View {
             Spacer()
 
             if !usesCompactLayout {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Loading guide…")
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(AppTheme.secondaryText)
-                    placeholder(width: 360, height: 17)
-                    placeholder(width: 330, height: 17)
-                }
-                .frame(width: 400, alignment: .leading)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(AppTheme.surfaceRaised)
+                    .frame(width: artworkPlaceholderWidth, height: informationPanelHeight)
             }
         }
-        .padding(.horizontal, usesCompactLayout ? 20 : 72)
+        .padding(.leading, usesCompactLayout ? 20 : 72)
         .frame(
             maxWidth: .infinity,
             minHeight: informationPanelHeight,
@@ -582,6 +631,35 @@ private struct GuideInformationPanel: View {
     let recordingState: TVRecordingState?
     let usesCompactLayout: Bool
 
+    @EnvironmentObject private var playback: PlaybackCoordinator
+
+    private var artworkURL: URL? {
+        program?.metadata.imageURL.flatMap(URL.init(string:))
+    }
+
+    private var metadataDescription: String? {
+        guard let metadata = program?.metadata else { return nil }
+        var labels: [String] = []
+
+        if let season = metadata.seasonNumber, let episode = metadata.episodeNumber {
+            labels.append("Season \(season) · Episode \(episode)")
+        } else if let season = metadata.seasonNumber {
+            labels.append("Season \(season)")
+        } else if let episode = metadata.episodeNumber {
+            labels.append("Episode \(episode)")
+        }
+        if let part = metadata.partNumber { labels.append("Part \(part)") }
+        labels.append(contentsOf: metadata.categories.prefix(2))
+        if metadata.isNew { labels.append("New") }
+        if metadata.isHD { labels.append("HD") }
+        if metadata.isWidescreen { labels.append("Widescreen") }
+        if metadata.isSubtitled { labels.append("Subtitles") }
+        if let rating = metadata.ratingLabel ?? metadata.ageRating { labels.append(rating) }
+        if let stars = metadata.starRating { labels.append("★ \(stars)") }
+
+        return labels.isEmpty ? nil : labels.joined(separator: "  •  ")
+    }
+
     private var status: (String, Color)? {
         switch loadState {
         case .needsConfiguration:
@@ -613,6 +691,54 @@ private struct GuideInformationPanel: View {
         }
     }
 
+    private var regularPanelHeight: CGFloat {
+#if os(tvOS)
+        340
+#else
+        270
+#endif
+    }
+
+    private var regularArtworkWidth: CGFloat {
+#if os(tvOS)
+        680
+#else
+        440
+#endif
+    }
+
+    private var artworkTopBleed: CGFloat {
+#if os(tvOS)
+        84
+#else
+        0
+#endif
+    }
+
+    private var regularLeadingPadding: CGFloat {
+#if os(tvOS)
+        72
+#else
+        32
+#endif
+    }
+
+    private var regularTitleFont: Font {
+#if os(tvOS)
+        .system(size: 30, weight: .bold)
+#else
+        .title2.weight(.bold)
+#endif
+    }
+
+    private var regularSubtitleFont: Font {
+#if os(tvOS)
+        .system(size: 24, weight: .semibold)
+#else
+        .headline.weight(.semibold)
+#endif
+    }
+
     var body: some View {
         Group {
             if usesCompactLayout {
@@ -622,10 +748,11 @@ private struct GuideInformationPanel: View {
             }
         }
         .background {
-            LinearGradient(
-                colors: [channel?.tint.opacity(0.18) ?? .clear, AppTheme.chrome, AppTheme.chrome],
-                startPoint: .leading,
-                endPoint: .trailing
+            GuideAmbientBackground(
+                tint: channel?.tint,
+                trailingClearWidth: usesCompactLayout
+                    ? 0
+                    : GuideArtworkStyle.backgroundClearWidth(for: regularArtworkWidth)
             )
         }
         .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.divider).frame(height: 1) }
@@ -708,62 +835,64 @@ private struct GuideInformationPanel: View {
     }
 
     private var regularContent: some View {
-        HStack(alignment: .top, spacing: 28) {
-            VStack(spacing: 10) {
-                if let channel {
-                    ChannelBadge(channel: channel, diameter: 84)
-
-                    Text(channel.name)
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                }
-            }
-            // Keep the channel identity anchored independently of the
-            // selected programme's title, subtitle, and metadata lengths.
-            .frame(width: 150, height: 126, alignment: .top)
-
+        HStack(alignment: .top, spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 14) {
-                    Text(program?.title ?? "Choose a programme")
-                        .font(.title2.weight(.bold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.78)
-
-                    if let program, program.isAiring(at: now) {
-                        Text("LIVE")
-                            .font(.caption2.weight(.black))
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 4)
-                            .foregroundStyle(.white)
-                            .background(.red, in: Capsule())
-                        .accessibilityLabel("Currently airing")
+                HStack(alignment: .top, spacing: 16) {
+                    Group {
+                        if let channel {
+                            ChannelBadge(channel: channel, diameter: 64)
+                        } else {
+                            Color.clear
+                        }
                     }
+                    .frame(width: 64, height: 64, alignment: .topLeading)
 
-                    if let recordingState {
-                        Label(
-                            recordingState == .recording ? "RECORDING" : "SCHEDULED",
-                            systemImage: recordingState == .recording ? "record.circle.fill" : "clock.fill"
-                        )
-                        .font(.caption2.weight(.black))
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4)
-                        .foregroundStyle(.white)
-                        .background(recordingState == .recording ? Color.red : AppTheme.focused, in: Capsule())
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 12) {
+                            Text(program?.title ?? "Choose a programme")
+                                .font(regularTitleFont)
+                                .lineLimit(2)
+                                .layoutPriority(1)
+
+                            if let program, program.isAiring(at: now) {
+                                Text("LIVE")
+                                    .font(.caption2.weight(.black))
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 4)
+                                    .foregroundStyle(.white)
+                                    .background(.red, in: Capsule())
+                                    .accessibilityLabel("Currently airing")
+                            }
+
+                            if let recordingState {
+                                Label(
+                                    recordingState == .recording ? "RECORDING" : "SCHEDULED",
+                                    systemImage: recordingState == .recording ? "record.circle.fill" : "clock.fill"
+                                )
+                                .font(.caption2.weight(.black))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 4)
+                                .foregroundStyle(.white)
+                                .background(recordingState == .recording ? Color.red : AppTheme.focused, in: Capsule())
+                            }
+                        }
+
+                        if let subtitle = program?.subtitle, !subtitle.isEmpty {
+                            Text(subtitle)
+                                .font(regularSubtitleFont)
+                                .foregroundStyle(.white.opacity(0.88))
+                                .lineLimit(1)
+                        }
                     }
-                }
-
-                if let subtitle = program?.subtitle, !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.headline.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.9))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.78)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 if let program {
                     HStack(spacing: 10) {
+                        if let channel {
+                            Text(channel.name)
+                            Text("•")
+                        }
                         Text(program.start.formatted(date: .abbreviated, time: .omitted))
                         Text("•")
                         Text("\(program.start.formatted(date: .omitted, time: .shortened))–\(program.end.formatted(date: .omitted, time: .shortened))")
@@ -777,35 +906,191 @@ private struct GuideInformationPanel: View {
                     .lineLimit(1)
                 }
 
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+                if let metadataDescription {
+                    Text(metadataDescription)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(AppTheme.accent)
+                        .lineLimit(1)
+                }
 
-            Group {
                 if let status {
                     Text(status.0)
                         .font(.callout.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(4)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
-                        .frame(width: 400, alignment: .leading)
-                        .background(status.1.opacity(0.22), in: RoundedRectangle(cornerRadius: 12))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 12)
-                                .strokeBorder(status.1.opacity(0.9), lineWidth: 2)
-                        }
+                        .foregroundStyle(status.1)
+                        .lineLimit(2)
                 } else {
                     Text(program?.overview ?? "Move focus into the guide to see programme information.")
                         .font(.callout)
                         .foregroundStyle(.white.opacity(0.82))
-                        .lineLimit(3)
-                        .frame(width: 400, alignment: .leading)
+                        .lineLimit(5)
+                        .frame(minHeight: 90, alignment: .topLeading)
+                        .layoutPriority(1)
                 }
             }
+            .padding(.leading, regularLeadingPadding)
+            .padding(.trailing, 32)
+            .padding(.vertical, 20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
+            ProgrammeArtworkView(
+                url: artworkURL,
+                engine: playback.engine,
+                selectedChannelID: channel?.id,
+                playerChannelID: playback.presentation?.channel.id,
+                isPlayerPresented: playback.isPlayerPresented,
+                isLivePlayback: playback.presentation?.isRecording == false
+            )
+                .frame(
+                    width: regularArtworkWidth,
+                    height: regularPanelHeight + artworkTopBleed
+                )
+                .offset(y: -artworkTopBleed)
         }
-        .padding(.horizontal, 72)
-        .padding(.vertical, 14)
-        .frame(maxWidth: .infinity, minHeight: 154, maxHeight: 154, alignment: .topLeading)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: regularPanelHeight,
+            maxHeight: regularPanelHeight,
+            alignment: .topLeading
+        )
     }
+}
+
+private struct ProgrammeArtworkView: View {
+    let url: URL?
+    @ObservedObject var engine: VLCPlaybackEngine
+    let selectedChannelID: GuideChannel.ID?
+    let playerChannelID: GuideChannel.ID?
+    let isPlayerPresented: Bool
+    let isLivePlayback: Bool
+
+    @EnvironmentObject private var settings: ServerSettingsStore
+    @State private var loadedArtwork: ChannelLogoArtwork?
+    @State private var loadedKey: String?
+
+    private var currentKey: String? {
+        url.map(ChannelLogoImageCache.cacheKey)
+    }
+
+    private var displayedArtwork: ChannelLogoArtwork? {
+        if loadedKey == currentKey, let loadedArtwork { return loadedArtwork }
+        guard let url else { return nil }
+        return ChannelLogoImageCache.shared.cachedArtwork(for: url)
+    }
+
+    private var pausedPlayerFrame: PlatformImage? {
+        guard engine.state == .paused,
+              selectedChannelID != nil,
+              selectedChannelID == playerChannelID
+        else { return nil }
+        return engine.pausedFrame
+    }
+
+    private var showsLivePlayer: Bool {
+        guard !isPlayerPresented,
+              isLivePlayback
+        else { return false }
+
+        // VLC can keep producing audio/video while its delegate briefly
+        // reports an idle or failed transition during drawable replacement.
+        // The native output flags are authoritative for the embedded preview.
+        if engine.state == .paused { return false }
+        if engine.mediaPlayer.isPlaying || engine.mediaPlayer.hasVideoOut {
+            return true
+        }
+
+        switch engine.state {
+        case .preparing, .playing, .recovering:
+            return true
+        case .idle, .paused, .failed:
+            return false
+        }
+    }
+
+    var body: some View {
+        Group {
+            if showsLivePlayer {
+                // The single persistent VLC drawable sits behind the guide
+                // and is resized to this artwork rectangle. Keeping this
+                // branch transparent avoids moving a live VLC output between
+                // native views, which is unreliable during playback.
+                Color.clear
+            } else {
+                ZStack {
+                    if let pausedPlayerFrame {
+                        platformImage(pausedPlayerFrame)
+                            .resizable()
+                            .scaledToFill()
+                    } else if let artwork = displayedArtwork {
+                        platformImage(artwork.image)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        Color.clear
+                    }
+                }
+                .mask { artworkMask }
+            }
+        }
+        .clipped()
+        .accessibilityHidden(true)
+        .task(id: ProgrammeArtworkLoadID(url: url, settingsRevision: settings.revision)) {
+            await loadArtwork()
+        }
+    }
+
+    private var artworkMask: some View {
+        LinearGradient(
+            stops: [
+                .init(color: .clear, location: 0),
+                .init(color: .black.opacity(0.48), location: GuideArtworkStyle.fadeMidpoint),
+                .init(color: .black, location: GuideArtworkStyle.fadeCompletion),
+                .init(color: .black, location: 1),
+            ],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+    }
+
+    private func platformImage(_ image: PlatformImage) -> Image {
+#if canImport(UIKit)
+        return Image(uiImage: image)
+#else
+        return Image(nsImage: image)
+#endif
+    }
+
+    @MainActor
+    private func loadArtwork() async {
+        guard let url else {
+            loadedArtwork = nil
+            loadedKey = nil
+            return
+        }
+
+        let key = ChannelLogoImageCache.cacheKey(for: url)
+        if let artwork = ChannelLogoImageCache.shared.cachedArtwork(for: url) {
+            loadedArtwork = artwork
+            loadedKey = key
+            return
+        }
+
+        loadedArtwork = nil
+        loadedKey = nil
+        do {
+            let artwork = try await ChannelLogoDataLoader.shared.artwork(
+                at: url,
+                configuration: settings.configuration
+            )
+            guard !Task.isCancelled else { return }
+            loadedArtwork = artwork
+            loadedKey = key
+        } catch {
+            // Artwork is optional; retain the quiet placeholder on failure.
+        }
+    }
+}
+
+private struct ProgrammeArtworkLoadID: Hashable {
+    let url: URL?
+    let settingsRevision: Int
 }

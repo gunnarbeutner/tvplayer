@@ -102,7 +102,7 @@ protocol PlaybackEngine: AnyObject {
 }
 
 @MainActor
-final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMediaPlayerDelegate {
+final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @preconcurrency VLCMediaPlayerDelegate {
     private let logger = Logger(subsystem: "de.beutner.TVPlayer", category: "Playback")
     @Published private(set) var state: PlaybackState = .idle
     @Published private(set) var elapsedSeconds: TimeInterval = 0
@@ -125,6 +125,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     @Published private(set) var activeLivePlaybackMode: ActiveLivePlaybackMode?
     @Published private(set) var livePlaybackMarkerDate: Date?
     @Published private(set) var isPlaybackOutputConcealed = false
+    @Published private(set) var pausedFrame: PlatformImage?
 
     let mediaPlayer: VLCMediaPlayer
 
@@ -145,6 +146,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     private var hasStartedPlayback = false
     private var didLogCapabilities = false
     private var activeRequest: LiveStreamRequest?
+    private var pendingSnapshotURL: URL?
 
     override init() {
         mediaPlayer = VLCMediaPlayer()
@@ -159,6 +161,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         pipelineRecoveryID = nil
         recoveryReason = nil
         recoveryAttempt = 0
+        clearPausedFrame()
         setState(.preparing)
         logger.info("Preparing stream from \(request.url.host ?? "unknown host", privacy: .public)")
 
@@ -289,6 +292,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
             setState(.paused)
         }
         refreshPlaybackInformation()
+        capturePausedFrame()
     }
 
     func stop() {
@@ -306,8 +310,43 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         nativeTimeshiftSessionID = nil
         activeLivePlaybackMode = nil
         activeRequest = nil
+        clearPausedFrame()
         resetPlaybackMetrics()
         setState(.idle)
+    }
+
+    func mediaPlayerSnapshot(_ notification: Notification) {
+        guard let snapshotURL = pendingSnapshotURL else { return }
+        pendingSnapshotURL = nil
+        defer { try? FileManager.default.removeItem(at: snapshotURL) }
+
+        guard state == .paused,
+              let image = PlatformImage(contentsOfFile: snapshotURL.path)
+        else { return }
+        pausedFrame = image
+    }
+
+    private func capturePausedFrame() {
+        guard state == .paused, pendingSnapshotURL == nil else { return }
+        pausedFrame = nil
+
+        let snapshotURL = FileManager.default.temporaryDirectory
+            .appending(path: "tvplayer-paused-frame-\(UUID().uuidString)")
+            .appendingPathExtension("png")
+        pendingSnapshotURL = snapshotURL
+        mediaPlayer.saveVideoSnapshot(
+            at: snapshotURL.path,
+            withWidth: 1_280,
+            andHeight: 0
+        )
+    }
+
+    private func clearPausedFrame() {
+        pausedFrame = nil
+        if let pendingSnapshotURL {
+            try? FileManager.default.removeItem(at: pendingSnapshotURL)
+        }
+        pendingSnapshotURL = nil
     }
 
     func togglePlayPause() {
@@ -1082,21 +1121,41 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
 struct VLCVideoSurface: UIViewRepresentable {
     let mediaPlayer: VLCMediaPlayer
     let attachmentRevision: Int
+    let isActive: Bool
+    let fadesLeadingEdge: Bool
+    let leadingFadeInset: CGFloat
 
-    init(mediaPlayer: VLCMediaPlayer, attachmentRevision: Int = 0) {
+    init(
+        mediaPlayer: VLCMediaPlayer,
+        attachmentRevision: Int = 0,
+        isActive: Bool = true,
+        fadesLeadingEdge: Bool = false,
+        leadingFadeInset: CGFloat = 0
+    ) {
         self.mediaPlayer = mediaPlayer
         self.attachmentRevision = attachmentRevision
+        self.isActive = isActive
+        self.fadesLeadingEdge = fadesLeadingEdge
+        self.leadingFadeInset = leadingFadeInset
     }
 
     func makeUIView(context: Context) -> UIView {
         VLCVideoContainerView(
             mediaPlayer: mediaPlayer,
-            attachmentRevision: attachmentRevision
+            attachmentRevision: attachmentRevision,
+            isActive: isActive,
+            fadesLeadingEdge: fadesLeadingEdge,
+            leadingFadeInset: leadingFadeInset
         )
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
-        (uiView as? VLCVideoContainerView)?.updateAttachment(revision: attachmentRevision)
+        (uiView as? VLCVideoContainerView)?.updateAttachment(
+            revision: attachmentRevision,
+            isActive: isActive,
+            fadesLeadingEdge: fadesLeadingEdge,
+            leadingFadeInset: leadingFadeInset
+        )
     }
 
     static func dismantleUIView(_ uiView: UIView, coordinator: ()) {
@@ -1107,12 +1166,29 @@ struct VLCVideoSurface: UIViewRepresentable {
 private final class VLCVideoContainerView: UIView {
     private weak var mediaPlayer: VLCMediaPlayer?
     private var attachmentRevision: Int
+    private var isActive: Bool
+    private var fadesLeadingEdge: Bool
+    private var leadingFadeInset: CGFloat
+    private var attachedBoundsSize = CGSize.zero
+    private let leadingFadeMask = CAGradientLayer()
 
-    init(mediaPlayer: VLCMediaPlayer, attachmentRevision: Int) {
+    init(
+        mediaPlayer: VLCMediaPlayer,
+        attachmentRevision: Int,
+        isActive: Bool,
+        fadesLeadingEdge: Bool,
+        leadingFadeInset: CGFloat
+    ) {
         self.mediaPlayer = mediaPlayer
         self.attachmentRevision = attachmentRevision
+        self.isActive = isActive
+        self.fadesLeadingEdge = fadesLeadingEdge
+        self.leadingFadeInset = leadingFadeInset
         super.init(frame: .zero)
         backgroundColor = .black
+        clipsToBounds = true
+        layer.masksToBounds = true
+        updateLeadingFadeMask()
     }
 
     @available(*, unavailable)
@@ -1124,15 +1200,78 @@ private final class VLCVideoContainerView: UIView {
         super.didMoveToWindow()
         if window == nil {
             detachIfOwned()
-        } else {
+        } else if isActive {
             attachIfVisible()
         }
     }
 
-    func updateAttachment(revision: Int) {
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard isActive, bounds.width > 1, bounds.height > 1,
+              attachedBoundsSize != bounds.size
+        else { return }
+
+        attachedBoundsSize = bounds.size
+        updateLeadingFadeMask()
+        // SwiftUI installs representable views before assigning their final
+        // frame. Rebind once that frame is known so VLC sizes and positions
+        // its video output for the guide preview rather than the old player.
+        attachIfVisible(force: true)
+    }
+
+    func updateAttachment(
+        revision: Int,
+        isActive: Bool,
+        fadesLeadingEdge: Bool,
+        leadingFadeInset: CGFloat
+    ) {
         let mustReattach = revision != attachmentRevision
         attachmentRevision = revision
+        self.isActive = isActive
+        if self.fadesLeadingEdge != fadesLeadingEdge || self.leadingFadeInset != leadingFadeInset {
+            self.fadesLeadingEdge = fadesLeadingEdge
+            self.leadingFadeInset = leadingFadeInset
+            updateLeadingFadeMask()
+        }
+        guard isActive else {
+            detachIfOwned()
+            return
+        }
         attachIfVisible(force: mustReattach)
+    }
+
+    private func updateLeadingFadeMask() {
+        guard fadesLeadingEdge else {
+            layer.mask = nil
+            return
+        }
+        leadingFadeMask.frame = bounds
+        leadingFadeMask.startPoint = CGPoint(x: 0, y: 0.5)
+        leadingFadeMask.endPoint = CGPoint(x: 1, y: 0.5)
+        leadingFadeMask.colors = [
+            UIColor.clear.cgColor,
+            UIColor.black.withAlphaComponent(0.48).cgColor,
+            UIColor.black.cgColor,
+            UIColor.black.cgColor,
+        ]
+        let width = max(1, bounds.width)
+        let visibleWidth = max(1, width - leadingFadeInset)
+        let fadeStart = min(1, max(0, leadingFadeInset / width))
+        let fadeMidpoint = min(
+            1,
+            max(fadeStart, (leadingFadeInset + visibleWidth * GuideArtworkStyle.fadeMidpoint) / width)
+        )
+        let fadeCompletion = min(
+            1,
+            max(fadeMidpoint, (leadingFadeInset + visibleWidth * GuideArtworkStyle.fadeCompletion) / width)
+        )
+        leadingFadeMask.locations = [
+            NSNumber(value: Double(fadeStart)),
+            NSNumber(value: Double(fadeMidpoint)),
+            NSNumber(value: Double(fadeCompletion)),
+            1,
+        ]
+        layer.mask = leadingFadeMask
     }
 
     func attachIfVisible(force: Bool = false) {
@@ -1161,21 +1300,39 @@ private final class VLCVideoContainerView: UIView {
 struct VLCVideoSurface: NSViewRepresentable {
     let mediaPlayer: VLCMediaPlayer
     let attachmentRevision: Int
+    let isActive: Bool
+    let fadesLeadingEdge: Bool
+    let leadingFadeInset: CGFloat
 
-    init(mediaPlayer: VLCMediaPlayer, attachmentRevision: Int = 0) {
+    init(
+        mediaPlayer: VLCMediaPlayer,
+        attachmentRevision: Int = 0,
+        isActive: Bool = true,
+        fadesLeadingEdge: Bool = false,
+        leadingFadeInset: CGFloat = 0
+    ) {
         self.mediaPlayer = mediaPlayer
         self.attachmentRevision = attachmentRevision
+        self.isActive = isActive
+        self.fadesLeadingEdge = fadesLeadingEdge
+        self.leadingFadeInset = leadingFadeInset
     }
 
     func makeNSView(context: Context) -> NSView {
         VLCVideoContainerView(
             mediaPlayer: mediaPlayer,
-            attachmentRevision: attachmentRevision
+            attachmentRevision: attachmentRevision,
+            isActive: isActive,
+            fadesLeadingEdge: fadesLeadingEdge
         )
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        (nsView as? VLCVideoContainerView)?.updateAttachment(revision: attachmentRevision)
+        (nsView as? VLCVideoContainerView)?.updateAttachment(
+            revision: attachmentRevision,
+            isActive: isActive,
+            fadesLeadingEdge: fadesLeadingEdge
+        )
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: ()) {
@@ -1186,10 +1343,19 @@ struct VLCVideoSurface: NSViewRepresentable {
 private final class VLCVideoContainerView: NSView {
     private weak var mediaPlayer: VLCMediaPlayer?
     private var attachmentRevision: Int
+    private var isActive: Bool
+    private var fadesLeadingEdge: Bool
 
-    init(mediaPlayer: VLCMediaPlayer, attachmentRevision: Int) {
+    init(
+        mediaPlayer: VLCMediaPlayer,
+        attachmentRevision: Int,
+        isActive: Bool,
+        fadesLeadingEdge: Bool
+    ) {
         self.mediaPlayer = mediaPlayer
         self.attachmentRevision = attachmentRevision
+        self.isActive = isActive
+        self.fadesLeadingEdge = fadesLeadingEdge
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
@@ -1204,14 +1370,20 @@ private final class VLCVideoContainerView: NSView {
         super.viewDidMoveToWindow()
         if window == nil {
             detachIfOwned()
-        } else {
+        } else if isActive {
             attachIfVisible()
         }
     }
 
-    func updateAttachment(revision: Int) {
+    func updateAttachment(revision: Int, isActive: Bool, fadesLeadingEdge: Bool) {
         let mustReattach = revision != attachmentRevision
         attachmentRevision = revision
+        self.isActive = isActive
+        self.fadesLeadingEdge = fadesLeadingEdge
+        guard isActive else {
+            detachIfOwned()
+            return
+        }
         attachIfVisible(force: mustReattach)
     }
 

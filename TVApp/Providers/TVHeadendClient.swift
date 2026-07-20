@@ -49,11 +49,20 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
             let data = try await fetchData(at: guideCacheURL)
             let document = try JSONDecoder().decode(TVPlayerGuideCacheDocument.self, from: data)
             guard document.version == 1 else { throw TVProviderError.invalidResponse }
-            programmesByChannel = Self.mapEPG(document.events, timeline: timeline)
+            programmesByChannel = Self.mapEPG(
+                document.events,
+                timeline: timeline,
+                artworkBaseURL: configuration.baseURL
+            )
         } else if let xmltvURL = configuration.xmltvURL {
             let data = try await fetchData(at: xmltvURL)
             let document = try XMLTVParser.parse(data)
-            programmesByChannel = Self.mapXMLTV(document, to: channelGrid.entries, timeline: timeline)
+            programmesByChannel = Self.mapXMLTV(
+                document,
+                to: channelGrid.entries,
+                timeline: timeline,
+                sourceURL: configuration.xmltvURL
+            )
         } else {
             let epgGrid: TVHeadendGrid<TVHeadendEPGEvent> = try await get(
                 path: "/api/epg/events/grid",
@@ -64,7 +73,11 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
                 freshEvents: epgGrid.entries,
                 serverIdentifier: serverIdentifier
             )
-            programmesByChannel = Self.mapEPG(events, timeline: timeline)
+            programmesByChannel = Self.mapEPG(
+                events,
+                timeline: timeline,
+                artworkBaseURL: configuration.baseURL
+            )
         }
 
         let channels = Self.makeChannels(
@@ -456,7 +469,8 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
 
     private static func mapEPG(
         _ events: [TVHeadendEPGEvent],
-        timeline: GuideTimeline
+        timeline: GuideTimeline,
+        artworkBaseURL: URL?
     ) -> [String: [GuideProgram]] {
         let programs = events.compactMap { event -> GuideProgram? in
             guard let channelID = event.channelUUID,
@@ -493,7 +507,7 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
                     ratingLabel: event.ratingLabel,
                     ratingLabelIcon: event.ratingLabelIcon,
                     starRating: event.starRating,
-                    imageURL: event.imageURL,
+                    imageURL: resolvedArtworkURLString(event.imageURL, relativeTo: artworkBaseURL),
                     isHD: event.isHD,
                     isWidescreen: event.isWidescreen,
                     isSubtitled: event.isSubtitled,
@@ -509,7 +523,8 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
     private static func mapXMLTV(
         _ document: XMLTVDocument,
         to channels: [TVHeadendChannel],
-        timeline: GuideTimeline
+        timeline: GuideTimeline,
+        sourceURL: URL?
     ) -> [String: [GuideProgram]] {
         let channelNames = Dictionary(uniqueKeysWithValues: document.channels.map {
             ($0.id, normalized($0.displayName))
@@ -539,7 +554,13 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
                 subtitle: programme.subtitle,
                 overview: programme.description ?? programme.subtitle ?? "No programme description available.",
                 start: programme.start,
-                end: programme.end
+                end: programme.end,
+                metadata: GuideProgramMetadata(
+                    imageURL: resolvedArtworkURLString(
+                        programme.imageURL,
+                        relativeTo: sourceURL?.deletingLastPathComponent()
+                    )
+                )
             )
         }
         return Dictionary(grouping: programs, by: \GuideProgram.channelID)
@@ -547,6 +568,34 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
 
     private static func normalized(_ value: String) -> String {
         value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    }
+
+    static func resolvedArtworkURLString(_ value: String?, relativeTo baseURL: URL?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty
+        else { return nil }
+        if let absoluteURL = URL(string: value), absoluteURL.scheme != nil {
+            guard absoluteURL.scheme?.lowercased() == "http",
+                  absoluteURL.host?.caseInsensitiveCompare(baseURL?.host ?? "") != .orderedSame,
+                  var secureComponents = URLComponents(
+                    url: absoluteURL,
+                    resolvingAgainstBaseURL: false
+                  )
+            else { return absoluteURL.absoluteString }
+
+            // XMLTV providers commonly publish artwork as plain HTTP even
+            // when the same resource is available over HTTPS. External HTTP
+            // is rejected by App Transport Security; same-origin TVHeadend
+            // image-cache URLs remain HTTP so local authenticated servers
+            // continue to work.
+            secureComponents.scheme = "https"
+            if secureComponents.port == 80 { secureComponents.port = nil }
+            return secureComponents.url?.absoluteString ?? absoluteURL.absoluteString
+        }
+        return baseURL.flatMap {
+            let directoryURL = $0.appendingPathComponent("")
+            return URL(string: value, relativeTo: directoryURL)?.absoluteURL.absoluteString
+        }
     }
 
     private static func streamURL(for channelID: String, in playlist: String) -> URL? {

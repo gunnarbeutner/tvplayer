@@ -94,9 +94,10 @@ final class PlaybackCoordinator: ObservableObject {
     }
 
     func leavePlayer() {
-        if case .liveOnly = engine.activeLivePlaybackMode {
-            engine.stop()
-        } else {
+        // Live television keeps running when it collapses into the guide's
+        // artwork area. Recorded media retains the previous pause-on-exit
+        // behavior because it has no corresponding live channel preview.
+        if presentation?.isRecording == true {
             engine.pause()
         }
         isPlayerPresented = false
