@@ -745,7 +745,16 @@ private final class GuideCollectionView: UICollectionView,
         updateFocusAvailability()
 
         if isRestoreRequest, let focusedProgramID {
-            requestFocus(on: focusedProgramID, animated: false, retriesRemaining: 4)
+            // Focus currently belongs to the disappearing player layer or to
+            // the TabView's bar. Target the exact programme cell through the
+            // window focus system so the tab bar cannot retain focus simply
+            // because it sits outside this collection view's subtree.
+            requestFocus(
+                on: focusedProgramID,
+                animated: false,
+                retriesRemaining: 8,
+                directly: true
+            )
         } else if let focusedProgramID,
                   focusedProgramID != previousRequestedFocusedProgramID,
                   focusedProgramID != currentlyFocusedProgramID,
@@ -824,7 +833,8 @@ private final class GuideCollectionView: UICollectionView,
     private func requestFocus(
         on programID: GuideProgram.ID,
         animated: Bool,
-        retriesRemaining: Int
+        retriesRemaining: Int,
+        directly: Bool = false
     ) {
         guard let snapshot = guideSnapshot,
               let indexPath = snapshot.indexPath(for: programID),
@@ -845,8 +855,15 @@ private final class GuideCollectionView: UICollectionView,
         let destinationIsRealized = cellForItem(at: indexPath) != nil
         reveal(item: item, animated: animated && destinationIsRealized)
         layoutIfNeeded()
-        setNeedsFocusUpdate()
-        updateFocusIfNeeded()
+        if directly,
+           let targetCell = cellForItem(at: indexPath),
+           let focusSystem = UIFocusSystem.focusSystem(for: targetCell) {
+            focusSystem.requestFocusUpdate(to: targetCell)
+            focusSystem.updateFocusIfNeeded()
+        } else {
+            setNeedsFocusUpdate()
+            updateFocusIfNeeded()
+        }
 
         guard currentlyFocusedProgramID != programID else { return }
         guard retriesRemaining > 0 else {
@@ -864,7 +881,8 @@ private final class GuideCollectionView: UICollectionView,
                 self?.requestFocus(
                     on: programID,
                     animated: false,
-                    retriesRemaining: retriesRemaining - 1
+                    retriesRemaining: retriesRemaining - 1,
+                    directly: directly
                 )
             } catch {
                 // A newer focus request superseded this retry.
