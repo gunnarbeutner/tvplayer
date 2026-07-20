@@ -129,10 +129,6 @@ struct ProgrammeDetailView: View {
 #endif
     }
 
-    private let metadataColumns = [
-        GridItem(.adaptive(minimum: 90, maximum: 190), spacing: 8, alignment: .leading)
-    ]
-
     private enum RecordingConfirmation: String, Identifiable {
         case cancel = "Cancel Recording"
         case stop = "Stop Recording"
@@ -183,7 +179,7 @@ struct ProgrammeDetailView: View {
 
                         if !metadataLabels.isEmpty {
 #if os(macOS)
-                            LazyVGrid(columns: metadataColumns, alignment: .leading, spacing: 8) {
+                            ProgrammeMetadataFlowLayout(spacing: 8) {
                                 ForEach(metadataLabels, id: \.self) { label in
                                     metadataBadge(label)
                                 }
@@ -372,9 +368,85 @@ private extension View {
     @ViewBuilder
     func programmeDetailWindowSizing() -> some View {
 #if os(macOS)
-        frame(width: 900, height: 620)
+        frame(
+            minWidth: 700,
+            idealWidth: 820,
+            maxWidth: 900,
+            minHeight: 500,
+            idealHeight: 540,
+            maxHeight: 620
+        )
 #else
         self
 #endif
     }
 }
+
+#if os(macOS)
+/// A compact wrapping row for metadata pills. Adaptive grids force every pill
+/// into an equal-width column, which truncates useful labels in narrow sheets.
+private struct ProgrammeMetadataFlowLayout: Layout {
+    let spacing: CGFloat
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        let availableWidth = proposal.width ?? .greatestFiniteMagnitude
+        var rowWidth: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var usedWidth: CGFloat = 0
+        var usedHeight: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            let nextWidth = rowWidth == 0 ? size.width : rowWidth + spacing + size.width
+
+            if rowWidth > 0, nextWidth > availableWidth {
+                usedWidth = max(usedWidth, rowWidth)
+                usedHeight += rowHeight + spacing
+                rowWidth = size.width
+                rowHeight = size.height
+            } else {
+                rowWidth = nextWidth
+                rowHeight = max(rowHeight, size.height)
+            }
+        }
+
+        usedWidth = max(usedWidth, rowWidth)
+        usedHeight += rowHeight
+        return CGSize(
+            width: proposal.width ?? usedWidth,
+            height: usedHeight
+        )
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        var point = bounds.origin
+        var rowHeight: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if point.x > bounds.minX, point.x + size.width > bounds.maxX {
+                point.x = bounds.minX
+                point.y += rowHeight + spacing
+                rowHeight = 0
+            }
+
+            subview.place(
+                at: point,
+                anchor: .topLeading,
+                proposal: ProposedViewSize(size)
+            )
+            point.x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+    }
+}
+#endif
