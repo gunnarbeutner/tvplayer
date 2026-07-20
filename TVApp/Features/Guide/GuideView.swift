@@ -69,6 +69,14 @@ struct GuideView: View {
         )?.id
     }
 
+    private var retainedFocusProgramID: GuideProgram.ID? {
+        guard let focusedProgramID,
+              let focusedProgram = model.program(withID: focusedProgramID),
+              displayedChannels.contains(where: { $0.id == focusedProgram.channelID })
+        else { return nil }
+        return focusedProgramID
+    }
+
     private var presentedChannelID: GuideChannel.ID? {
         model.channel(containing: presentedProgram)?.id
     }
@@ -316,7 +324,7 @@ struct GuideView: View {
     }
 
     private func focusGuideFromNavigator() {
-        guard let programID = preferredFocusProgramID else { return }
+        guard let programID = retainedFocusProgramID ?? preferredFocusProgramID else { return }
         needsInitialFocus = false
 
         Task { @MainActor in
