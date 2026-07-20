@@ -9,6 +9,12 @@ struct HTSPMuxPacket: Sendable {
 }
 
 final class MPEGTransportStreamMuxer {
+    // VLC 3.x intentionally does not propagate the standard MPEG-TS
+    // discontinuity indicator to packetizers and decoders. Its TS demuxer
+    // recognizes this private-data marker and turns it into
+    // BLOCK_FLAG_DISCONTINUITY, which flushes stale audio/video decoder state.
+    private static let vlcDiscontinuityMarker = Data("VLC_DISCONTINU".utf8)
+
     private struct Track {
         let info: HTSPStreamInfo
         let pid: UInt16
@@ -184,9 +190,14 @@ final class MPEGTransportStreamMuxer {
         var offset = 0
         var first = true
         while offset < data.count {
-            let requiredAdaptation = first && (pcrMicroseconds != nil || discontinuity)
-                ? (pcrMicroseconds == nil ? 2 : 8)
-                : 0
+            let writesVLCDiscontinuity = first && discontinuity
+            // VLC requires the private marker's flags byte to be exactly 0x82,
+            // so PCR cannot share this adaptation field. The next video PES
+            // resumes the normal per-frame PCR cadence.
+            let writesPCR = first && pcrMicroseconds != nil && !writesVLCDiscontinuity
+            let requiredAdaptation = writesVLCDiscontinuity
+                ? 3 + Self.vlcDiscontinuityMarker.count
+                : (writesPCR ? 8 : 0)
             let remaining = data.count - offset
             var payloadCount = min(184 - requiredAdaptation, remaining)
             var adaptationTotal = 184 - payloadCount
@@ -210,11 +221,16 @@ final class MPEGTransportStreamMuxer {
                 packet.append(UInt8(adaptationTotal - 1))
                 if adaptationTotal > 1 {
                     var flags: UInt8 = 0
-                    if first && discontinuity { flags |= 0x80 }
-                    if first && pcrMicroseconds != nil { flags |= 0x10 }
+                    if writesVLCDiscontinuity { flags |= 0x82 }
+                    if writesPCR { flags |= 0x10 }
                     packet.append(flags)
                     var used = 2
-                    if first, let pcrMicroseconds {
+                    if writesVLCDiscontinuity {
+                        packet.append(UInt8(Self.vlcDiscontinuityMarker.count))
+                        packet.append(Self.vlcDiscontinuityMarker)
+                        used += 1 + Self.vlcDiscontinuityMarker.count
+                    }
+                    if writesPCR, let pcrMicroseconds {
                         packet.append(Self.pcrBytes(microseconds: pcrMicroseconds))
                         used += 6
                     }

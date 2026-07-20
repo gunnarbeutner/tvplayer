@@ -182,13 +182,18 @@ struct PlaybackOutputHealthMonitor {
 
     private var previousOutput: PlaybackOutputCounters?
     private var lastProgressDate: Date?
+    private var lastAudioProgressDate: Date?
+    private var wasExpectingAudio = false
+    private var hasObservedAudioOutput = false
     private var hasRequestedRecovery = false
+    private var hasRequestedAudioRecovery = false
 
     mutating func observe(
         output: PlaybackOutputCounters,
         at date: Date,
         expectsOutput: Bool,
-        hasFreshInput: Bool
+        hasFreshInput: Bool,
+        expectsAudio: Bool = false
     ) -> PlaybackHealthAction {
         guard expectsOutput, hasFreshInput else {
             restartGracePeriod(output: output, at: date)
@@ -201,19 +206,52 @@ struct PlaybackOutputHealthMonitor {
         }
 
         self.previousOutput = output
+        let audioAdvanced = output.playedAudioBuffers > previousOutput.playedAudioBuffers
+        let audioCounterReset = output.playedAudioBuffers < previousOutput.playedAudioBuffers
+        var action = PlaybackHealthAction.none
+
         if output.hasAdvanced(since: previousOutput) {
             lastProgressDate = date
             hasRequestedRecovery = false
-            return .none
+        } else if !hasRequestedRecovery,
+                  date.timeIntervalSince(lastProgressDate ?? date)
+                    >= Self.stalledOutputThreshold {
+            hasRequestedRecovery = true
+            action = .rebuildPlayer
         }
 
-        guard !hasRequestedRecovery,
-              date.timeIntervalSince(lastProgressDate ?? date)
-                >= Self.stalledOutputThreshold
-        else { return .none }
+        if expectsAudio {
+            if !wasExpectingAudio {
+                hasObservedAudioOutput = output.playedAudioBuffers > 0
+                if !hasObservedAudioOutput { lastAudioProgressDate = date }
+                hasRequestedAudioRecovery = false
+            } else if audioAdvanced {
+                lastAudioProgressDate = date
+                hasObservedAudioOutput = true
+                hasRequestedAudioRecovery = false
+            } else if audioCounterReset {
+                // VLC statistics can restart when its pipeline is rebuilt.
+                // Keep expecting audio, but give the new counter a full grace
+                // period before declaring it stalled.
+                lastAudioProgressDate = date
+                hasRequestedAudioRecovery = false
+            }
 
-        hasRequestedRecovery = true
-        return .rebuildPlayer
+            if hasObservedAudioOutput,
+               !hasRequestedAudioRecovery,
+               date.timeIntervalSince(lastAudioProgressDate ?? date)
+                >= Self.stalledOutputThreshold {
+                hasRequestedAudioRecovery = true
+                action = .rebuildPlayer
+            }
+        } else {
+            lastAudioProgressDate = date
+            hasObservedAudioOutput = false
+            hasRequestedAudioRecovery = false
+        }
+        wasExpectingAudio = expectsAudio
+
+        return action
     }
 
     mutating func restartGracePeriod(
@@ -222,13 +260,21 @@ struct PlaybackOutputHealthMonitor {
     ) {
         previousOutput = output
         lastProgressDate = date
+        lastAudioProgressDate = date
+        wasExpectingAudio = false
+        hasObservedAudioOutput = false
         hasRequestedRecovery = false
+        hasRequestedAudioRecovery = false
     }
 
     mutating func reset() {
         previousOutput = nil
         lastProgressDate = nil
+        lastAudioProgressDate = nil
+        wasExpectingAudio = false
+        hasObservedAudioOutput = false
         hasRequestedRecovery = false
+        hasRequestedAudioRecovery = false
     }
 }
 

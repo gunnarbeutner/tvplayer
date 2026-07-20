@@ -118,11 +118,17 @@ final class HTSPTimeshiftTests: XCTestCase {
 
         XCTAssertTrue(firstPacketHasDiscontinuity(pid: 0x0100, in: firstVideo))
         XCTAssertTrue(firstPacketHasDiscontinuity(pid: 0x0101, in: firstAudio))
+        XCTAssertTrue(firstPacketHasVLCDiscontinuity(pid: 0x0100, in: firstVideo))
+        XCTAssertTrue(firstPacketHasVLCDiscontinuity(pid: 0x0101, in: firstAudio))
         XCTAssertFalse(firstPacketHasDiscontinuity(pid: 0x0101, in: muxer.mux(audio)))
 
         muxer.resetAfterDiscontinuity()
-        XCTAssertTrue(firstPacketHasDiscontinuity(pid: 0x0100, in: muxer.mux(video)))
-        XCTAssertTrue(firstPacketHasDiscontinuity(pid: 0x0101, in: muxer.mux(audio)))
+        let resumedVideo = muxer.mux(video)
+        let resumedAudio = muxer.mux(audio)
+        XCTAssertTrue(firstPacketHasDiscontinuity(pid: 0x0100, in: resumedVideo))
+        XCTAssertTrue(firstPacketHasDiscontinuity(pid: 0x0101, in: resumedAudio))
+        XCTAssertTrue(firstPacketHasVLCDiscontinuity(pid: 0x0100, in: resumedVideo))
+        XCTAssertTrue(firstPacketHasVLCDiscontinuity(pid: 0x0101, in: resumedAudio))
     }
 
     func testNativeSubscriptionRequestsKodiSizedQueueAndNormalizedTimestamps() {
@@ -242,6 +248,22 @@ final class HTSPTimeshiftTests: XCTestCase {
             guard data[offset + 3] & 0x20 != 0 else { return false }
             let adaptationLength = Int(data[offset + 4])
             return adaptationLength > 0 && data[offset + 5] & 0x80 != 0
+        }
+        return false
+    }
+
+    private func firstPacketHasVLCDiscontinuity(pid: UInt16, in data: Data) -> Bool {
+        let marker = Data("VLC_DISCONTINU".utf8)
+        for offset in stride(from: 0, to: data.count, by: 188) {
+            guard offset + 188 <= data.count, data[offset] == 0x47 else { continue }
+            let packetPID = UInt16(data[offset + 1] & 0x1f) << 8 | UInt16(data[offset + 2])
+            guard packetPID == pid else { continue }
+            guard data[offset + 3] & 0x20 != 0,
+                  Int(data[offset + 4]) >= marker.count + 2,
+                  data[offset + 5] == 0x82,
+                  Int(data[offset + 6]) == marker.count
+            else { return false }
+            return Data(data[(offset + 7)..<(offset + 7 + marker.count)]) == marker
         }
         return false
     }
