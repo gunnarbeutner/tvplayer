@@ -553,16 +553,6 @@ private struct RecordingDetailView: View {
                 EmptyView()
             }
 
-            Button(action: { dismiss() }) {
-                recordingActionLabel(
-                    "Back",
-                    systemImage: "chevron.backward",
-                    minimumWidth: 150
-                )
-            }
-                .buttonStyle(.borderedProminent)
-                .tint(AppTheme.surfaceRaised)
-                .foregroundStyle(.white)
     }
 
     private func destructiveButton(_ title: String, image: String, action: ConfirmAction) -> some View {
