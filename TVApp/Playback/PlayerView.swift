@@ -17,6 +17,8 @@ private enum PlayerOverlayTab: String, CaseIterable, Identifiable {
 struct PlaybackView: View {
     @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var playback: PlaybackCoordinator
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @ObservedObject var engine: VLCPlaybackEngine
 
     @State private var chromeMode: PlayerChromeMode = .timeline
@@ -31,6 +33,22 @@ struct PlaybackView: View {
 
     let presentation: PlaybackPresentation
     var showsVideoSurface = true
+
+    private var usesCompactLayout: Bool {
+#if os(iOS)
+        horizontalSizeClass == .compact || usesCompactHeight
+#else
+        false
+#endif
+    }
+
+    private var usesCompactHeight: Bool {
+#if os(iOS)
+        verticalSizeClass == .compact
+#else
+        false
+#endif
+    }
 
     var body: some View {
         ZStack {
@@ -73,6 +91,8 @@ struct PlaybackView: View {
                             elapsedSeconds: engine.elapsedSeconds,
                             isPlaying: engine.state == .playing,
                             canSeek: engine.isSeekable,
+                            usesCompactLayout: usesCompactLayout,
+                            usesCompactHeight: usesCompactHeight,
                             seekBackward: { engine.skipBackward(by: $0); noteActivity() },
                             seekForward: { skipForward(by: $0) },
                             togglePlayback: toggleTimelinePlayback,
@@ -90,6 +110,8 @@ struct PlaybackView: View {
                             canPause: engine.canPause,
                             canSeek: engine.isSeekable,
                             isPlaying: engine.state == .playing,
+                            usesCompactLayout: usesCompactLayout,
+                            usesCompactHeight: usesCompactHeight,
                             seekBackward: { engine.skipBackward(by: $0); noteActivity() },
                             seekForward: { skipForward(by: $0) },
                             togglePlayback: toggleTimelinePlayback,
@@ -112,6 +134,8 @@ struct PlaybackView: View {
                     engine: engine,
                     profiles: profiles,
                     selectedTab: $selectedTab,
+                    usesCompactLayout: usesCompactLayout,
+                    usesCompactHeight: usesCompactHeight,
                     selectProfile: { profile in
                         Task { await switchProfile(to: profile) }
                     },
@@ -136,26 +160,30 @@ struct PlaybackView: View {
 
 #if !os(tvOS)
             if chromeMode != .hidden {
-                VStack {
-                    HStack {
-                        Button {
-                            playback.leavePlayer()
-                        } label: {
-                            Label("Close Player", systemImage: "xmark")
-                                .labelStyle(.iconOnly)
-                                .frame(width: 36, height: 36)
+                Button {
+                    playback.leavePlayer()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.headline.bold())
+                        .foregroundStyle(.white)
+                        .frame(width: 44, height: 44)
+                        .background(.black.opacity(0.72), in: Circle())
+                        .overlay {
+                            Circle().strokeBorder(.white.opacity(0.18), lineWidth: 1)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.black.opacity(0.72))
-                        .accessibilityLabel("Close Player")
-                        .keyboardShortcut(.cancelAction)
-
-                        Spacer()
-                    }
-                    Spacer()
                 }
-                .padding(20)
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close Player")
+                .keyboardShortcut(.cancelAction)
+                .padding(.horizontal, usesCompactLayout ? 16 : 20)
+                .padding(.vertical, usesCompactHeight ? 8 : (usesCompactLayout ? 12 : 20))
+                .frame(
+                    maxWidth: .infinity,
+                    maxHeight: .infinity,
+                    alignment: .topLeading
+                )
                 .transition(.opacity)
+                .zIndex(2)
             }
 #endif
 
@@ -190,6 +218,17 @@ struct PlaybackView: View {
             profiles = (try? await TVHeadendClient(configuration: settings.configuration).streamProfiles()) ?? []
         }
 #if DEBUG
+        .task(id: engine.state) {
+            guard engine.state == .playing,
+                  let panelTest = ProcessInfo.processInfo.environment["TVPLAYER_PANEL_TEST"]
+            else { return }
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled, engine.state == .playing else { return }
+            showPanel()
+            if let requestedTab = PlayerOverlayTab(rawValue: panelTest) {
+                selectedTab = requestedTab
+            }
+        }
         .task {
             guard ProcessInfo.processInfo.environment["TVPLAYER_PAUSE_TEST"] == "1" else { return }
             for _ in 0..<100 where engine.state != .playing {
@@ -413,6 +452,8 @@ private struct RecordingPlaybackTimeline: View {
     let elapsedSeconds: TimeInterval
     let isPlaying: Bool
     let canSeek: Bool
+    let usesCompactLayout: Bool
+    let usesCompactHeight: Bool
     let seekBackward: (TimeInterval) -> Void
     let seekForward: (TimeInterval) -> Void
     let togglePlayback: () -> Void
@@ -429,16 +470,30 @@ private struct RecordingPlaybackTimeline: View {
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text(recording.title)
-                    .font(.title2.bold())
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                Spacer()
-                Text(recording.channelName)
-                    .font(.headline)
-                    .foregroundStyle(.white.opacity(0.82))
+        VStack(spacing: usesCompactHeight ? 6 : 12) {
+            if usesCompactLayout && !usesCompactHeight {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(recording.title)
+                        .font(.title3.bold())
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                    Text(recording.channelName)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.82))
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                HStack {
+                    Text(recording.title)
+                        .font(.title2.bold())
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Spacer()
+                    Text(recording.channelName)
+                        .font(.headline)
+                        .foregroundStyle(.white.opacity(0.82))
+                }
             }
 
             GeometryReader { geometry in
@@ -466,12 +521,25 @@ private struct RecordingPlaybackTimeline: View {
             }
             .frame(height: 52)
 
-            HStack {
-                Text("\(clock(recording.start))–\(clock(recording.end))")
-                Spacer()
-                if recording.state == .recording {
-                    Text("Recording · available through \(clock(recording.start.addingTimeInterval(availableDuration)))")
-                        .foregroundStyle(.red)
+            Group {
+                if usesCompactLayout && !usesCompactHeight {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("\(clock(recording.start))–\(clock(recording.end))")
+                        if recording.state == .recording {
+                            Text("Recording through \(clock(recording.start.addingTimeInterval(availableDuration)))")
+                                .foregroundStyle(.red)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    HStack {
+                        Text("\(clock(recording.start))–\(clock(recording.end))")
+                        Spacer()
+                        if recording.state == .recording {
+                            Text("Recording · available through \(clock(recording.start.addingTimeInterval(availableDuration)))")
+                                .foregroundStyle(.red)
+                        }
+                    }
                 }
             }
             .font(.callout.monospacedDigit())
@@ -482,6 +550,7 @@ private struct RecordingPlaybackTimeline: View {
                 isPlaying: isPlaying,
                 canPause: true,
                 canSeek: canSeek,
+                usesCompactLayout: usesCompactLayout,
                 seekBackward: { seekBackward(15) },
                 seekForward: { seekForward(15) },
                 togglePlayback: togglePlayback,
@@ -506,9 +575,9 @@ private struct RecordingPlaybackTimeline: View {
             default: break
             }
         }
-        .padding(.horizontal, 44)
-        .padding(.top, 26)
-        .padding(.bottom, 28)
+        .padding(.horizontal, usesCompactLayout ? 20 : 44)
+        .padding(.top, usesCompactHeight ? 8 : (usesCompactLayout ? 18 : 26))
+        .padding(.bottom, usesCompactHeight ? 8 : (usesCompactLayout ? 18 : 28))
         .background(
             LinearGradient(
                 colors: [.black.opacity(0), .black.opacity(0.92)],
@@ -532,6 +601,8 @@ private struct ProgrammePlaybackTimeline: View {
     let canPause: Bool
     let canSeek: Bool
     let isPlaying: Bool
+    let usesCompactLayout: Bool
+    let usesCompactHeight: Bool
     let seekBackward: (TimeInterval) -> Void
     let seekForward: (TimeInterval) -> Void
     let togglePlayback: () -> Void
@@ -543,9 +614,9 @@ private struct ProgrammePlaybackTimeline: View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             timeline(at: context.date)
         }
-        .padding(.horizontal, 44)
-        .padding(.top, 26)
-        .padding(.bottom, 28)
+        .padding(.horizontal, usesCompactLayout ? 20 : 44)
+        .padding(.top, usesCompactHeight ? 8 : (usesCompactLayout ? 18 : 26))
+        .padding(.bottom, usesCompactHeight ? 8 : (usesCompactLayout ? 18 : 28))
         .background(
             LinearGradient(
                 colors: [.black.opacity(0), .black.opacity(0.92)],
@@ -563,18 +634,35 @@ private struct ProgrammePlaybackTimeline: View {
             channel.programs.first { $0.start >= current.end && $0.id != current.id }
         }
 
-        return VStack(spacing: 12) {
-            HStack(alignment: .firstTextBaseline, spacing: 30) {
-                Text(program?.title ?? channel.name)
-                    .font(.title2.bold())
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                Spacer()
-                if let next {
-                    Text("Next: \(next.title)")
-                        .font(.headline)
-                        .foregroundStyle(.white.opacity(0.82))
+        return VStack(spacing: usesCompactHeight ? 6 : 12) {
+            if usesCompactLayout && !usesCompactHeight {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(program?.title ?? channel.name)
+                        .font(.title3.bold())
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .layoutPriority(1)
+                    if let next {
+                        Text("Next: \(next.title)")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.82))
+                            .lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                HStack(alignment: .firstTextBaseline, spacing: 30) {
+                    Text(program?.title ?? channel.name)
+                        .font(.title2.bold())
+                        .foregroundStyle(.white)
                         .lineLimit(1)
+                    Spacer()
+                    if let next {
+                        Text("Next: \(next.title)")
+                            .font(.headline)
+                            .foregroundStyle(.white.opacity(0.82))
+                            .lineLimit(1)
+                    }
                 }
             }
 
@@ -587,18 +675,31 @@ private struct ProgrammePlaybackTimeline: View {
                     isFocused: isFocused
                 )
 
-                HStack {
-                    Text("\(clock(program.start))–\(clock(program.end))")
-                    Spacer()
-                    if canSeek, let bufferStartedAt {
-                        Label(
-                            "Timeshift from \(clock(bufferStartedAt))",
-                            systemImage: "clock.arrow.circlepath"
-                        )
-                        .foregroundStyle(AppTheme.accent)
-                        Spacer()
+                Group {
+                    if usesCompactLayout {
+                        HStack(spacing: 10) {
+                            Text("\(clock(program.start))–\(clock(program.end))")
+                            Spacer(minLength: 8)
+                            if canSeek, bufferStartedAt != nil {
+                                Label("Timeshift", systemImage: "clock.arrow.circlepath")
+                                    .foregroundStyle(AppTheme.accent)
+                            }
+                        }
+                    } else {
+                        HStack {
+                            Text("\(clock(program.start))–\(clock(program.end))")
+                            Spacer()
+                            if canSeek, let bufferStartedAt {
+                                Label(
+                                    "Timeshift from \(clock(bufferStartedAt))",
+                                    systemImage: "clock.arrow.circlepath"
+                                )
+                                .foregroundStyle(AppTheme.accent)
+                                Spacer()
+                            }
+                            if let next { Text("Next · \(clock(next.start))") }
+                        }
                     }
-                    if let next { Text("Next · \(clock(next.start))") }
                 }
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(.white.opacity(0.76))
@@ -611,6 +712,7 @@ private struct ProgrammePlaybackTimeline: View {
                 isPlaying: isPlaying,
                 canPause: canPause,
                 canSeek: canSeek,
+                usesCompactLayout: usesCompactLayout,
                 seekBackward: { seekBackward(15) },
                 seekForward: { seekForward(15) },
                 togglePlayback: togglePlayback,
@@ -654,22 +756,25 @@ private struct PlaybackTransportControls: View {
     let isPlaying: Bool
     let canPause: Bool
     let canSeek: Bool
+    let usesCompactLayout: Bool
     let seekBackward: () -> Void
     let seekForward: () -> Void
     let togglePlayback: () -> Void
     let showPanel: () -> Void
 
     var body: some View {
-        HStack(spacing: 18) {
+        HStack(spacing: usesCompactLayout ? 12 : 18) {
             Button(action: seekBackward) {
                 Label("Back 15 Seconds", systemImage: "gobackward.15")
                     .labelStyle(.iconOnly)
+                    .frame(width: usesCompactLayout ? 36 : nil, height: usesCompactLayout ? 36 : nil)
             }
             .disabled(!canSeek)
 
             Button(action: togglePlayback) {
                 Label(isPlaying ? "Pause" : "Play", systemImage: isPlaying ? "pause.fill" : "play.fill")
                     .labelStyle(.iconOnly)
+                    .frame(width: usesCompactLayout ? 36 : nil, height: usesCompactLayout ? 36 : nil)
             }
             .disabled(!canPause)
             .buttonStyle(.borderedProminent)
@@ -678,15 +783,23 @@ private struct PlaybackTransportControls: View {
             Button(action: seekForward) {
                 Label("Forward 15 Seconds", systemImage: "goforward.15")
                     .labelStyle(.iconOnly)
+                    .frame(width: usesCompactLayout ? 36 : nil, height: usesCompactLayout ? 36 : nil)
             }
             .disabled(!canSeek)
 
-            Spacer()
+            Spacer(minLength: usesCompactLayout ? 0 : 8)
 
             Button(action: showPanel) {
-                Label("Playback Options", systemImage: "slider.horizontal.3")
+                if usesCompactLayout {
+                    Label("Playback Options", systemImage: "slider.horizontal.3")
+                        .labelStyle(.iconOnly)
+                        .frame(width: 36, height: 36)
+                } else {
+                    Label("Playback Options", systemImage: "slider.horizontal.3")
+                }
             }
         }
+        .frame(maxWidth: .infinity)
         .font(.title3)
         .buttonStyle(.bordered)
         .controlSize(.large)
@@ -748,6 +861,8 @@ private struct PlayerTabbedOverlay: View {
     @ObservedObject var engine: VLCPlaybackEngine
     let profiles: [TVHeadendStreamProfile]
     @Binding var selectedTab: PlayerOverlayTab
+    let usesCompactLayout: Bool
+    let usesCompactHeight: Bool
     let selectProfile: (TVHeadendStreamProfile) -> Void
     let dismiss: () -> Void
     let noteActivity: () -> Void
@@ -756,14 +871,15 @@ private struct PlayerTabbedOverlay: View {
     @FocusState private var focusedTechnicalDetailID: PlaybackTechnicalDetail.ID?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: usesCompactHeight ? 10 : 22) {
             HStack(spacing: 12) {
                 ForEach(PlayerOverlayTab.allCases) { tab in
                     Text(tab.rawValue)
                         .font(.headline)
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 12)
+                        .frame(maxWidth: usesCompactLayout ? .infinity : nil)
+                        .padding(.horizontal, usesCompactLayout ? 10 : 24)
+                        .padding(.vertical, usesCompactLayout ? 10 : 12)
                         .background(
                             selectedTab == tab
                                 ? AppTheme.focused
@@ -784,8 +900,9 @@ private struct PlayerTabbedOverlay: View {
             .focusEffectDisabled()
             .platformMoveCommand(moveTab)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("(selectedTab.rawValue) tab")
+            .accessibilityLabel("\(selectedTab.rawValue) tab")
             .accessibilityHint("Swipe left or right to change tabs")
+            .padding(.leading, usesCompactHeight ? 56 : 0)
 
             Divider().overlay(.white.opacity(0.2))
 
@@ -797,11 +914,17 @@ private struct PlayerTabbedOverlay: View {
                 tabContent(playbackSettings, for: .playback)
                 tabContent(technicalDetails, for: .technical)
             }
-            .frame(maxWidth: .infinity, minHeight: 300, maxHeight: 420, alignment: .topLeading)
+            .frame(
+                maxWidth: .infinity,
+                minHeight: usesCompactHeight ? 190 : (usesCompactLayout ? 440 : 300),
+                maxHeight: usesCompactHeight ? 240 : (usesCompactLayout ? 560 : 420),
+                alignment: .topLeading
+            )
         }
-        .padding(.horizontal, 48)
-        .padding(.top, 26)
-        .padding(.bottom, 34)
+        .padding(.horizontal, usesCompactHeight ? 16 : (usesCompactLayout ? 20 : 48))
+        .padding(.top, usesCompactHeight ? 8 : (usesCompactLayout ? 72 : 26))
+        .padding(.bottom, usesCompactHeight ? 10 : (usesCompactLayout ? 24 : 34))
+        .frame(maxWidth: .infinity)
         .background(.black.opacity(0.92))
         .onChange(of: focusedTechnicalDetailID) { _, detailID in
             guard detailID != nil else { return }
@@ -852,31 +975,32 @@ private struct PlayerTabbedOverlay: View {
 
     private var details: some View {
         ScrollView(.vertical) {
-            HStack(alignment: .top, spacing: 42) {
-                ChannelBadge(channel: presentation.channel, diameter: 112)
-
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(presentation.recording?.title ?? currentProgram?.title ?? presentation.channel.name)
-                        .font(.largeTitle.bold())
-                        .foregroundStyle(.white)
-                    if let subtitle = presentation.recording?.subtitle ?? currentProgram?.subtitle, !subtitle.isEmpty {
-                        Text(subtitle)
-                            .font(.title3.weight(.semibold))
-                            .foregroundStyle(AppTheme.secondaryText)
+            Group {
+                if usesCompactHeight {
+                    HStack(alignment: .top, spacing: 14) {
+                        ChannelBadge(channel: presentation.channel, diameter: 56)
+                        VStack(alignment: .leading, spacing: 8) {
+                            detailHeading
+                            detailMetadata
+                        }
                     }
-                    if let recording = presentation.recording {
-                        Text("\(recording.start.formatted(date: .abbreviated, time: .shortened))–\(recording.end.formatted(date: .omitted, time: .shortened)) · \(recording.channelName)")
-                            .font(.headline.monospacedDigit())
-                            .foregroundStyle(AppTheme.secondaryText)
-                        programmeOverview(recording.overview)
-                    } else if let program = currentProgram {
-                        Text("\(program.start.formatted(date: .abbreviated, time: .shortened))–\(program.end.formatted(date: .omitted, time: .shortened)) · \(presentation.channel.name)")
-                            .font(.headline.monospacedDigit())
-                            .foregroundStyle(AppTheme.secondaryText)
-                        programmeOverview(program.overview)
+                } else if usesCompactLayout {
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack(alignment: .top, spacing: 16) {
+                            ChannelBadge(channel: presentation.channel, diameter: 64)
+                            detailHeading
+                        }
+                        detailMetadata
+                    }
+                } else {
+                    HStack(alignment: .top, spacing: 42) {
+                        ChannelBadge(channel: presentation.channel, diameter: 112)
+                        VStack(alignment: .leading, spacing: 12) {
+                            detailHeading
+                            detailMetadata
+                        }
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.trailing, 12)
@@ -889,9 +1013,43 @@ private struct PlayerTabbedOverlay: View {
         .accessibilityHint("Swipe up or down to read the full description")
     }
 
+    @ViewBuilder
+    private var detailHeading: some View {
+        VStack(alignment: .leading, spacing: usesCompactLayout ? 5 : 12) {
+            Text(presentation.recording?.title ?? currentProgram?.title ?? presentation.channel.name)
+                .font(usesCompactLayout ? .title2.bold() : .largeTitle.bold())
+                .foregroundStyle(.white)
+                .lineLimit(usesCompactLayout ? 3 : nil)
+                .fixedSize(horizontal: false, vertical: true)
+            if let subtitle = presentation.recording?.subtitle ?? currentProgram?.subtitle,
+               !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(usesCompactLayout ? .subheadline.weight(.semibold) : .title3.weight(.semibold))
+                    .foregroundStyle(AppTheme.secondaryText)
+                    .lineLimit(usesCompactLayout ? 2 : nil)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var detailMetadata: some View {
+        if let recording = presentation.recording {
+            Text("\(recording.start.formatted(date: .abbreviated, time: .shortened))–\(recording.end.formatted(date: .omitted, time: .shortened)) · \(recording.channelName)")
+                .font(usesCompactLayout ? .subheadline.monospacedDigit() : .headline.monospacedDigit())
+                .foregroundStyle(AppTheme.secondaryText)
+            programmeOverview(recording.overview)
+        } else if let program = currentProgram {
+            Text("\(program.start.formatted(date: .abbreviated, time: .shortened))–\(program.end.formatted(date: .omitted, time: .shortened)) · \(presentation.channel.name)")
+                .font(usesCompactLayout ? .subheadline.monospacedDigit() : .headline.monospacedDigit())
+                .foregroundStyle(AppTheme.secondaryText)
+            programmeOverview(program.overview)
+        }
+    }
+
     private func programmeOverview(_ overview: String) -> some View {
         Text(overview.isEmpty ? "No description available." : overview)
-            .font(.title3)
+            .font(usesCompactLayout ? .body : .title3)
             .foregroundStyle(.white.opacity(overview.isEmpty ? 0.62 : 0.9))
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -923,70 +1081,16 @@ private struct PlayerTabbedOverlay: View {
                     }
                 }
 
-                HStack(alignment: .top, spacing: 18) {
-                    playbackSettingCard(
-                        title: "Audio",
-                        systemImage: "speaker.wave.2.fill"
-                    ) {
-                        VStack(alignment: .leading, spacing: 16) {
-                            LazyVGrid(
-                                columns: [GridItem(.adaptive(minimum: 210, maximum: 340), spacing: 12)],
-                                alignment: .leading,
-                                spacing: 12
-                            ) {
-                                ForEach(engine.audioTracks) { track in
-                                    choiceButton(
-                                        title: track.name,
-                                        subtitle: nil,
-                                        selected: engine.selectedAudioTrackID == track.id
-                                    ) { engine.selectAudioTrack(track.id); noteActivity() }
-                                }
-                                if engine.audioTracks.isEmpty {
-                                    unavailable("No audio streams reported yet")
-                                }
-                            }
-
-                            Divider().overlay(.white.opacity(0.12))
-                            compactDelayControl(
-                                title: "Synchronization",
-                                value: engine.audioDelayMilliseconds,
-                                change: engine.adjustAudioDelay
-                            )
-                        }
+                if usesCompactLayout && !usesCompactHeight {
+                    VStack(alignment: .leading, spacing: 18) {
+                        audioSettingsCard
+                        subtitleSettingsCard
                     }
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-
-                    playbackSettingCard(
-                        title: "Subtitles",
-                        systemImage: "captions.bubble.fill"
-                    ) {
-                        VStack(alignment: .leading, spacing: 16) {
-                            LazyVGrid(
-                                columns: [GridItem(.adaptive(minimum: 210, maximum: 340), spacing: 12)],
-                                alignment: .leading,
-                                spacing: 12
-                            ) {
-                                ForEach(engine.subtitleTracks) { track in
-                                    choiceButton(
-                                        title: track.name,
-                                        subtitle: nil,
-                                        selected: engine.selectedSubtitleTrackID == track.id
-                                    ) { engine.selectSubtitleTrack(track.id); noteActivity() }
-                                }
-                                if engine.subtitleTracks.isEmpty {
-                                    unavailable("No subtitle streams")
-                                }
-                            }
-
-                            Divider().overlay(.white.opacity(0.12))
-                            compactDelayControl(
-                                title: "Synchronization",
-                                value: engine.subtitleDelayMilliseconds,
-                                change: engine.adjustSubtitleDelay
-                            )
-                        }
+                } else {
+                    HStack(alignment: .top, spacing: 18) {
+                        audioSettingsCard
+                        subtitleSettingsCard
                     }
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
             }
             .padding(.bottom, 8)
@@ -994,10 +1098,81 @@ private struct PlayerTabbedOverlay: View {
         .scrollIndicators(.hidden)
     }
 
+    private var audioSettingsCard: some View {
+        playbackSettingCard(
+            title: "Audio",
+            systemImage: "speaker.wave.2.fill"
+        ) {
+            VStack(alignment: .leading, spacing: 16) {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 210, maximum: 340), spacing: 12)],
+                    alignment: .leading,
+                    spacing: 12
+                ) {
+                    ForEach(engine.audioTracks) { track in
+                        choiceButton(
+                            title: track.name,
+                            subtitle: nil,
+                            selected: engine.selectedAudioTrackID == track.id
+                        ) { engine.selectAudioTrack(track.id); noteActivity() }
+                    }
+                    if engine.audioTracks.isEmpty {
+                        unavailable("No audio streams reported yet")
+                    }
+                }
+
+                Divider().overlay(.white.opacity(0.12))
+                compactDelayControl(
+                    title: "Synchronization",
+                    value: engine.audioDelayMilliseconds,
+                    change: engine.adjustAudioDelay
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private var subtitleSettingsCard: some View {
+        playbackSettingCard(
+            title: "Subtitles",
+            systemImage: "captions.bubble.fill"
+        ) {
+            VStack(alignment: .leading, spacing: 16) {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 210, maximum: 340), spacing: 12)],
+                    alignment: .leading,
+                    spacing: 12
+                ) {
+                    ForEach(engine.subtitleTracks) { track in
+                        choiceButton(
+                            title: track.name,
+                            subtitle: nil,
+                            selected: engine.selectedSubtitleTrackID == track.id
+                        ) { engine.selectSubtitleTrack(track.id); noteActivity() }
+                    }
+                    if engine.subtitleTracks.isEmpty {
+                        unavailable("No subtitle streams")
+                    }
+                }
+
+                Divider().overlay(.white.opacity(0.12))
+                compactDelayControl(
+                    title: "Synchronization",
+                    value: engine.subtitleDelayMilliseconds,
+                    change: engine.adjustSubtitleDelay
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
     private var technicalDetails: some View {
         ScrollView {
             LazyVGrid(
-                columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())],
+                columns: Array(
+                    repeating: GridItem(.flexible()),
+                    count: usesCompactHeight ? 2 : (usesCompactLayout ? 1 : 3)
+                ),
                 alignment: .leading,
                 spacing: 18
             ) {
@@ -1048,7 +1223,7 @@ private struct PlayerTabbedOverlay: View {
                 .foregroundStyle(.white)
             content()
         }
-        .padding(18)
+        .padding(usesCompactLayout ? 14 : 18)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(Color.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 14))
         .overlay {
@@ -1083,11 +1258,28 @@ private struct PlayerTabbedOverlay: View {
         value: Int,
         change: @escaping (Int) -> Void
     ) -> some View {
+        Group {
+            if usesCompactLayout && !usesCompactHeight {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(AppTheme.secondaryText)
+                    delayButtons(value: value, change: change)
+                }
+            } else {
+                HStack(spacing: 12) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(AppTheme.secondaryText)
+                    Spacer(minLength: 10)
+                    delayButtons(value: value, change: change)
+                }
+            }
+        }
+    }
+
+    private func delayButtons(value: Int, change: @escaping (Int) -> Void) -> some View {
         HStack(spacing: 12) {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(AppTheme.secondaryText)
-            Spacer(minLength: 10)
             PlayerStepButton(systemImage: "minus") {
                 change(-50)
                 noteActivity()
@@ -1095,12 +1287,13 @@ private struct PlayerTabbedOverlay: View {
             Text(value == 0 ? "0 ms" : String(format: "%+d ms", value))
                 .font(.headline.monospacedDigit())
                 .foregroundStyle(.white)
-                .frame(minWidth: 105)
+                .frame(minWidth: usesCompactLayout ? 80 : 105)
             PlayerStepButton(systemImage: "plus") {
                 change(50)
                 noteActivity()
             }
         }
+        .frame(maxWidth: usesCompactLayout ? .infinity : nil, alignment: .leading)
     }
 }
 

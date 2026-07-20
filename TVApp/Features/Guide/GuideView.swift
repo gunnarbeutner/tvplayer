@@ -7,6 +7,7 @@ struct GuideView: View {
     @Environment(\.scenePhase) private var scenePhase
 #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
 #endif
     @EnvironmentObject private var model: GuideViewModel
     @EnvironmentObject private var settings: ServerSettingsStore
@@ -93,7 +94,8 @@ struct GuideView: View {
                                 channel: model.channel(containing: presentedProgram),
                                 now: model.now,
                                 loadState: model.loadState,
-                                recordingState: presentedProgram.flatMap { recordings.scheduledRecording(for: $0)?.state }
+                                recordingState: presentedProgram.flatMap { recordings.scheduledRecording(for: $0)?.state },
+                                usesCompactLayout: usesLandscapeGuide
                             )
 
                             GuideGridView(
@@ -166,6 +168,11 @@ struct GuideView: View {
                 hasRenderedGuide = false
             }
         }
+        .onChange(of: usesCompactGuide) { _, _ in
+            hasRenderedGuide = false
+            recenterRequest = UUID()
+            requestInitialFocus()
+        }
         .televisionPlayPauseCommand {
             guard let program = presentedProgram,
                   let channel = model.channel(containing: program)
@@ -205,7 +212,15 @@ struct GuideView: View {
 
     private var usesCompactGuide: Bool {
 #if os(iOS)
-        horizontalSizeClass == .compact
+        horizontalSizeClass == .compact && !usesLandscapeGuide
+#else
+        false
+#endif
+    }
+
+    private var usesLandscapeGuide: Bool {
+#if os(iOS)
+        verticalSizeClass == .compact
 #else
         false
 #endif
@@ -346,9 +361,22 @@ private struct GuideLoadingSkeleton: View {
     let timeline: GuideTimeline
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+#if os(iOS)
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+#endif
     @State private var isDimmed = false
 
-    private let informationPanelHeight: CGFloat = 154
+    private var usesCompactLayout: Bool {
+#if os(iOS)
+        verticalSizeClass == .compact
+#else
+        false
+#endif
+    }
+
+    private var informationPanelHeight: CGFloat {
+        usesCompactLayout ? 100 : 154
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -401,29 +429,36 @@ private struct GuideLoadingSkeleton: View {
     }
 
     private var informationPlaceholder: some View {
-        HStack(spacing: 28) {
+        HStack(spacing: usesCompactLayout ? 16 : 28) {
             Circle()
                 .fill(AppTheme.surfaceRaised)
-                .frame(width: 84, height: 84)
+                .frame(
+                    width: usesCompactLayout ? 54 : 84,
+                    height: usesCompactLayout ? 54 : 84
+                )
 
-            VStack(alignment: .leading, spacing: 12) {
-                placeholder(width: 520, height: 28)
-                placeholder(width: 360, height: 18)
-                placeholder(width: 440, height: 18)
+            VStack(alignment: .leading, spacing: usesCompactLayout ? 8 : 12) {
+                placeholder(width: usesCompactLayout ? 260 : 520, height: usesCompactLayout ? 20 : 28)
+                placeholder(width: usesCompactLayout ? 180 : 360, height: 18)
+                if !usesCompactLayout {
+                    placeholder(width: 440, height: 18)
+                }
             }
 
             Spacer()
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Loading guide…")
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(AppTheme.secondaryText)
-                placeholder(width: 360, height: 17)
-                placeholder(width: 330, height: 17)
+            if !usesCompactLayout {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Loading guide…")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(AppTheme.secondaryText)
+                    placeholder(width: 360, height: 17)
+                    placeholder(width: 330, height: 17)
+                }
+                .frame(width: 400, alignment: .leading)
             }
-            .frame(width: 400, alignment: .leading)
         }
-        .padding(.horizontal, 72)
+        .padding(.horizontal, usesCompactLayout ? 20 : 72)
         .frame(
             maxWidth: .infinity,
             minHeight: informationPanelHeight,
@@ -533,6 +568,7 @@ private struct GuideInformationPanel: View {
     let now: Date
     let loadState: GuideLoadState
     let recordingState: TVRecordingState?
+    let usesCompactLayout: Bool
 
     private var status: (String, Color)? {
         switch loadState {
@@ -566,6 +602,100 @@ private struct GuideInformationPanel: View {
     }
 
     var body: some View {
+        Group {
+            if usesCompactLayout {
+                compactContent
+            } else {
+                regularContent
+            }
+        }
+        .background {
+            LinearGradient(
+                colors: [channel?.tint.opacity(0.18) ?? .clear, AppTheme.chrome, AppTheme.chrome],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        }
+        .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.divider).frame(height: 1) }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var compactContent: some View {
+        HStack(alignment: .center, spacing: 16) {
+            if let channel {
+                ChannelBadge(channel: channel, diameter: 54)
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Text(program?.title ?? "Choose a programme")
+                        .font(.headline.weight(.bold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                        .layoutPriority(1)
+
+                    if let program, program.isAiring(at: now) {
+                        Text("LIVE")
+                            .font(.caption2.weight(.black))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .foregroundStyle(.white)
+                            .background(.red, in: Capsule())
+                            .accessibilityLabel("Currently airing")
+                    }
+
+                    if let recordingState {
+                        Image(systemName: recordingState == .recording ? "record.circle.fill" : "clock.fill")
+                            .foregroundStyle(recordingState == .recording ? .red : AppTheme.focused)
+                            .accessibilityLabel(recordingState == .recording ? "Recording" : "Scheduled")
+                    }
+                }
+
+                if let subtitle = program?.subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .lineLimit(1)
+                }
+
+                if let program {
+                    HStack(spacing: 7) {
+                        if let channel {
+                            Text(channel.name)
+                            Text("•")
+                        }
+                        Text("\(program.start.formatted(date: .omitted, time: .shortened))–\(program.end.formatted(date: .omitted, time: .shortened))")
+                        if let timingDescription {
+                            Text("•")
+                            Text(timingDescription)
+                        }
+                    }
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(AppTheme.secondaryText)
+                    .lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Group {
+                if let status {
+                    Text(status.0)
+                        .foregroundStyle(status.1)
+                } else if let overview = program?.overview, !overview.isEmpty {
+                    Text(overview)
+                        .foregroundStyle(.white.opacity(0.78))
+                }
+            }
+            .font(.caption)
+            .lineLimit(3)
+            .frame(maxWidth: 240, alignment: .leading)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, minHeight: 100, maxHeight: 100, alignment: .leading)
+    }
+
+    private var regularContent: some View {
         HStack(alignment: .top, spacing: 28) {
             VStack(spacing: 10) {
                 if let channel {
@@ -665,14 +795,5 @@ private struct GuideInformationPanel: View {
         .padding(.horizontal, 72)
         .padding(.vertical, 14)
         .frame(maxWidth: .infinity, minHeight: 154, maxHeight: 154, alignment: .topLeading)
-        .background {
-            LinearGradient(
-                colors: [channel?.tint.opacity(0.18) ?? .clear, AppTheme.chrome, AppTheme.chrome],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-        }
-        .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.divider).frame(height: 1) }
-        .accessibilityElement(children: .combine)
     }
 }
