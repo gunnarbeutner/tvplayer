@@ -251,7 +251,7 @@ struct RootTabView: View {
     private var showsGuideLivePreview: Bool {
         guard selection == .guide,
               !playback.isPlayerPresented,
-              playback.presentation?.isRecording == false,
+              playback.isUserInitiatedLivePlayback,
               playback.engine.state != .paused
         else { return false }
 

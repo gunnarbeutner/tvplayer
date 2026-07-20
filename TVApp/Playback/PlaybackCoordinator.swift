@@ -24,9 +24,14 @@ final class PlaybackCoordinator: ObservableObject {
     @Published var errorMessage: String?
     @Published private(set) var navigationSelection: PlaybackNavigationSelection?
     @Published private(set) var focusReturnRevision = 0
+    @Published private(set) var isUserInitiatedPlayback = false
     let engine = VLCPlaybackEngine()
     private var prewarmTask: Task<Void, Never>?
     private var prewarmedChannelID: String?
+
+    var isUserInitiatedLivePlayback: Bool {
+        isUserInitiatedPlayback && presentation?.isRecording == false
+    }
 
     func start(
         channel: GuideChannel,
@@ -61,6 +66,7 @@ final class PlaybackCoordinator: ObservableObject {
                 channelID: channel.id,
                 programID: program?.id
             )
+            isUserInitiatedPlayback = true
             isPlayerPresented = true
             errorMessage = nil
             return
@@ -85,6 +91,7 @@ final class PlaybackCoordinator: ObservableObject {
                     channelID: channel.id,
                     programID: program?.id
                 )
+                isUserInitiatedPlayback = true
                 isPlayerPresented = true
                 errorMessage = nil
             } catch {
@@ -117,6 +124,7 @@ final class PlaybackCoordinator: ObservableObject {
         if prewarmedChannelID == channel.id { return }
 
         prewarmTask?.cancel()
+        isUserInitiatedPlayback = false
         prewarmedChannelID = channel.id
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -192,6 +200,7 @@ final class PlaybackCoordinator: ObservableObject {
                     programID: nil
                 )
             }
+            isUserInitiatedPlayback = true
             isPlayerPresented = true
             errorMessage = nil
             return
@@ -223,6 +232,7 @@ final class PlaybackCoordinator: ObservableObject {
                     channelID: playbackChannel.id,
                     programID: nil
                 )
+                isUserInitiatedPlayback = true
                 isPlayerPresented = true
                 errorMessage = nil
             } catch {

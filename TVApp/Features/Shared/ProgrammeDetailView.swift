@@ -139,79 +139,18 @@ struct ProgrammeDetailView: View {
         ZStack {
             AppTheme.background.ignoresSafeArea()
 
-            ScrollView {
-                detailLayout {
-                VStack(spacing: 22) {
-                    ChannelBadge(channel: channel, diameter: channelBadgeDiameter)
-
-                    Text(channel.name)
-                        .font(.title2.bold())
+#if os(tvOS)
+            GeometryReader { geometry in
+                ScrollView {
+                    detailContent
+                        .frame(minHeight: geometry.size.height, alignment: .center)
                 }
-                .frame(width: usesCompactLayout ? nil : channelColumnWidth)
-
-                VStack(alignment: .leading, spacing: usesCompactLayout ? 20 : 16) {
-                    if let program, program.isAiring(at: Date()) {
-                        Text("LIVE NOW")
-                            .font(.caption.bold())
-                            .tracking(1.8)
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
-                            .background(.red, in: Capsule())
-                    }
-
-                    Text(program?.title ?? channel.name)
-                        .font(titleFont)
-
-                    if let subtitle = program?.subtitle, !subtitle.isEmpty {
-                        Text(subtitle)
-                            .font(.title3.weight(.semibold))
-                            .foregroundStyle(AppTheme.secondaryText)
-                    }
-
-                    if let program {
-                        Label(
-                            "\(program.start.formatted(date: .abbreviated, time: .shortened))–\(program.end.formatted(date: .omitted, time: .shortened))",
-                            systemImage: "clock"
-                        )
-                        .font(.headline.monospacedDigit())
-                        .foregroundStyle(AppTheme.secondaryText)
-
-                        if !metadataLabels.isEmpty {
-#if os(macOS)
-                            ProgrammeMetadataFlowLayout(spacing: 8) {
-                                ForEach(metadataLabels, id: \.self) { label in
-                                    metadataBadge(label)
-                                }
-                            }
-#else
-                            HStack(spacing: 10) {
-                                ForEach(metadataLabels, id: \.self) { label in
-                                    metadataBadge(label)
-                                }
-                            }
-                            .lineLimit(1)
-#endif
-                        }
-
-                        Text(program.overview)
-                            .font(overviewFont)
-                            .foregroundStyle(.white.opacity(0.9))
-                            .lineLimit(8)
-                    } else {
-                        Text("No programme metadata is available for this channel at the moment.")
-                            .font(.title3)
-                            .foregroundStyle(AppTheme.secondaryText)
-                    }
-
-                    actionLayout
-                        .padding(.top, 10)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(maxWidth: detailMaximumWidth, alignment: .leading)
-                .padding(detailPadding)
             }
+#else
+            ScrollView {
+                detailContent
+            }
+#endif
         }
         .programmeDetailWindowSizing()
         .televisionPlayPauseCommand {
@@ -261,6 +200,80 @@ struct ProgrammeDetailView: View {
         .onDisappear {
             playback.endPrewarming(channelID: channel.id)
         }
+    }
+
+    private var detailContent: some View {
+        detailLayout {
+            VStack(spacing: 22) {
+                ChannelBadge(channel: channel, diameter: channelBadgeDiameter)
+
+                Text(channel.name)
+                    .font(.title2.bold())
+            }
+            .frame(width: usesCompactLayout ? nil : channelColumnWidth)
+
+            VStack(alignment: .leading, spacing: usesCompactLayout ? 20 : 16) {
+                if let program, program.isAiring(at: Date()) {
+                    Text("LIVE NOW")
+                        .font(.caption.bold())
+                        .tracking(1.8)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(.red, in: Capsule())
+                }
+
+                Text(program?.title ?? channel.name)
+                    .font(titleFont)
+
+                if let subtitle = program?.subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(AppTheme.secondaryText)
+                }
+
+                if let program {
+                    Label(
+                        "\(program.start.formatted(date: .abbreviated, time: .shortened))–\(program.end.formatted(date: .omitted, time: .shortened))",
+                        systemImage: "clock"
+                    )
+                    .font(.headline.monospacedDigit())
+                    .foregroundStyle(AppTheme.secondaryText)
+
+                    if !metadataLabels.isEmpty {
+#if os(macOS)
+                        ProgrammeMetadataFlowLayout(spacing: 8) {
+                            ForEach(metadataLabels, id: \.self) { label in
+                                metadataBadge(label)
+                            }
+                        }
+#else
+                        HStack(spacing: 10) {
+                            ForEach(metadataLabels, id: \.self) { label in
+                                metadataBadge(label)
+                            }
+                        }
+                        .lineLimit(1)
+#endif
+                    }
+
+                    Text(program.overview)
+                        .font(overviewFont)
+                        .foregroundStyle(.white.opacity(0.9))
+                        .lineLimit(8)
+                } else {
+                    Text("No programme metadata is available for this channel at the moment.")
+                        .font(.title3)
+                        .foregroundStyle(AppTheme.secondaryText)
+                }
+
+                actionLayout
+                    .padding(.top, 10)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: detailMaximumWidth, alignment: .leading)
+        .padding(detailPadding)
     }
 
     @ViewBuilder

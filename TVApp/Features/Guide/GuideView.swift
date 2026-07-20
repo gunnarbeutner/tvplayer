@@ -976,7 +976,7 @@ private struct GuideInformationPanel: View {
                 selectedChannelID: channel?.id,
                 playerChannelID: playback.presentation?.channel.id,
                 isPlayerPresented: playback.isPlayerPresented,
-                isLivePlayback: playback.presentation?.isRecording == false
+                isLivePlayback: playback.isUserInitiatedLivePlayback
             )
                 .frame(
                     width: regularArtworkWidth,
