@@ -266,7 +266,6 @@ struct PlaybackOutputHealthMonitor {
     private var lastProgressDate: Date?
     private var lastAudioProgressDate: Date?
     private var wasExpectingAudio = false
-    private var hasObservedAudioOutput = false
     private var hasRequestedRecovery = false
     private var hasRequestedAudioRecovery = false
 
@@ -304,12 +303,14 @@ struct PlaybackOutputHealthMonitor {
 
         if expectsAudio {
             if !wasExpectingAudio {
-                hasObservedAudioOutput = output.playedAudioBuffers > 0
-                if !hasObservedAudioOutput { lastAudioProgressDate = date }
+                // Give a newly discovered audio stream a full grace period, but
+                // retain the existing deadline when audio has already started.
+                if output.playedAudioBuffers == 0 {
+                    lastAudioProgressDate = date
+                }
                 hasRequestedAudioRecovery = false
             } else if audioAdvanced {
                 lastAudioProgressDate = date
-                hasObservedAudioOutput = true
                 hasRequestedAudioRecovery = false
             } else if audioCounterReset {
                 // VLC statistics can restart when its pipeline is rebuilt.
@@ -319,8 +320,7 @@ struct PlaybackOutputHealthMonitor {
                 hasRequestedAudioRecovery = false
             }
 
-            if hasObservedAudioOutput,
-               !hasRequestedAudioRecovery,
+            if !hasRequestedAudioRecovery,
                date.timeIntervalSince(lastAudioProgressDate ?? date)
                 >= Self.stalledOutputThreshold {
                 hasRequestedAudioRecovery = true
@@ -328,7 +328,6 @@ struct PlaybackOutputHealthMonitor {
             }
         } else {
             lastAudioProgressDate = date
-            hasObservedAudioOutput = false
             hasRequestedAudioRecovery = false
         }
         wasExpectingAudio = expectsAudio
@@ -344,7 +343,6 @@ struct PlaybackOutputHealthMonitor {
         lastProgressDate = date
         lastAudioProgressDate = date
         wasExpectingAudio = false
-        hasObservedAudioOutput = false
         hasRequestedRecovery = false
         hasRequestedAudioRecovery = false
     }
@@ -354,7 +352,6 @@ struct PlaybackOutputHealthMonitor {
         lastProgressDate = nil
         lastAudioProgressDate = nil
         wasExpectingAudio = false
-        hasObservedAudioOutput = false
         hasRequestedRecovery = false
         hasRequestedAudioRecovery = false
     }

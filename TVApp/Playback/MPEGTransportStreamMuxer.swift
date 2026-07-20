@@ -23,6 +23,13 @@ final class MPEGTransportStreamMuxer {
         let descriptor: Data
         let bootstrap: Data?
         let isVideo: Bool
+        let isAudio: Bool
+    }
+
+    private enum Discontinuity {
+        case none
+        case transport
+        case decoderFlush
     }
 
     private var tracksByIndex: [Int: Track] = [:]
@@ -30,6 +37,7 @@ final class MPEGTransportStreamMuxer {
     private var packetsSinceTables = Int.max
     private var pendingBootstrapIndexes: Set<Int> = []
     private var pendingDiscontinuityPIDs: Set<UInt16> = []
+    private var pendingDecoderFlushPIDs: Set<UInt16> = []
     private let pmtPID: UInt16 = 0x1000
     private let pcrPID: UInt16
 
@@ -59,7 +67,8 @@ final class MPEGTransportStreamMuxer {
                 streamID: streamID,
                 descriptor: mapping.descriptor,
                 bootstrap: Self.bootstrapData(for: stream),
-                isVideo: mapping.isVideo
+                isVideo: mapping.isVideo,
+                isAudio: mapping.isAudio
             )
             tracksByIndex[stream.index] = track
             firstPlayablePID = firstPlayablePID ?? nextPID
@@ -76,10 +85,14 @@ final class MPEGTransportStreamMuxer {
         pendingDiscontinuityPIDs = Set(tracksByIndex.values.map(\.pid))
         pendingDiscontinuityPIDs.insert(0)
         pendingDiscontinuityPIDs.insert(pmtPID)
+        // A brand-new stream has no stale VLC decoder state to flush. The
+        // standard transport discontinuity is sufficient to initialize its
+        // continuity counters without disrupting AAC format detection.
     }
 
     var supportedTrackCount: Int { tracksByIndex.count }
     var hasVideo: Bool { tracksByIndex.values.contains(where: \.isVideo) }
+    var hasAudio: Bool { tracksByIndex.values.contains(where: \.isAudio) }
 
     func isVideoStream(_ streamIndex: Int) -> Bool {
         tracksByIndex[streamIndex]?.isVideo == true
@@ -96,6 +109,9 @@ final class MPEGTransportStreamMuxer {
         pendingDiscontinuityPIDs = Set(tracksByIndex.values.map(\.pid))
         pendingDiscontinuityPIDs.insert(0)
         pendingDiscontinuityPIDs.insert(pmtPID)
+        // A seek/recovery really does cross media epochs, so flush each VLC
+        // elementary-stream decoder when its first new PES arrives.
+        pendingDecoderFlushPIDs = Set(tracksByIndex.values.map(\.pid))
     }
 
     func mux(_ packet: HTSPMuxPacket) -> Data {
@@ -141,7 +157,7 @@ final class MPEGTransportStreamMuxer {
             sectionPacket(
                 pid: 0,
                 section: Self.patSection(pmtPID: pmtPID),
-                discontinuity: consumeDiscontinuity(for: 0)
+                discontinuity: consumeDiscontinuity(for: 0) != .none
             )
         )
         let tracks = tracksByIndex.values.sorted { $0.pid < $1.pid }
@@ -149,7 +165,7 @@ final class MPEGTransportStreamMuxer {
             sectionPacket(
                 pid: pmtPID,
                 section: Self.pmtSection(pcrPID: pcrPID, tracks: tracks),
-                discontinuity: consumeDiscontinuity(for: pmtPID)
+                discontinuity: consumeDiscontinuity(for: pmtPID) != .none
             )
         )
         return result
@@ -175,8 +191,12 @@ final class MPEGTransportStreamMuxer {
         return packet
     }
 
-    private func consumeDiscontinuity(for pid: UInt16) -> Bool {
-        pendingDiscontinuityPIDs.remove(pid) != nil
+    private func consumeDiscontinuity(for pid: UInt16) -> Discontinuity {
+        let hasTransportDiscontinuity = pendingDiscontinuityPIDs.remove(pid) != nil
+        if pendingDecoderFlushPIDs.remove(pid) != nil {
+            return .decoderFlush
+        }
+        return hasTransportDiscontinuity ? .transport : .none
     }
 
     private func packetize(
@@ -184,20 +204,21 @@ final class MPEGTransportStreamMuxer {
         pid: UInt16,
         presentationUnitStart: Bool,
         pcrMicroseconds: Int64?,
-        discontinuity: Bool
+        discontinuity: Discontinuity
     ) -> Data {
         var result = Data()
         var offset = 0
         var first = true
         while offset < data.count {
-            let writesVLCDiscontinuity = first && discontinuity
+            let writesVLCDiscontinuity = first && discontinuity == .decoderFlush
+            let writesTransportDiscontinuity = first && discontinuity == .transport
             // VLC requires the private marker's flags byte to be exactly 0x82,
             // so PCR cannot share this adaptation field. The next video PES
             // resumes the normal per-frame PCR cadence.
             let writesPCR = first && pcrMicroseconds != nil && !writesVLCDiscontinuity
             let requiredAdaptation = writesVLCDiscontinuity
                 ? 3 + Self.vlcDiscontinuityMarker.count
-                : (writesPCR ? 8 : 0)
+                : (writesPCR ? 8 : (writesTransportDiscontinuity ? 2 : 0))
             let remaining = data.count - offset
             var payloadCount = min(184 - requiredAdaptation, remaining)
             var adaptationTotal = 184 - payloadCount
@@ -222,6 +243,7 @@ final class MPEGTransportStreamMuxer {
                 if adaptationTotal > 1 {
                     var flags: UInt8 = 0
                     if writesVLCDiscontinuity { flags |= 0x82 }
+                    if writesTransportDiscontinuity { flags |= 0x80 }
                     if writesPCR { flags |= 0x10 }
                     packet.append(flags)
                     var used = 2

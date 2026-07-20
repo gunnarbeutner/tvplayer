@@ -12,6 +12,7 @@ struct HTSPStreamHealthSnapshot: Equatable, Sendable {
     let isNavigating: Bool
     let desiredSpeed: Int32
     let lastMuxPacketAt: Date?
+    let expectsAudio: Bool
 }
 
 private enum HTSPStreamFailure: LocalizedError {
@@ -169,12 +170,14 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
     var healthSnapshot: HTSPStreamHealthSnapshot {
         let navigating = !deliveryGate.shouldDeliverPackets
+        let expectsAudio = processLock.withLock { muxer.hasAudio }
         return condition.withLock {
             HTSPStreamHealthSnapshot(
                 isRecovering: recovering,
                 isNavigating: navigating || postSeekBuffer.result != nil,
                 desiredSpeed: desiredPlaybackSpeed,
-                lastMuxPacketAt: lastMuxPacketAt
+                lastMuxPacketAt: lastMuxPacketAt,
+                expectsAudio: expectsAudio
             )
         }
     }

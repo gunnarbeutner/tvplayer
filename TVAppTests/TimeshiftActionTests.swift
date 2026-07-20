@@ -260,6 +260,40 @@ final class TimeshiftActionTests: XCTestCase {
         )
     }
 
+    func testOutputWatchdogRebuildsWhenExpectedAudioNeverStarts() {
+        var monitor = PlaybackOutputHealthMonitor()
+        let start = Date(timeIntervalSinceReferenceDate: 10_000)
+        let initial = PlaybackOutputCounters(displayedPictures: 20, playedAudioBuffers: 0)
+
+        monitor.restartGracePeriod(output: initial, at: start)
+        XCTAssertEqual(
+            monitor.observe(
+                output: PlaybackOutputCounters(
+                    displayedPictures: 21,
+                    playedAudioBuffers: 0
+                ),
+                at: start.addingTimeInterval(1),
+                expectsOutput: true,
+                hasFreshInput: true,
+                expectsAudio: true
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            monitor.observe(
+                output: PlaybackOutputCounters(
+                    displayedPictures: 30,
+                    playedAudioBuffers: 0
+                ),
+                at: start.addingTimeInterval(11),
+                expectsOutput: true,
+                hasFreshInput: true,
+                expectsAudio: true
+            ),
+            .rebuildPlayer
+        )
+    }
+
     func testOutputWatchdogRequestsOnlyOneRecoveryUntilProgressResumes() {
         var monitor = PlaybackOutputHealthMonitor()
         let start = Date(timeIntervalSinceReferenceDate: 10_000)

@@ -682,7 +682,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
             at: date,
             expectsOutput: expectsOutput,
             hasFreshInput: hasFreshInput,
-            expectsAudio: mediaPlayer.currentAudioTrackIndex >= 0
+            expectsAudio: health.expectsAudio
         ) == .rebuildPlayer else { return }
 
         scheduleNativePipelineRecovery(

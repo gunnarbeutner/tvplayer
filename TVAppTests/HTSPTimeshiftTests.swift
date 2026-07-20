@@ -118,8 +118,8 @@ final class HTSPTimeshiftTests: XCTestCase {
 
         XCTAssertTrue(firstPacketHasDiscontinuity(pid: 0x0100, in: firstVideo))
         XCTAssertTrue(firstPacketHasDiscontinuity(pid: 0x0101, in: firstAudio))
-        XCTAssertTrue(firstPacketHasVLCDiscontinuity(pid: 0x0100, in: firstVideo))
-        XCTAssertTrue(firstPacketHasVLCDiscontinuity(pid: 0x0101, in: firstAudio))
+        XCTAssertFalse(firstPacketHasVLCDiscontinuity(pid: 0x0100, in: firstVideo))
+        XCTAssertFalse(firstPacketHasVLCDiscontinuity(pid: 0x0101, in: firstAudio))
         XCTAssertFalse(firstPacketHasDiscontinuity(pid: 0x0101, in: muxer.mux(audio)))
 
         muxer.resetAfterDiscontinuity()
