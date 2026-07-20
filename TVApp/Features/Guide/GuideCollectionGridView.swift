@@ -814,6 +814,25 @@ private final class GuideCollectionView: UICollectionView,
     ) {
         snapshotBuildTask?.cancel()
         os_signpost(.begin, log: guidePerformanceLog, name: "GuideSnapshotBuild", "revision=%d", revision)
+
+        // Persisted guide data is loaded before SwiftUI creates this view. Build
+        // the first layout snapshot in this update pass so the collection view
+        // is complete for its first rendered frame. Later refreshes remain
+        // detached to keep an already interactive guide responsive.
+        if guideSnapshot == nil {
+            let snapshot = GuideGridSnapshot(
+                channels: channels,
+                timeline: timeline,
+                revision: revision
+            )
+            guard requestedGuideRevision == revision,
+                  requestedChannelPreferencesRevision == channelPreferencesRevision
+            else { return }
+            os_signpost(.end, log: guidePerformanceLog, name: "GuideSnapshotBuild", "revision=%d", revision)
+            apply(snapshot)
+            return
+        }
+
         snapshotBuildTask = Task { [weak self] in
             let snapshot = await Task.detached(priority: .userInitiated) {
                 GuideGridSnapshot(

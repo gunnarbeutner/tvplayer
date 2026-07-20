@@ -24,7 +24,6 @@ struct GuideView: View {
     @State private var detail: ProgrammeDetailPresentation?
     @State private var needsInitialFocus = true
     @State private var showLoadingSkeleton = false
-    @State private var hasRenderedGuide = false
 
     private var displayedChannels: [GuideChannel] {
         channelPreferences.displayedChannels(from: model.channels)
@@ -84,63 +83,49 @@ struct GuideView: View {
                     }
                 )
             } else {
-                ZStack {
-                    if usesCompactGuide {
-                        CompactGuideList(
-                            channels: displayedChannels,
+                if usesCompactGuide {
+                    CompactGuideList(
+                        channels: displayedChannels,
+                        now: model.now,
+                        focusedProgramID: $focusedProgramID,
+                        isFavorite: channelPreferences.isFavorite,
+                        recordingState: { recordings.scheduledRecording(for: $0)?.state },
+                        onActivate: presentDetails,
+                        onPlay: play,
+                        onReady: {}
+                    )
+                } else {
+                    VStack(spacing: 0) {
+                        GuideInformationPanel(
+                            program: presentedProgram,
+                            channel: model.channel(containing: presentedProgram),
                             now: model.now,
+                            loadState: model.loadState,
+                            recordingState: presentedProgram.flatMap { recordings.scheduledRecording(for: $0)?.state },
+                            usesCompactLayout: usesLandscapeGuide
+                        )
+
+                        GuideGridView(
+                            channels: displayedChannels,
+                            timeline: model.timeline,
+                            now: model.now,
+                            guideRevision: model.guideRevision,
+                            channelPreferencesRevision: channelPreferences.revision,
+                            preferredProgramID: preferredFocusProgramID,
+                            focusScope: guideFocusScope,
                             focusedProgramID: $focusedProgramID,
+                            recenterRequest: recenterRequest,
+                            focusRestoreRequest: focusRestoreRequest,
+                            recordingsRevision: recordings.guideRevision,
+                            configuration: settings.configuration,
                             isFavorite: channelPreferences.isFavorite,
+                            onToggleFavorite: channelPreferences.toggleFavorite,
                             recordingState: { recordings.scheduledRecording(for: $0)?.state },
                             onActivate: presentDetails,
                             onPlay: play,
-                            onReady: { hasRenderedGuide = true }
+                            onReady: {}
                         )
-                    } else {
-                        VStack(spacing: 0) {
-                            GuideInformationPanel(
-                                program: presentedProgram,
-                                channel: model.channel(containing: presentedProgram),
-                                now: model.now,
-                                loadState: model.loadState,
-                                recordingState: presentedProgram.flatMap { recordings.scheduledRecording(for: $0)?.state },
-                                usesCompactLayout: usesLandscapeGuide
-                            )
-
-                            GuideGridView(
-                                channels: displayedChannels,
-                                timeline: model.timeline,
-                                now: model.now,
-                                guideRevision: model.guideRevision,
-                                channelPreferencesRevision: channelPreferences.revision,
-                                preferredProgramID: preferredFocusProgramID,
-                                focusScope: guideFocusScope,
-                                focusedProgramID: $focusedProgramID,
-                                recenterRequest: recenterRequest,
-                                focusRestoreRequest: focusRestoreRequest,
-                                recordingsRevision: recordings.guideRevision,
-                                configuration: settings.configuration,
-                                isFavorite: channelPreferences.isFavorite,
-                                onToggleFavorite: channelPreferences.toggleFavorite,
-                                recordingState: { recordings.scheduledRecording(for: $0)?.state },
-                                onActivate: presentDetails,
-                                onPlay: play,
-                                onReady: { hasRenderedGuide = true }
-                            )
-                            .televisionDefaultFocus(true, in: guideFocusScope)
-                        }
-                    }
-
-                    if !hasRenderedGuide {
-                        // The collection snapshot is intentionally assembled
-                        // off the main actor. Keep a complete guide-shaped
-                        // surface visible until its first layout is installed.
-                        GuideLoadingSkeleton(
-                            channels: model.channels,
-                            timeline: model.timeline
-                        )
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
+                        .televisionDefaultFocus(true, in: guideFocusScope)
                     }
                 }
             }
@@ -175,13 +160,7 @@ struct GuideView: View {
             guard isSelected else { return }
             restorePlaybackFocusIfAvailable()
         }
-        .onChange(of: model.hasUsableGuide) { _, hasUsableGuide in
-            if !hasUsableGuide {
-                hasRenderedGuide = false
-            }
-        }
         .onChange(of: usesCompactGuide) { _, _ in
-            hasRenderedGuide = false
             recenterRequest = UUID()
             requestInitialFocus()
         }
