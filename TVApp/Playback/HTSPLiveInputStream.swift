@@ -3,6 +3,14 @@ import OSLog
 
 final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unchecked Sendable {
     private static let maximumQueuedBytes = 8 * 1_024 * 1_024
+    private static let controlResponseTimeout: TimeInterval = 5
+    private static let fastPrebufferDelay: TimeInterval = 10
+
+    private struct PendingControlRequest {
+        let method: String
+        let succeeded: @Sendable () -> Void
+        let failed: @Sendable (Error) -> Void
+    }
 
     private let connection: HTSPConnection
     private let condition = NSCondition()
@@ -23,7 +31,24 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     private var currentLiveDelay: TimeInterval = 0
     private var currentWindow: TimeInterval = 0
     private var currentBufferStart: Date?
-    private var navigationCompletionHandler: (@Sendable () -> Void)?
+    private var timelineEpoch: Date?
+    private var navigationCompletionHandler: (
+        @Sendable (Result<HTSPNavigationResult, HTSPNavigationError>) -> Void
+    )?
+    private var postSeekBuffer = HTSPPostSeekBufferTracker()
+
+    // Accessed only from controlQueue.
+    private var pendingControlRequests: [Int64: PendingControlRequest] = [:]
+    private var seekCoordinator = HTSPAbsoluteSeekCoordinator()
+    private var speedController = HTSPSubscriptionSpeedController()
+    private var seekRPCAccepted = false
+    private var asynchronousLandingTime: Int64?
+    private var activeSeekSequence: Int64?
+    private var pendingLiveCommand = false
+    private var navigationCommandInFlight = false
+    private var navigationAcceptsLiveEdge = false
+    private var navigationTargetsLiveEdge = false
+    private var navigationGeneration = 0
     let acceptedTimeshiftPeriod: TimeInterval
 
     private init(
@@ -56,7 +81,6 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             streams: subscription.1,
             acceptedTimeshiftPeriod: TimeInterval(subscription.0)
         )
-        try connection.sendControl(method: "subscriptionSpeed", fields: ["speed": .int(0)])
         return stream
     }
 
@@ -89,10 +113,12 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     }
 
     var isNavigatingTimeshift: Bool {
-        !deliveryGate.shouldDeliverPackets
+        !deliveryGate.shouldDeliverPackets || condition.withLock { postSeekBuffer.result != nil }
     }
 
-    func setNavigationCompletionHandler(_ handler: (@Sendable () -> Void)?) {
+    func setNavigationCompletionHandler(
+        _ handler: (@Sendable (Result<HTSPNavigationResult, HTSPNavigationError>) -> Void)?
+    ) {
         condition.withLock { navigationCompletionHandler = handler }
     }
 
@@ -132,26 +158,36 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     }
 
     func play() {
-        guard deliveryGate.shouldDeliverPackets else { return }
-        enqueueControl(method: "subscriptionSpeed", fields: ["speed": .int(100)])
+        guard !isNavigatingTimeshift else { return }
+        enqueueSpeed(100)
     }
 
     func pause() {
-        enqueueControl(method: "subscriptionSpeed", fields: ["speed": .int(0)])
+        enqueueSpeed(0)
     }
 
     func seek(by seconds: TimeInterval) {
+        guard seconds != 0 else { return }
         beginNavigation()
-        enqueueControl(
-            method: "subscriptionSkip",
-            fields: ["time": .int(Int64((seconds * 1_000_000).rounded()))],
-            cancelsNavigationOnFailure: true
-        )
+        controlQueue.async { [weak self] in
+            guard let self else { return }
+            self.pendingLiveCommand = false
+            if let target = self.seekCoordinator.requestRelative(seconds: seconds) {
+                self.sendSeekWhenPaused(to: target)
+            } else if self.seekCoordinator.inFlightTarget == nil {
+                self.schedulePendingNavigationTimeout()
+            }
+        }
     }
 
     func returnToLive() {
         beginNavigation()
-        enqueueControl(method: "subscriptionLive", cancelsNavigationOnFailure: true)
+        controlQueue.async { [weak self] in
+            guard let self else { return }
+            self.pendingLiveCommand = true
+            _ = self.seekCoordinator.requestLiveEdge()
+            self.sendPendingNavigationIfPaused()
+        }
     }
 
     override func read(_ output: UnsafeMutablePointer<UInt8>, maxLength length: Int) -> Int {
@@ -207,6 +243,13 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     }
 
     private func process(_ message: [String: HTSPValue]) throws {
+        if let sequence = message["seq"]?.intValue {
+            controlQueue.async { [weak self] in
+                self?.handleControlResponse(message, sequence: sequence)
+            }
+            return
+        }
+
         switch message["method"]?.stringValue {
         case "muxpkt":
             guard deliveryGate.shouldDeliverPackets else { return }
@@ -220,19 +263,51 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 decodeTime: message["dts"]?.intValue,
                 payload: payload
             )
+            let isVideo = processLock.withLock { muxer.isVideoStream(packet.streamIndex) }
+            let acceptsPacket = condition.withLock {
+                postSeekBuffer.shouldAcceptPacket(
+                    isVideo: isVideo,
+                    frameType: packet.frameType
+                )
+            }
+            guard acceptsPacket else { return }
             let transportData = processLock.withLock { muxer.mux(packet) }
-            if let completionHandler = appendIfDeliveryIsOpen(transportData) {
-                completionHandler()
+            if let completion = appendIfDeliveryIsOpen(
+                transportData,
+                packetTime: packet.presentationTime ?? packet.decodeTime
+            ) {
+                enqueueSpeed(100)
+                completion.handler(.success(completion.result))
             }
 
         case "timeshiftStatus":
             let metrics = HTSPTimeshiftMetrics.decode(from: message)
+            let receiptDate = Date()
             condition.withLock {
                 currentLiveDelay = metrics.liveDelay
                 currentWindow = metrics.window
-                currentBufferStart = metrics.window > 0
-                    ? Date().addingTimeInterval(-metrics.window)
-                    : nil
+                if timelineEpoch == nil, let endTime = metrics.endTime {
+                    timelineEpoch = receiptDate.addingTimeInterval(
+                        -TimeInterval(endTime) / 1_000_000
+                    )
+                }
+                if let timelineEpoch, let startTime = metrics.startTime {
+                    currentBufferStart = timelineEpoch.addingTimeInterval(
+                        TimeInterval(startTime) / 1_000_000
+                    )
+                } else {
+                    currentBufferStart = nil
+                }
+            }
+            let updatesCurrentPosition = !isNavigatingTimeshift
+            controlQueue.async { [weak self] in
+                guard let self else { return }
+                if let target = self.seekCoordinator.update(
+                    metrics: metrics,
+                    updateCurrentPosition: updatesCurrentPosition
+                ), !self.pendingLiveCommand, !self.navigationAcceptsLiveEdge {
+                    self.sendSeekWhenPaused(to: target)
+                }
             }
 
         case "subscriptionStart":
@@ -253,9 +328,16 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             resetDeliveryQueue()
 
         case "subscriptionSkip":
-            completeNavigation()
-            if message["error"]?.intValue == 1 {
-                logger.error("TVHeadend rejected an HTSP seek request")
+            controlQueue.async { [weak self] in self?.handleSubscriptionSkip(message) }
+
+        case "subscriptionSpeed":
+            guard let speed = message["speed"]?.intValue else { return }
+            controlQueue.async { [weak self] in
+                guard let self else { return }
+                if let command = self.speedController.observeActual(Int32(clamping: speed)) {
+                    self.sendSpeed(command)
+                }
+                self.sendPendingNavigationIfPaused()
             }
 
         case "subscriptionStop":
@@ -267,7 +349,13 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         }
     }
 
-    private func appendIfDeliveryIsOpen(_ data: Data) -> (@Sendable () -> Void)? {
+    private func appendIfDeliveryIsOpen(
+        _ data: Data,
+        packetTime: Int64?
+    ) -> (
+        handler: @Sendable (Result<HTSPNavigationResult, HTSPNavigationError>) -> Void,
+        result: HTSPNavigationResult
+    )? {
         guard !data.isEmpty else { return nil }
         condition.lock()
         guard deliveryGate.shouldDeliverPackets else {
@@ -279,18 +367,24 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
               buffer.count - readOffset >= Self.maximumQueuedBytes {
             condition.wait()
         }
-        let completionHandler: (@Sendable () -> Void)?
+        let completion: (
+            handler: @Sendable (Result<HTSPNavigationResult, HTSPNavigationError>) -> Void,
+            result: HTSPNavigationResult
+        )?
         if !stopped, currentError == nil, deliveryGate.shouldDeliverPackets {
             buffer.append(data)
-            completionHandler = deliveryGate.consumePostNavigationPacket()
-                ? navigationCompletionHandler
-                : nil
+            if let result = postSeekBuffer.observePacket(time: packetTime),
+               let navigationCompletionHandler {
+                completion = (navigationCompletionHandler, result)
+            } else {
+                completion = nil
+            }
             condition.broadcast()
         } else {
-            completionHandler = nil
+            completion = nil
         }
         condition.unlock()
-        return completionHandler
+        return completion
     }
 
     private func resetDeliveryQueue() {
@@ -307,60 +401,334 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     }
 
     private func beginNavigation() {
+        processLock.withLock { muxer.resetAfterDiscontinuity() }
         condition.withLock {
             deliveryGate.beginNavigation()
+            postSeekBuffer.cancel()
             buffer.removeAll(keepingCapacity: true)
             readOffset = 0
             condition.broadcast()
         }
-        processLock.withLock { muxer.resetAfterDiscontinuity() }
     }
 
-    private func completeNavigation() {
-        processLock.withLock { muxer.resetAfterDiscontinuity() }
-        let completedAllNavigation: Bool = condition.withLock {
+    private func preparePostSeekBuffering(_ result: HTSPNavigationResult) {
+        let generation = navigationGeneration
+        let hasVideo = processLock.withLock {
+            muxer.resetAfterDiscontinuity()
+            return muxer.hasVideo
+        }
+        condition.withLock {
             buffer.removeAll(keepingCapacity: true)
             readOffset = 0
-            let completedAllNavigation = deliveryGate.completeNavigation()
+            postSeekBuffer.begin(result, hasVideo: hasVideo)
+            deliveryGate.completeNavigation()
             condition.broadcast()
-            return completedAllNavigation
         }
-        if completedAllNavigation {
-            enqueueControl(method: "subscriptionSpeed", fields: ["speed": .int(100)])
+        requestSpeed(result.liveDelay >= Self.fastPrebufferDelay ? 400 : 100)
+
+        controlQueue.asyncAfter(deadline: .now() + Self.controlResponseTimeout) { [weak self] in
+            guard let self,
+                  self.navigationGeneration == generation,
+                  self.condition.withLock({ self.postSeekBuffer.result != nil }) else { return }
+            self.failNavigation(.timedOut)
         }
     }
 
-    private func enqueueControl(
+    private func enqueueSpeed(_ speed: Int32) {
+        controlQueue.async { [weak self] in self?.requestSpeed(speed) }
+    }
+
+    private func requestSpeed(_ speed: Int32) {
+        if let command = speedController.request(speed) { sendSpeed(command) }
+    }
+
+    private func sendSpeed(_ speed: Int32) {
+        sendControlRequest(
+            method: "subscriptionSpeed",
+            fields: ["speed": .int(Int64(speed))],
+            succeeded: {},
+            failed: { [weak self] error in
+                guard let self else { return }
+                if let command = self.speedController.commandFailed(speed) {
+                    self.sendSpeed(command)
+                }
+                self.logger.error(
+                    "TVHeadend speed \(speed, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
+                )
+                if self.isNavigatingTimeshift {
+                    self.failNavigation(
+                        .controlFailed(error.localizedDescription)
+                    )
+                }
+            }
+        )
+    }
+
+    private func sendSeekWhenPaused(to target: Int64) {
+        guard activeSeekSequence == nil else { return }
+        guard HTSPSeekStartPolicy.canSendSeek(
+            actualSpeed: speedController.actualSpeed,
+            outstandingSpeed: speedController.outstandingSpeed
+        ) else {
+            requestSpeed(0)
+            schedulePendingNavigationTimeout()
+            return
+        }
+        sendAbsoluteSeek(to: target)
+    }
+
+    private func sendPendingNavigationIfPaused() {
+        guard activeSeekSequence == nil,
+              !deliveryGate.shouldDeliverPackets else { return }
+        guard HTSPSeekStartPolicy.canSendSeek(
+            actualSpeed: speedController.actualSpeed,
+            outstandingSpeed: speedController.outstandingSpeed
+        ) else {
+            requestSpeed(0)
+            schedulePendingNavigationTimeout()
+            return
+        }
+        if pendingLiveCommand {
+            sendLiveNavigation()
+            return
+        }
+        guard let target = seekCoordinator.inFlightTarget else { return }
+        sendAbsoluteSeek(to: target)
+    }
+
+    private func sendAbsoluteSeek(to target: Int64) {
+        sendNavigationCommand(
+            method: "subscriptionSeek",
+            fields: [
+                "time": .int(target),
+                "absolute": .int(1),
+            ],
+            acceptsLiveEdge: false,
+            targetsLiveEdge: seekCoordinator.isTargetingLiveEdge
+        )
+    }
+
+    private func sendLiveNavigation() {
+        pendingLiveCommand = false
+        // subscriptionLive changes TVHeadend back to normal playback speed as
+        // it reaches the readable edge. Model that server-side transition so
+        // the speed controller does not immediately fight it with a late pause.
+        speedController.expectServerSpeed(100)
+        sendNavigationCommand(
+            method: "subscriptionLive",
+            fields: [:],
+            acceptsLiveEdge: true,
+            targetsLiveEdge: true
+        )
+    }
+
+    private func sendNavigationCommand(
         method: String,
-        fields: [String: HTSPValue] = [:],
-        cancelsNavigationOnFailure: Bool = false
+        fields: [String: HTSPValue],
+        acceptsLiveEdge: Bool,
+        targetsLiveEdge: Bool
     ) {
-        controlQueue.async { [weak self] in
-            self?.sendControl(
-                method: method,
-                fields: fields,
-                cancelsNavigationOnFailure: cancelsNavigationOnFailure
-            )
+        seekRPCAccepted = false
+        asynchronousLandingTime = nil
+        navigationCommandInFlight = true
+        navigationAcceptsLiveEdge = acceptsLiveEdge
+        navigationTargetsLiveEdge = targetsLiveEdge
+        navigationGeneration += 1
+        let generation = navigationGeneration
+
+        activeSeekSequence = sendControlRequest(
+            method: method,
+            fields: fields,
+            succeeded: { [weak self] in
+                guard let self, self.navigationGeneration == generation else { return }
+                self.seekRPCAccepted = true
+                self.finishSeekIfReady()
+            },
+            failed: { [weak self] error in
+                guard let self, self.navigationGeneration == generation else { return }
+                self.failNavigation(self.navigationError(from: error))
+            }
+        )
+
+        controlQueue.asyncAfter(deadline: .now() + Self.controlResponseTimeout) { [weak self] in
+            guard let self,
+                  self.navigationGeneration == generation,
+                  self.navigationCommandInFlight
+            else { return }
+            self.failNavigation(.timedOut)
         }
     }
 
-    private func sendControl(
+    private func schedulePendingNavigationTimeout() {
+        navigationGeneration += 1
+        let generation = navigationGeneration
+        controlQueue.asyncAfter(deadline: .now() + Self.controlResponseTimeout) { [weak self] in
+            guard let self,
+                  self.navigationGeneration == generation,
+                  !self.deliveryGate.shouldDeliverPackets,
+                  self.activeSeekSequence == nil
+            else { return }
+            self.failNavigation(.timedOut)
+        }
+    }
+
+    private func handleSubscriptionSkip(_ message: [String: HTSPValue]) {
+        guard navigationCommandInFlight else { return }
+        if message["error"]?.intValue == 1 {
+            if HTSPNavigationRecoveryPolicy.shouldRetryWithLiveCommand(
+                acceptsLiveEdge: navigationAcceptsLiveEdge,
+                targetsLiveEdge: navigationTargetsLiveEdge
+            ) {
+                recoverRejectedLiveEdgeSeek()
+                return
+            }
+            failNavigation(.rejected)
+            return
+        }
+        guard let landingTime = message["time"]?.intValue else {
+            failNavigation(.invalidResponse)
+            return
+        }
+        asynchronousLandingTime = max(0, landingTime)
+        finishSeekIfReady()
+    }
+
+    private func finishSeekIfReady() {
+        guard seekRPCAccepted, let asynchronousLandingTime else { return }
+        let acceptsLiveEdge = navigationAcceptsLiveEdge
+        activeSeekSequence = nil
+        seekRPCAccepted = false
+        self.asynchronousLandingTime = nil
+        navigationCommandInFlight = false
+        navigationAcceptsLiveEdge = false
+        navigationTargetsLiveEdge = false
+
+        switch seekCoordinator.complete(
+            landingTime: asynchronousLandingTime,
+            acceptsLiveEdgeLanding: acceptsLiveEdge
+        ) {
+        case let .seek(target):
+            if pendingLiveCommand {
+                sendPendingNavigationIfPaused()
+            } else {
+                sendSeekWhenPaused(to: target)
+            }
+        case let .buffer(result):
+            navigationGeneration += 1
+            preparePostSeekBuffering(result)
+        }
+    }
+
+    private func recoverRejectedLiveEdgeSeek() {
+        logger.info("Absolute live-edge seek was rejected; retrying with subscriptionLive")
+        navigationGeneration += 1
+        if let activeSeekSequence {
+            pendingControlRequests.removeValue(forKey: activeSeekSequence)
+        }
+        activeSeekSequence = nil
+        seekRPCAccepted = false
+        asynchronousLandingTime = nil
+        navigationCommandInFlight = false
+        navigationAcceptsLiveEdge = false
+        navigationTargetsLiveEdge = false
+        pendingLiveCommand = true
+        _ = seekCoordinator.requestLiveEdge()
+        sendPendingNavigationIfPaused()
+    }
+
+    private func failNavigation(_ error: HTSPNavigationError) {
+        logger.error("Timeshift navigation failed: \(error.localizedDescription, privacy: .public)")
+        navigationGeneration += 1
+        if let activeSeekSequence {
+            pendingControlRequests.removeValue(forKey: activeSeekSequence)
+        }
+        activeSeekSequence = nil
+        seekRPCAccepted = false
+        asynchronousLandingTime = nil
+        pendingLiveCommand = false
+        navigationCommandInFlight = false
+        navigationAcceptsLiveEdge = false
+        navigationTargetsLiveEdge = false
+        seekCoordinator.fail()
+        processLock.withLock { muxer.resetAfterDiscontinuity() }
+
+        let handler = condition.withLock {
+            postSeekBuffer.cancel()
+            deliveryGate.cancelAllNavigation()
+            buffer.removeAll(keepingCapacity: true)
+            readOffset = 0
+            condition.broadcast()
+            return navigationCompletionHandler
+        }
+        // A rejected or timed-out navigation must not strand the subscription
+        // at speed zero. Reopen delivery and continue from the last position
+        // TVHeadend still owns; the user can try the navigation again.
+        requestSpeed(100)
+        handler?(.failure(error))
+    }
+
+    @discardableResult
+    private func sendControlRequest(
         method: String,
         fields: [String: HTSPValue] = [:],
-        cancelsNavigationOnFailure: Bool = false
-    ) {
+        succeeded: @escaping @Sendable () -> Void,
+        failed: @escaping @Sendable (Error) -> Void
+    ) -> Int64? {
+        let sequence = connection.reserveSequence()
+        pendingControlRequests[sequence] = PendingControlRequest(
+            method: method,
+            succeeded: succeeded,
+            failed: failed
+        )
         do {
-            try connection.sendControl(method: method, fields: fields)
+            try connection.sendRequest(
+                method: method,
+                sequence: sequence,
+                fields: fields,
+                includesSubscriptionID: true
+            )
         } catch {
-            if cancelsNavigationOnFailure {
-                deliveryGate.cancelAllNavigation()
-            }
-            condition.withLock {
-                guard !stopped else { return }
-                currentError = error
-                currentStatus = .error
-                condition.broadcast()
-            }
+            pendingControlRequests.removeValue(forKey: sequence)
+            failed(error)
+            return nil
+        }
+
+        controlQueue.asyncAfter(deadline: .now() + Self.controlResponseTimeout) { [weak self] in
+            guard let self,
+                  let request = self.pendingControlRequests.removeValue(forKey: sequence)
+            else { return }
+            request.failed(HTSPNavigationError.timedOut)
+        }
+        return sequence
+    }
+
+    private func handleControlResponse(
+        _ message: [String: HTSPValue],
+        sequence: Int64
+    ) {
+        guard let request = pendingControlRequests.removeValue(forKey: sequence) else { return }
+        do {
+            try HTSPConnection.validate(response: message)
+            request.succeeded()
+        } catch {
+            logger.error(
+                "TVHeadend \(request.method, privacy: .public) request failed: \(error.localizedDescription, privacy: .public)"
+            )
+            request.failed(error)
+        }
+    }
+
+    private func navigationError(from error: Error) -> HTSPNavigationError {
+        if let navigationError = error as? HTSPNavigationError { return navigationError }
+        return .controlFailed(error.localizedDescription)
+    }
+
+    private func failStream(_ error: Error) {
+        condition.withLock {
+            guard !stopped else { return }
+            currentError = error
+            currentStatus = .error
+            condition.broadcast()
         }
     }
 }

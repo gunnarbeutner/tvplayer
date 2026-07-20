@@ -9,11 +9,24 @@ enum RecordingLoadState: Equatable {
 
 @MainActor
 final class RecordingStore: ObservableObject {
-    @Published private(set) var recordings: [TVRecording] = []
+    @Published private(set) var recordings: [TVRecording] = [] {
+        didSet {
+            rebuildRecordingIndexes()
+            guideRevision &+= 1
+        }
+    }
     @Published private(set) var rules: [TVRecordingRule] = []
     @Published private(set) var loadState: RecordingLoadState = .needsConfiguration
     @Published private(set) var performingActions: Set<String> = []
     @Published var errorMessage: String?
+
+    /// A cheap identity for guide rendering. The guide previously hashed the
+    /// complete recording array from `body`, then linearly searched that same
+    /// array for every programme card.
+    @Published private(set) var guideRevision = 0
+
+    private var recordingByEventID: [Int64: TVRecording] = [:]
+    private var recordingsByChannelID: [String: [TVRecording]] = [:]
 
     private var lastConfiguration: TVHeadendConfiguration?
     private var lastLoadedAt: Date?
@@ -92,12 +105,11 @@ final class RecordingStore: ObservableObject {
 
     func recording(for program: GuideProgram) -> TVRecording? {
         if let eventID = program.providerEventID,
-           let exact = recordings.first(where: { $0.eventID == eventID }) {
+           let exact = recordingByEventID[eventID] {
             return exact
         }
 
-        return recordings.first {
-            guard $0.channelID == program.channelID else { return false }
+        return recordingsByChannelID[program.channelID]?.first {
             let startsTogether = abs($0.start.timeIntervalSince(program.start)) < 120
             let overlaps = $0.start < program.end && program.start < $0.end
             return startsTogether || ($0.title == program.title && overlaps)
@@ -168,6 +180,23 @@ final class RecordingStore: ObservableObject {
 
     func isPerforming(_ key: String) -> Bool {
         performingActions.contains(key)
+    }
+
+    private func rebuildRecordingIndexes() {
+        recordingByEventID = Dictionary(
+            recordings.compactMap { recording in
+                recording.eventID.map { ($0, recording) }
+            },
+            uniquingKeysWith: { _, newest in newest }
+        )
+        recordingsByChannelID = Dictionary(
+            grouping: recordings.compactMap { recording in
+                recording.channelID.map { ($0, recording) }
+            },
+            by: \.0
+        ).mapValues { entries in
+            entries.map(\.1)
+        }
     }
 
     private func perform(

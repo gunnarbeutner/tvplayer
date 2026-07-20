@@ -124,6 +124,17 @@ enum PlaybackCapabilityPolicy {
 struct PlaybackOutputCounters: Equatable {
     let displayedPictures: Int
     let playedAudioBuffers: Int
+    let playbackTimeMilliseconds: Int64?
+
+    init(
+        displayedPictures: Int,
+        playedAudioBuffers: Int,
+        playbackTimeMilliseconds: Int64? = nil
+    ) {
+        self.displayedPictures = displayedPictures
+        self.playedAudioBuffers = playedAudioBuffers
+        self.playbackTimeMilliseconds = playbackTimeMilliseconds
+    }
 
     func hasAdvanced(since previous: PlaybackOutputCounters) -> Bool {
         displayedPictures > previous.displayedPictures
@@ -134,13 +145,16 @@ struct PlaybackOutputCounters: Equatable {
 struct LivePlaybackPositionTracker {
     private var pausedDate: Date?
     private var lastResumeOutput: PlaybackOutputCounters?
+    private var lastOutputObservationDate: Date?
+    private var highestPlaybackTimeMilliseconds: Int64?
+    private var awaitingPlaybackProgress = false
 
     var hasAnchoredDate: Bool {
         pausedDate != nil
     }
 
     var isAwaitingPlaybackProgress: Bool {
-        lastResumeOutput != nil
+        awaitingPlaybackProgress
     }
 
     mutating func pause(
@@ -156,6 +170,9 @@ struct LivePlaybackPositionTracker {
             )
         }
         lastResumeOutput = nil
+        lastOutputObservationDate = nil
+        highestPlaybackTimeMilliseconds = nil
+        awaitingPlaybackProgress = false
     }
 
     mutating func moveAnchor(
@@ -167,38 +184,95 @@ struct LivePlaybackPositionTracker {
         let lowerBound = bufferStartedAt ?? .distantPast
         self.pausedDate = min(max(pausedDate.addingTimeInterval(seconds), lowerBound), liveEdge)
         lastResumeOutput = nil
+        lastOutputObservationDate = nil
+        highestPlaybackTimeMilliseconds = nil
+        awaitingPlaybackProgress = false
+    }
+
+    mutating func moveAnchor(
+        to playbackDate: Date,
+        liveEdge: Date,
+        bufferStartedAt: Date?
+    ) {
+        let lowerBound = bufferStartedAt ?? .distantPast
+        pausedDate = min(max(playbackDate, lowerBound), liveEdge)
+        lastResumeOutput = nil
+        lastOutputObservationDate = nil
+        highestPlaybackTimeMilliseconds = nil
+        awaitingPlaybackProgress = false
     }
 
     mutating func moveAnchorToLive(at liveEdge: Date) {
         guard pausedDate != nil else { return }
         pausedDate = liveEdge
         lastResumeOutput = nil
+        lastOutputObservationDate = nil
+        highestPlaybackTimeMilliseconds = nil
+        awaitingPlaybackProgress = false
     }
 
     @discardableResult
     mutating func requestResume(from output: PlaybackOutputCounters) -> Bool {
         guard pausedDate != nil else { return false }
         lastResumeOutput = output
+        lastOutputObservationDate = nil
+        highestPlaybackTimeMilliseconds = output.playbackTimeMilliseconds
+        awaitingPlaybackProgress = true
         return true
     }
 
     @discardableResult
-    mutating func observePlaybackOutput(_ output: PlaybackOutputCounters) -> Bool {
+    mutating func observePlaybackOutput(
+        _ output: PlaybackOutputCounters,
+        at date: Date = Date()
+    ) -> Bool {
         guard let previous = lastResumeOutput else { return false }
-        guard output.hasAdvanced(since: previous) else {
-            // VLC counters can reset across a discontinuity. Treat the reset
-            // as a new baseline and wait for an actual output increment.
-            lastResumeOutput = output
-            return false
+        let observationInterval = lastOutputObservationDate.map {
+            max(0, date.timeIntervalSince($0))
+        } ?? 0
+        lastOutputObservationDate = date
+        lastResumeOutput = output
+
+        let outputAdvanced: Bool
+        if let playbackTime = output.playbackTimeMilliseconds {
+            if let highestPlaybackTimeMilliseconds {
+                if playbackTime < highestPlaybackTimeMilliseconds - 1_000 {
+                    // A seek can reset VLC's media clock. Establish the new
+                    // baseline without treating the reset as presented media.
+                    self.highestPlaybackTimeMilliseconds = playbackTime
+                    return false
+                }
+                outputAdvanced = playbackTime > highestPlaybackTimeMilliseconds
+                self.highestPlaybackTimeMilliseconds = max(
+                    playbackTime,
+                    highestPlaybackTimeMilliseconds
+                )
+            } else {
+                highestPlaybackTimeMilliseconds = playbackTime
+                outputAdvanced = false
+            }
+        } else {
+            outputAdvanced = output.hasAdvanced(since: previous)
         }
-        pausedDate = nil
-        lastResumeOutput = nil
+
+        guard outputAdvanced else { return false }
+        if awaitingPlaybackProgress {
+            awaitingPlaybackProgress = false
+        } else if let pausedDate {
+            // Advance only by time observed between two genuinely newer VLC
+            // presentation samples. This freezes the marker during stalls and
+            // ignores small backwards/forwards media-clock flaps.
+            self.pausedDate = pausedDate.addingTimeInterval(min(1, observationInterval))
+        }
         return true
     }
 
     mutating func reset() {
         pausedDate = nil
         lastResumeOutput = nil
+        lastOutputObservationDate = nil
+        highestPlaybackTimeMilliseconds = nil
+        awaitingPlaybackProgress = false
     }
 
     func playbackDate(
@@ -215,6 +289,13 @@ struct LivePlaybackPositionTracker {
 struct HTSPTimeshiftMetrics: Equatable {
     let liveDelay: TimeInterval
     let window: TimeInterval
+    let startTime: Int64?
+    let endTime: Int64?
+
+    var playheadTime: Int64? {
+        guard let endTime else { return nil }
+        return endTime - Int64((liveDelay * 1_000_000).rounded())
+    }
 
     static func decode(from message: [String: HTSPValue]) -> HTSPTimeshiftMetrics {
         let liveDelay = abs(TimeInterval(message["shift"]?.intValue ?? 0) / 1_000_000)
@@ -225,50 +306,283 @@ struct HTSPTimeshiftMetrics: Equatable {
         } else {
             window = 0
         }
-        return HTSPTimeshiftMetrics(liveDelay: liveDelay, window: window)
+        return HTSPTimeshiftMetrics(
+            liveDelay: liveDelay,
+            window: window,
+            startTime: message["start"]?.intValue,
+            endTime: message["end"]?.intValue
+        )
+    }
+}
+
+struct HTSPNavigationResult: Equatable, Sendable {
+    let landingTime: Int64
+    let bufferStartTime: Int64?
+    let liveEdgeTime: Int64?
+
+    var liveDelay: TimeInterval {
+        guard let liveEdgeTime else { return 0 }
+        return max(0, TimeInterval(liveEdgeTime - landingTime) / 1_000_000)
+    }
+}
+
+enum HTSPNavigationError: LocalizedError, Equatable, Sendable {
+    case rejected
+    case timedOut
+    case invalidResponse
+    case controlFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .rejected: "TVHeadend rejected the timeshift seek."
+        case .timedOut: "TVHeadend did not finish the timeshift seek in time."
+        case .invalidResponse: "TVHeadend returned an invalid timeshift position."
+        case let .controlFailed(message): "TVHeadend timeshift control failed: \(message)"
+        }
+    }
+}
+
+enum HTSPSeekCompletion: Equatable {
+    case seek(Int64)
+    case buffer(HTSPNavigationResult)
+}
+
+struct HTSPAbsoluteSeekCoordinator {
+    static let landingTolerance: Int64 = 250_000
+
+    private(set) var inFlightTarget: Int64?
+    private(set) var desiredTarget: Int64?
+    private(set) var currentTime: Int64?
+    private(set) var bufferStartTime: Int64?
+    private(set) var liveEdgeTime: Int64?
+    private var pendingRelativeDelta: Int64 = 0
+    private var pendingLiveEdge = false
+
+    var isTargetingLiveEdge: Bool {
+        if pendingLiveEdge { return true }
+        guard let liveEdgeTime,
+              let target = desiredTarget ?? inFlightTarget else { return false }
+        return target >= liveEdgeTime - Self.landingTolerance
+    }
+
+    mutating func update(
+        metrics: HTSPTimeshiftMetrics,
+        updateCurrentPosition: Bool
+    ) -> Int64? {
+        bufferStartTime = metrics.startTime
+        liveEdgeTime = metrics.endTime
+
+        if updateCurrentPosition, let playheadTime = metrics.playheadTime {
+            currentTime = clamp(playheadTime)
+            if inFlightTarget == nil { desiredTarget = currentTime }
+        }
+
+        if pendingLiveEdge, let liveEdgeTime {
+            desiredTarget = liveEdgeTime
+            pendingLiveEdge = false
+            return startIfPossible()
+        } else if pendingRelativeDelta != 0,
+                  let base = desiredTarget ?? inFlightTarget ?? currentTime ?? metrics.playheadTime {
+            desiredTarget = clamp(base + pendingRelativeDelta)
+            pendingRelativeDelta = 0
+            return startIfPossible()
+        }
+        return nil
+    }
+
+    mutating func requestRelative(seconds: TimeInterval) -> Int64? {
+        let delta = Int64((seconds * 1_000_000).rounded())
+        guard delta != 0 else { return nil }
+        pendingLiveEdge = false
+
+        if let base = desiredTarget ?? inFlightTarget ?? currentTime {
+            desiredTarget = clamp(base + delta)
+        } else {
+            pendingRelativeDelta += delta
+        }
+        return startIfPossible()
+    }
+
+    mutating func requestLiveEdge() -> Int64? {
+        pendingRelativeDelta = 0
+        pendingLiveEdge = true
+        guard let liveEdgeTime else { return nil }
+        desiredTarget = liveEdgeTime
+        pendingLiveEdge = false
+        return startIfPossible()
+    }
+
+    mutating func complete(
+        landingTime: Int64,
+        acceptsLiveEdgeLanding: Bool = false
+    ) -> HTSPSeekCompletion {
+        let satisfiedLiveEdge = acceptsLiveEdgeLanding && isTargetingLiveEdge
+        currentTime = clamp(landingTime)
+        inFlightTarget = nil
+        pendingLiveEdge = false
+
+        if !satisfiedLiveEdge,
+           let desiredTarget,
+           abs(desiredTarget - landingTime) > Self.landingTolerance {
+            let target = clamp(desiredTarget)
+            inFlightTarget = target
+            return .seek(target)
+        }
+
+        desiredTarget = currentTime
+        return .buffer(
+            HTSPNavigationResult(
+                landingTime: currentTime ?? landingTime,
+                bufferStartTime: bufferStartTime,
+                liveEdgeTime: liveEdgeTime
+            )
+        )
+    }
+
+    mutating func fail() {
+        inFlightTarget = nil
+        desiredTarget = currentTime
+        pendingRelativeDelta = 0
+        pendingLiveEdge = false
+    }
+
+    private mutating func startIfPossible() -> Int64? {
+        guard inFlightTarget == nil, let desiredTarget else { return nil }
+        let target = clamp(desiredTarget)
+        inFlightTarget = target
+        return target
+    }
+
+    private func clamp(_ time: Int64) -> Int64 {
+        min(max(time, bufferStartTime ?? time), liveEdgeTime ?? time)
+    }
+}
+
+struct HTSPSubscriptionSpeedController {
+    private(set) var desiredSpeed: Int32
+    private(set) var actualSpeed: Int32
+    private(set) var outstandingSpeed: Int32?
+
+    init(desiredSpeed: Int32 = 100, actualSpeed: Int32 = 100, outstandingSpeed: Int32? = nil) {
+        self.desiredSpeed = desiredSpeed
+        self.actualSpeed = actualSpeed
+        self.outstandingSpeed = outstandingSpeed
+    }
+
+    mutating func request(_ speed: Int32) -> Int32? {
+        desiredSpeed = speed
+        return nextCommandIfReady()
+    }
+
+    mutating func observeActual(_ speed: Int32) -> Int32? {
+        actualSpeed = speed
+        if outstandingSpeed == speed { outstandingSpeed = nil }
+        return nextCommandIfReady()
+    }
+
+    mutating func commandFailed(_ speed: Int32) -> Int32? {
+        guard outstandingSpeed == speed else { return nil }
+        outstandingSpeed = nil
+        if desiredSpeed == speed { desiredSpeed = actualSpeed }
+        return nextCommandIfReady()
+    }
+
+    mutating func expectServerSpeed(_ speed: Int32) {
+        desiredSpeed = speed
+    }
+
+    private mutating func nextCommandIfReady() -> Int32? {
+        guard outstandingSpeed == nil, actualSpeed != desiredSpeed else { return nil }
+        outstandingSpeed = desiredSpeed
+        return desiredSpeed
+    }
+}
+
+enum HTSPSeekStartPolicy {
+    static func canSendSeek(
+        actualSpeed: Int32,
+        outstandingSpeed: Int32?
+    ) -> Bool {
+        actualSpeed == 0 && outstandingSpeed == nil
+    }
+}
+
+enum HTSPNavigationRecoveryPolicy {
+    static func shouldRetryWithLiveCommand(
+        acceptsLiveEdge: Bool,
+        targetsLiveEdge: Bool
+    ) -> Bool {
+        targetsLiveEdge && !acceptsLiveEdge
+    }
+}
+
+struct HTSPPostSeekBufferTracker {
+    static let requiredDuration: Int64 = 1_000_000
+    static let packetFallbackCount = 48
+
+    private(set) var result: HTSPNavigationResult?
+    private var waitsForVideoKeyframe = false
+    private var firstTime: Int64?
+    private var latestTime: Int64?
+    private var packetCount = 0
+
+    mutating func begin(_ result: HTSPNavigationResult, hasVideo: Bool) {
+        self.result = result
+        waitsForVideoKeyframe = hasVideo
+        firstTime = nil
+        latestTime = nil
+        packetCount = 0
+    }
+
+    mutating func cancel() {
+        result = nil
+        waitsForVideoKeyframe = false
+        firstTime = nil
+        latestTime = nil
+        packetCount = 0
+    }
+
+    mutating func shouldAcceptPacket(isVideo: Bool, frameType: UInt8) -> Bool {
+        guard result != nil else { return true }
+        guard waitsForVideoKeyframe else { return true }
+        guard isVideo, frameType == Character("I").asciiValue else { return false }
+        waitsForVideoKeyframe = false
+        return true
+    }
+
+    mutating func observePacket(time: Int64?) -> HTSPNavigationResult? {
+        guard let result else { return nil }
+        packetCount += 1
+        if let time {
+            firstTime = firstTime ?? time
+            latestTime = max(latestTime ?? time, time)
+        }
+        let bufferedDuration = max(0, (latestTime ?? 0) - (firstTime ?? 0))
+        guard bufferedDuration >= Self.requiredDuration
+                || packetCount >= Self.packetFallbackCount
+        else { return nil }
+        cancel()
+        return result
     }
 }
 
 final class HTSPTimeshiftDeliveryGate: @unchecked Sendable {
     private let lock = NSLock()
-    private var pendingNavigationCount = 0
-    private var awaitsPostNavigationPacket = false
+    private var navigating = false
 
     var shouldDeliverPackets: Bool {
-        lock.withLock { pendingNavigationCount == 0 }
+        lock.withLock { !navigating }
     }
 
     func beginNavigation() {
-        lock.withLock {
-            pendingNavigationCount += 1
-            awaitsPostNavigationPacket = false
-        }
+        lock.withLock { navigating = true }
     }
 
-    @discardableResult
-    func completeNavigation() -> Bool {
-        lock.withLock {
-            guard pendingNavigationCount > 0 else { return false }
-            pendingNavigationCount -= 1
-            let completedAllNavigation = pendingNavigationCount == 0
-            if completedAllNavigation { awaitsPostNavigationPacket = true }
-            return completedAllNavigation
-        }
-    }
-
-    @discardableResult
-    func consumePostNavigationPacket() -> Bool {
-        lock.withLock {
-            guard pendingNavigationCount == 0, awaitsPostNavigationPacket else { return false }
-            awaitsPostNavigationPacket = false
-            return true
-        }
+    func completeNavigation() {
+        lock.withLock { navigating = false }
     }
 
     func cancelAllNavigation() {
-        lock.withLock {
-            pendingNavigationCount = 0
-            awaitsPostNavigationPacket = false
-        }
+        lock.withLock { navigating = false }
     }
 }

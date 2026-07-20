@@ -152,96 +152,10 @@ final class GuideGridLayoutTests: XCTestCase {
         )
     }
 
-    func testPinnedChannelColumnDoesNotInheritHorizontalScrollOffset() {
-        let initialOffset = CGPoint(x: 280, y: 94)
-        let farFutureOffset = CGPoint(x: 1_800, y: 94)
-
-        XCTAssertEqual(
-            GuideGridChromeLayout.channelHeadersOffset(for: initialOffset),
-            CGSize(width: 0, height: -36)
-        )
-        XCTAssertEqual(
-            GuideGridChromeLayout.channelHeadersOffset(for: farFutureOffset),
-            CGSize(width: 0, height: -36)
-        )
-    }
-
     func testChannelAndProgrammeCardsUseTheSameRowHeight() {
         XCTAssertEqual(
             GuideGridMetrics.cardHeight + (GuideGridMetrics.rowInset * 2),
             GuideGridMetrics.rowHeight
-        )
-    }
-
-    func testScrollingBackRestoresTimelineHeaderPosition() {
-        let initialScrollOffset = CGPoint(x: 280, y: 94)
-        let farFutureScrollOffset = CGPoint(x: 1_800, y: 94)
-        let initialHeaderOffset = GuideGridChromeLayout.timelineContentOffset(for: initialScrollOffset)
-
-        XCTAssertEqual(initialHeaderOffset, CGSize(width: -280, height: 0))
-        XCTAssertEqual(
-            GuideGridChromeLayout.timelineContentOffset(for: farFutureScrollOffset),
-            CGSize(width: -1_800, height: 0)
-        )
-        XCTAssertEqual(
-            GuideGridChromeLayout.timelineContentOffset(for: initialScrollOffset),
-            initialHeaderOffset
-        )
-    }
-
-    func testOccludedProgrammeRequestsOffsetClearOfChannelColumn() {
-        XCTAssertEqual(
-            GuideGridChromeLayout.correctedHorizontalOffset(
-                currentOffset: 1_800,
-                programmeOffset: 1_500
-            ),
-            1_492
-        )
-    }
-
-    func testFirstProgrammeCanRestoreTrueLeadingEdge() {
-        XCTAssertEqual(
-            GuideGridChromeLayout.correctedHorizontalOffset(
-                currentOffset: 220,
-                programmeOffset: 0
-            ),
-            0
-        )
-    }
-
-    func testTimelineSpanningProgrammeAtRestingEdgeDoesNotTriggerFocusCorrection() {
-        // A programme clamped to the timeline's leading edge while the grid
-        // already rests at that edge needs no correction. Issuing one anyway
-        // resets the vertical offset and scrolls the focused row off-screen.
-        XCTAssertNil(
-            GuideGridChromeLayout.correctedHorizontalOffset(
-                currentOffset: 0,
-                programmeOffset: 0
-            )
-        )
-    }
-
-    func testVisibleProgrammeDoesNotTriggerFocusCorrection() {
-        XCTAssertNil(
-            GuideGridChromeLayout.correctedHorizontalOffset(
-                currentOffset: 700,
-                programmeOffset: 900
-            )
-        )
-    }
-
-    func testTimelineMarkWhoseAnchorIsBehindChannelColumnIsHidden() {
-        XCTAssertFalse(
-            GuideGridChromeLayout.isTimelineMarkVisible(
-                markOffset: 720,
-                contentOffset: 780
-            )
-        )
-        XCTAssertTrue(
-            GuideGridChromeLayout.isTimelineMarkVisible(
-                markOffset: 900,
-                contentOffset: 780
-            )
         )
     }
 
@@ -284,15 +198,18 @@ final class GuideGridLayoutTests: XCTestCase {
                 )
             ]
         )
+        let snapshot = GuideGridSnapshot(
+            channels: [first, second],
+            timeline: timeline(around: now),
+            revision: 1
+        )
 
         XCTAssertEqual(
-            GuideGridNavigation.destinationProgram(
-                in: [first, second],
-                timeline: timeline(around: now),
+            snapshot.destinationProgramID(
                 from: "long-current",
                 direction: .down,
                 at: now
-            )?.id,
+            ),
             "second-current"
         )
     }
@@ -307,11 +224,14 @@ final class GuideGridLayoutTests: XCTestCase {
             id: "last",
             programs: [program(id: "last-current", channelID: "last", around: now)]
         )
+        let snapshot = GuideGridSnapshot(
+            channels: [first, last],
+            timeline: timeline(around: now),
+            revision: 1
+        )
 
         XCTAssertNil(
-            GuideGridNavigation.destinationProgram(
-                in: [first, last],
-                timeline: timeline(around: now),
+            snapshot.destinationProgramID(
                 from: "last-current",
                 direction: .down,
                 at: now
@@ -339,18 +259,21 @@ final class GuideGridLayoutTests: XCTestCase {
             start: now.addingTimeInterval(4_500),
             end: now.addingTimeInterval(8_100)
         )
+        let snapshot = GuideGridSnapshot(
+            channels: [
+                channel(id: "first", programs: [selected]),
+                channel(id: "second", programs: [overlapping]),
+            ],
+            timeline: timeline(around: now),
+            revision: 1
+        )
 
         XCTAssertEqual(
-            GuideGridNavigation.destinationProgram(
-                in: [
-                    channel(id: "first", programs: [selected]),
-                    channel(id: "second", programs: [overlapping])
-                ],
-                timeline: timeline(around: now),
+            snapshot.destinationProgramID(
                 from: selected.id,
                 direction: .down,
                 at: now
-            )?.id,
+            ),
             overlapping.id
         )
     }
@@ -366,15 +289,18 @@ final class GuideGridLayoutTests: XCTestCase {
             id: "third",
             programs: [program(id: "third-current", channelID: "third", around: now)]
         )
+        let snapshot = GuideGridSnapshot(
+            channels: [first, empty, third],
+            timeline: timeline(around: now),
+            revision: 1
+        )
 
         XCTAssertEqual(
-            GuideGridNavigation.destinationProgram(
-                in: [first, empty, third],
-                timeline: timeline(around: now),
+            snapshot.destinationProgramID(
                 from: "third-current",
                 direction: .up,
                 at: now
-            )?.id,
+            ),
             "first-current"
         )
     }
@@ -389,52 +315,207 @@ final class GuideGridLayoutTests: XCTestCase {
             id: "second",
             programs: [program(id: "second-current", channelID: "second", around: now)]
         )
+        let snapshot = GuideGridSnapshot(
+            channels: [first, second],
+            timeline: timeline(around: now),
+            revision: 1
+        )
 
         XCTAssertTrue(
-            GuideGridNavigation.isAtBoundary(
-                in: [first, second],
-                from: "first-current",
+            snapshot.isAtBoundary(
+                programID: "first-current",
                 direction: .up
             )
         )
         XCTAssertFalse(
-            GuideGridNavigation.isAtBoundary(
-                in: [first, second],
-                from: "second-current",
+            snapshot.isAtBoundary(
+                programID: "second-current",
                 direction: .up
             )
         )
     }
 
-    func testLongCurrentProgrammeFocusTargetIsAnchoredAtNow() {
+    func testCollectionSnapshotIndexesProgrammeGeometry() throws {
         let now = Date(timeIntervalSince1970: 10_000)
         let timeline = timeline(around: now)
-        let longProgram = GuideProgram(
-            id: "overnight",
-            channelID: "channel",
-            title: "Overnight",
+        let first = program(id: "first", channelID: "one", around: now)
+        let second = GuideProgram(
+            id: "second",
+            channelID: "two",
+            title: "Second",
             subtitle: nil,
             overview: "",
-            start: now.addingTimeInterval(-3_600),
-            end: now.addingTimeInterval(28_800)
+            start: now.addingTimeInterval(1_800),
+            end: now.addingTimeInterval(3_600)
         )
-        let programmeOffset = timeline.xOffset(for: longProgram.start)
-        let cardWidth = timeline.width(
-            for: DateInterval(start: longProgram.start, end: timeline.end)
-        )
-        let frame = GuideProgramFocusLayout.targetFrame(
-            cardWidth: cardWidth,
-            programmeOffset: programmeOffset,
-            program: longProgram,
+        let snapshot = GuideGridSnapshot(
+            channels: [
+                channel(id: "one", programs: [first]),
+                channel(id: "two", programs: [second]),
+            ],
             timeline: timeline,
-            now: now
+            revision: 7
         )
 
-        XCTAssertEqual(frame.width, GuideProgramFocusLayout.maximumTargetWidth)
+        XCTAssertEqual(snapshot.revision, 7)
+        XCTAssertEqual(snapshot.indexPath(for: first.id), IndexPath(item: 0, section: 0))
+        XCTAssertEqual(snapshot.indexPath(for: second.id), IndexPath(item: 0, section: 1))
+        let secondItem = try XCTUnwrap(snapshot.item(at: IndexPath(item: 0, section: 1)))
         XCTAssertEqual(
-            frame.midX,
-            timeline.xOffset(for: now) - programmeOffset,
-            accuracy: 0.001
+            secondItem.frame.minY,
+            GuideGridMetrics.headerHeight + GuideGridMetrics.rowHeight + GuideGridMetrics.rowInset
+        )
+        XCTAssertEqual(
+            snapshot.contentSize.height,
+            GuideGridMetrics.headerHeight + 2 * GuideGridMetrics.rowHeight
+        )
+    }
+
+    func testCollectionSnapshotQueriesOnlyIntersectingProgrammes() {
+        let start = Date(timeIntervalSince1970: 0)
+        let timeline = GuideTimeline(
+            start: start,
+            end: start.addingTimeInterval(6 * 3_600)
+        )
+        let programs = (0..<6).map { index in
+            GuideProgram(
+                id: "program-\(index)",
+                channelID: "channel",
+                title: "Program \(index)",
+                subtitle: nil,
+                overview: "",
+                start: start.addingTimeInterval(Double(index) * 3_600),
+                end: start.addingTimeInterval(Double(index + 1) * 3_600)
+            )
+        }
+        let snapshot = GuideGridSnapshot(
+            channels: [channel(id: "channel", programs: programs)],
+            timeline: timeline,
+            revision: 1
+        )
+        let secondHourStart = GuideGridMetrics.channelWidth + GuideTimeline.pointsPerHour
+        let visible = snapshot.items(
+            inRow: 0,
+            intersecting: secondHourStart...(secondHourStart + GuideTimeline.pointsPerHour - 10)
+        )
+
+        XCTAssertEqual(visible.map(\.id), ["program-1"])
+    }
+
+    func testCollectionSnapshotUsesIndexedVerticalNavigation() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let snapshot = GuideGridSnapshot(
+            channels: [
+                channel(id: "first", programs: [
+                    program(id: "first-current", channelID: "first", around: now)
+                ]),
+                channel(id: "empty", programs: []),
+                channel(id: "third", programs: [
+                    program(id: "third-current", channelID: "third", around: now)
+                ]),
+            ],
+            timeline: timeline(around: now),
+            revision: 1
+        )
+
+        XCTAssertEqual(
+            snapshot.destinationProgramID(
+                from: "first-current",
+                direction: .down,
+                at: now
+            ),
+            "third-current"
+        )
+        XCTAssertTrue(snapshot.isAtBoundary(programID: "first-current", direction: .up))
+    }
+
+    func testCollectionSnapshotUsesIndexedHorizontalNavigation() {
+        let start = Date(timeIntervalSince1970: 10_000)
+        let programmes = (0..<3).map { index in
+            GuideProgram(
+                id: "program-\(index)",
+                channelID: "channel",
+                title: "Program \(index)",
+                subtitle: nil,
+                overview: "",
+                start: start.addingTimeInterval(Double(index) * 1_800),
+                end: start.addingTimeInterval(Double(index + 1) * 1_800)
+            )
+        }
+        let snapshot = GuideGridSnapshot(
+            channels: [channel(id: "channel", programs: programmes)],
+            timeline: GuideTimeline(
+                start: start,
+                end: start.addingTimeInterval(5_400)
+            ),
+            revision: 1
+        )
+
+        XCTAssertEqual(
+            snapshot.destinationProgramID(
+                from: "program-1",
+                direction: .left,
+                at: start
+            ),
+            "program-0"
+        )
+        XCTAssertEqual(
+            snapshot.destinationProgramID(
+                from: "program-1",
+                direction: .right,
+                at: start
+            ),
+            "program-2"
+        )
+        XCTAssertNil(
+            snapshot.destinationProgramID(
+                from: "program-0",
+                direction: .left,
+                at: start
+            )
+        )
+        XCTAssertNil(
+            snapshot.destinationProgramID(
+                from: "program-2",
+                direction: .right,
+                at: start
+            )
+        )
+    }
+
+    func testCollectionSnapshotHandlesStressSizedGuide() {
+        let start = Date(timeIntervalSince1970: 100_000)
+        let timeline = GuideTimeline(
+            start: start,
+            end: start.addingTimeInterval(8 * 3_600)
+        )
+        let channels = (0..<500).map { channelIndex in
+            let programs = (0..<16).map { programIndex in
+                GuideProgram(
+                    id: "\(channelIndex)-\(programIndex)",
+                    channelID: "channel-\(channelIndex)",
+                    title: "Programme \(programIndex)",
+                    subtitle: nil,
+                    overview: "",
+                    start: start.addingTimeInterval(Double(programIndex) * 1_800),
+                    end: start.addingTimeInterval(Double(programIndex + 1) * 1_800)
+                )
+            }
+            return channel(id: "channel-\(channelIndex)", programs: programs)
+        }
+
+        let snapshot = GuideGridSnapshot(
+            channels: channels,
+            timeline: timeline,
+            revision: 1
+        )
+
+        XCTAssertEqual(snapshot.rows.count, 500)
+        XCTAssertEqual(snapshot.locationByProgramID.count, 8_000)
+        XCTAssertEqual(snapshot.rows[499].count, 16)
+        XCTAssertEqual(
+            snapshot.indexPath(for: "499-15"),
+            IndexPath(item: 15, section: 499)
         )
     }
 

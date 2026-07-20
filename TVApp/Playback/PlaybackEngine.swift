@@ -103,6 +103,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     @Published private(set) var subtitleDelayMilliseconds = 0
     @Published private(set) var activeProfile = "pass"
     @Published private(set) var activeLivePlaybackMode: ActiveLivePlaybackMode?
+    @Published private(set) var livePlaybackMarkerDate: Date?
 
     let mediaPlayer: VLCMediaPlayer
 
@@ -150,10 +151,19 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
                     nativeTimeshiftActions = NativeTimeshiftActionController(sink: stream)
                     let sessionID = UUID()
                     nativeTimeshiftSessionID = sessionID
-                    stream.setNavigationCompletionHandler { [weak self] in
+                    stream.setNavigationCompletionHandler { [weak self] result in
                         Task { @MainActor [weak self] in
                             guard let self, self.nativeTimeshiftSessionID == sessionID else { return }
-                            self.resumeLocalPlaybackAfterTimeshiftNavigation()
+                            switch result {
+                            case let .success(navigation):
+                                self.applyNavigationLanding(navigation)
+                                self.resumeLocalPlaybackAfterTimeshiftNavigation()
+                            case let .failure(error):
+                                self.logger.error(
+                                    "Timeshift navigation failed; resuming the previous position: \(error.localizedDescription, privacy: .public)"
+                                )
+                                self.resumeLocalPlaybackAfterTimeshiftNavigation()
+                            }
                         }
                     }
                     activeLivePlaybackMode = .tvHeadend
@@ -191,7 +201,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     }
 
     func beginBuffering() {
-        // A paused native HTSP subscription continues buffering on TVHeadend.
+        // Prewarming has no VLC reader yet. Start the HTSP receiver explicitly
+        // so the sequenced pause can be acknowledged instead of sitting behind
+        // unread subscription messages until presentation begins.
+        nativeInputStream?.open()
+        nativeInputStream?.pause()
     }
 
     func finishPrewarmingAtLiveEdge() {
@@ -212,9 +226,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
             logger.info("Starting VLC playback")
         }
         pauseRequested = false
+        anchorLivePlaybackPositionIfNeeded()
         let waitsForPlaybackProgress = livePlaybackPosition.requestResume(
             from: playbackOutputCounters
         )
+        publishLivePlaybackMarker()
         _ = nativeTimeshiftActions?.perform(.play)
         mediaPlayer.play()
         setState(waitsForPlaybackProgress || !wasPaused ? .preparing : .playing)
@@ -263,7 +279,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     /// playback stopped, even if VLC subsequently reports a transient
     /// buffering/playing state while the upstream stream keeps downloading.
     func livePlaybackDate(at date: Date = Date()) -> Date {
-        livePlaybackPosition.playbackDate(
+        livePlaybackMarkerDate ?? livePlaybackPosition.playbackDate(
             at: date,
             liveDelay: liveDelaySeconds,
             bufferStartedAt: bufferStartedAt
@@ -279,17 +295,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         refreshPlaybackInformation()
 
         if let nativeTimeshiftActions {
-            let navigationDate = Date()
             nativeTimeshiftActions.perform(
                 .skipForward(seconds, liveDelay: liveDelaySeconds),
                 beforeServerCommands: { [self] effect in
                     applyNativeTimeshiftLocalEffect(effect)
-                    guard effect == .pauseUntilNavigationCompletes else { return }
-                    livePlaybackPosition.moveAnchor(
-                        by: seconds,
-                        at: navigationDate,
-                        bufferStartedAt: bufferStartedAt
-                    )
                 }
             )
             return false
@@ -306,17 +315,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     func skipBackward(by seconds: TimeInterval) {
         refreshPlaybackInformation()
         if let nativeTimeshiftActions {
-            let navigationDate = Date()
             nativeTimeshiftActions.perform(
                 .skipBackward(seconds),
                 beforeServerCommands: { [self] effect in
                     applyNativeTimeshiftLocalEffect(effect)
-                    guard effect == .pauseUntilNavigationCompletes else { return }
-                    livePlaybackPosition.moveAnchor(
-                        by: -seconds,
-                        at: navigationDate,
-                        bufferStartedAt: bufferStartedAt
-                    )
                 }
             )
             return
@@ -336,13 +338,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
 
     func returnToLive() {
         guard let nativeTimeshiftActions else { return }
-        let navigationDate = Date()
         nativeTimeshiftActions.perform(
             .returnToLive,
             beforeServerCommands: { [self] effect in
                 applyNativeTimeshiftLocalEffect(effect)
-                guard effect == .pauseUntilNavigationCompletes else { return }
-                livePlaybackPosition.moveAnchorToLive(at: navigationDate)
             }
         )
     }
@@ -369,7 +368,6 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
 
     func refreshPlaybackInformation(at date: Date = Date()) {
         lastMetricsUpdate = date
-        confirmPlaybackResumeIfOutputAdvanced()
 
         let isLive = activeRequest?.kind.isLive == true
         if let nativeInputStream {
@@ -385,6 +383,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
             if isLive { bufferStartedAt = nil }
             bufferedBytes = 0
         }
+        confirmPlaybackResumeIfOutputAdvanced(at: date)
+        publishLivePlaybackMarker(at: date)
 
         let updatedSeekable = PlaybackCapabilityPolicy.isSeekable(
             isLive: isLive,
@@ -516,18 +516,54 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         lastMetricsUpdate = Date()
     }
 
+    private func applyNavigationLanding(
+        _ navigation: HTSPNavigationResult,
+        at date: Date = Date()
+    ) {
+        let liveEdge = date
+        let landingDate = liveEdge.addingTimeInterval(-navigation.liveDelay)
+        livePlaybackPosition.moveAnchor(
+            to: landingDate,
+            liveEdge: liveEdge,
+            bufferStartedAt: bufferStartedAt
+        )
+        publishLivePlaybackMarker(at: date)
+    }
+
     private var playbackOutputCounters: PlaybackOutputCounters {
         let statistics = mediaPlayer.media?.statistics
         return PlaybackOutputCounters(
             displayedPictures: Int(statistics?.displayedPictures ?? 0),
-            playedAudioBuffers: Int(statistics?.playedAudioBuffers ?? 0)
+            playedAudioBuffers: Int(statistics?.playedAudioBuffers ?? 0),
+            playbackTimeMilliseconds: mediaPlayer.time.intValue > 0
+                ? Int64(mediaPlayer.time.intValue)
+                : nil
         )
     }
 
-    private func confirmPlaybackResumeIfOutputAdvanced() {
-        guard livePlaybackPosition.observePlaybackOutput(playbackOutputCounters) else { return }
+    private func confirmPlaybackResumeIfOutputAdvanced(at date: Date) {
+        guard livePlaybackPosition.observePlaybackOutput(
+            playbackOutputCounters,
+            at: date
+        ) else { return }
         hasStartedPlayback = true
         if !pauseRequested { setState(.playing) }
+    }
+
+    private func publishLivePlaybackMarker(at date: Date = Date()) {
+        guard activeRequest?.kind.isLive == true,
+              livePlaybackPosition.hasAnchoredDate else {
+            if livePlaybackMarkerDate != nil { livePlaybackMarkerDate = nil }
+            return
+        }
+        let marker = livePlaybackPosition.playbackDate(
+            at: date,
+            liveDelay: liveDelaySeconds,
+            bufferStartedAt: bufferStartedAt
+        )
+        if livePlaybackMarkerDate.map({ abs($0.timeIntervalSince(marker)) >= 0.05 }) ?? true {
+            livePlaybackMarkerDate = marker
+        }
     }
 
     private func applyNativeTimeshiftLocalEffect(_ effect: NativeTimeshiftLocalPlaybackEffect) {
@@ -536,6 +572,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
             break
         case .pause:
             anchorLivePlaybackPositionIfNeeded()
+            publishLivePlaybackMarker()
             pauseRequested = true
             mediaPlayer.rate = 1
             playbackRate = 1
@@ -545,6 +582,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
             resumeLocalPlaybackAfterTimeshiftNavigation()
         case .pauseUntilNavigationCompletes:
             anchorLivePlaybackPositionIfNeeded()
+            publishLivePlaybackMarker()
             pauseRequested = true
             mediaPlayer.rate = 1
             playbackRate = 1
@@ -658,6 +696,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         playbackRate = 1
         pauseRequested = false
         livePlaybackPosition.reset()
+        livePlaybackMarkerDate = nil
         bufferStartedAt = nil
         bufferedBytes = 0
         lastMetricsUpdate = Date()
@@ -750,468 +789,5 @@ private final class VLCVideoContainerView: UIView {
               current === self
         else { return }
         mediaPlayer.drawable = nil
-    }
-}
-
-private struct LegacyPlaybackView: View {
-    private enum TrackMenuFocus: Hashable {
-        case audio
-        case subtitles
-    }
-
-    @EnvironmentObject private var settings: ServerSettingsStore
-    @EnvironmentObject private var playback: PlaybackCoordinator
-    @ObservedObject var engine: VLCPlaybackEngine
-    @State private var showChrome = true
-    @State private var chromeActivity = UUID()
-    @FocusState private var hiddenPlayerSurfaceFocused: Bool
-    @FocusState private var focusedTrackMenu: TrackMenuFocus?
-
-    let presentation: PlaybackPresentation
-
-    var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-
-            VLCVideoSurface(mediaPlayer: engine.mediaPlayer)
-                .ignoresSafeArea()
-
-            if !showChrome {
-                Color.clear
-                    .contentShape(Rectangle())
-                    .ignoresSafeArea()
-                    .focusable()
-                    .focused($hiddenPlayerSurfaceFocused)
-                    .onTapGesture(perform: revealChrome)
-                    .focusEffectDisabled()
-                    .accessibilityLabel("Show playback controls")
-            }
-
-            if showChrome {
-                playbackChrome
-                    .transition(.opacity)
-            }
-        }
-        .task(id: presentation.id) {
-            if engine.state == .idle {
-                await startPlayback(with: presentation.request)
-            } else if engine.state == .paused || engine.state == .preparing {
-                engine.play()
-            }
-        }
-        .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(500))
-                guard !Task.isCancelled else { return }
-                engine.refreshPlaybackInformation()
-            }
-        }
-        .task(id: chromeActivity) {
-            guard showChrome, engine.state == .playing, focusedTrackMenu == nil else { return }
-            try? await Task.sleep(for: .seconds(5))
-            guard !Task.isCancelled,
-                  engine.state == .playing,
-                  focusedTrackMenu == nil
-            else { return }
-            hideChrome()
-        }
-        .onDisappear {
-            if engine.state != .idle { engine.pause() }
-        }
-        .onPlayPauseCommand {
-            engine.togglePlayPause()
-            revealChrome()
-        }
-        .onMoveCommand { _ in revealChrome() }
-        .onExitCommand {
-            if showChrome {
-                hideChrome()
-            } else {
-                playback.leavePlayer()
-            }
-        }
-        .onChange(of: engine.state) { _, newState in
-            if newState != .playing { revealChrome() }
-        }
-        .onChange(of: focusedTrackMenu) { _, newValue in
-            if newValue != nil { revealChrome() }
-        }
-    }
-
-    private var playbackChrome: some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .top, spacing: 20) {
-                VStack(alignment: .leading, spacing: 7) {
-                    Text(presentation.channel.name)
-                        .font(.title.bold())
-                        .foregroundStyle(.white)
-                    if let title = presentation.program?.title {
-                        Text(title)
-                            .font(.headline)
-                            .foregroundStyle(AppTheme.secondaryText)
-                    }
-                }
-
-                Spacer()
-
-                playbackStatus
-            }
-            .padding(.horizontal, 38)
-            .padding(.vertical, 20)
-            .background(
-                LinearGradient(
-                    colors: [.black.opacity(0.9), .black.opacity(0)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-
-            Spacer()
-
-            transportControls
-        }
-    }
-
-    private var transportControls: some View {
-        VStack(spacing: 22) {
-            playbackTimeline
-
-            HStack(spacing: 24) {
-                Button { engine.skipBackward(by: 30); revealChrome() } label: {
-                    Label("Back 30 seconds", systemImage: "gobackward.30")
-                        .labelStyle(.iconOnly)
-                }
-                .disabled(!engine.isSeekable)
-                .accessibilityHint(
-                    engine.isSeekable
-                        ? "Moves playback back 30 seconds"
-                        : "Rewind is unavailable for this HTTP live stream"
-                )
-
-                Button {
-                    engine.togglePlayPause()
-                    revealChrome()
-                } label: {
-                    Label(
-                        engine.state == .paused ? "Resume" : "Pause",
-                        systemImage: engine.state == .paused ? "play.fill" : "pause.fill"
-                    )
-                    .labelStyle(.iconOnly)
-                }
-
-                Button { skipForward() } label: {
-                    Label("Forward 30 seconds", systemImage: "goforward.30")
-                        .labelStyle(.iconOnly)
-                }
-                .disabled(!engine.isSeekable && engine.liveDelaySeconds < 1)
-
-                Button { Task { await returnToLive() } } label: {
-                    Label("Go Live", systemImage: "dot.radiowaves.left.and.right")
-                }
-                .disabled(engine.liveDelaySeconds < 1 && !engine.isSeekable)
-
-                Spacer()
-
-                PlaybackTrackMenu(
-                    title: "Audio",
-                    systemImage: "waveform",
-                    tracks: engine.audioTracks,
-                    selectedID: engine.selectedAudioTrackID,
-                    select: {
-                        engine.selectAudioTrack($0)
-                        revealChrome()
-                    }
-                )
-                .equatable()
-                .focused($focusedTrackMenu, equals: .audio)
-
-                PlaybackTrackMenu(
-                    title: "Subtitles",
-                    systemImage: "captions.bubble",
-                    tracks: engine.subtitleTracks,
-                    selectedID: engine.selectedSubtitleTrackID,
-                    select: {
-                        engine.selectSubtitleTrack($0)
-                        revealChrome()
-                    }
-                )
-                .equatable()
-                .focused($focusedTrackMenu, equals: .subtitles)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.black.opacity(0.82))
-        }
-        .padding(.horizontal, 38)
-        .padding(.top, 32)
-        .padding(.bottom, 26)
-        .background(
-            LinearGradient(
-                colors: [.black.opacity(0), .black.opacity(0.9)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        )
-    }
-
-    @ViewBuilder
-    private var playbackTimeline: some View {
-        if engine.isSeekable, let duration = engine.durationSeconds, duration > 0 {
-            SeekableTimeline(
-                elapsedSeconds: engine.elapsedSeconds,
-                durationSeconds: duration,
-                seek: { engine.seek(to: $0); revealChrome() }
-            )
-        } else {
-            LiveTimeshiftTimeline(
-                windowSeconds: engine.timeshiftWindowSeconds,
-                delaySeconds: engine.liveDelaySeconds
-            )
-        }
-    }
-
-    @ViewBuilder
-    private var playbackStatus: some View {
-        switch engine.state {
-        case .preparing:
-            Label("Opening live stream…", systemImage: "hourglass")
-                .foregroundStyle(.white)
-        case .playing:
-            if engine.playbackRate > 1 {
-                Label("Catching up \(Int(engine.playbackRate))×", systemImage: "forward.fill")
-                    .foregroundStyle(.white)
-            } else if engine.liveDelaySeconds >= 1 {
-                Label("\(formatDuration(engine.liveDelaySeconds)) behind live", systemImage: "clock.arrow.circlepath")
-                    .foregroundStyle(.white)
-            } else {
-                Label("LIVE", systemImage: "dot.radiowaves.left.and.right")
-                    .foregroundStyle(.red)
-            }
-        case .paused:
-            Label("Paused · \(formatDuration(engine.liveDelaySeconds)) behind live", systemImage: "pause.fill")
-                .foregroundStyle(.white)
-        case let .failed(message):
-            Label(message, systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.red)
-        case .idle:
-            EmptyView()
-        }
-    }
-
-    private func startPlayback(with request: LiveStreamRequest) async {
-        do {
-            try await engine.prepare(request)
-            engine.play()
-            guard await engine.waitForPlaybackStart() else { return }
-            revealChrome()
-        } catch {
-            engine.reportFailure(error.localizedDescription)
-        }
-    }
-
-    private func skipForward() {
-        let needsLiveReconnect = engine.skipForward(by: 30)
-        revealChrome()
-        if needsLiveReconnect {
-            Task { await returnToLive() }
-        }
-    }
-
-    private func returnToLive() async {
-        do {
-            let url = try await TVHeadendClient(configuration: settings.configuration)
-                .canonicalLiveStreamURL(channelID: presentation.channel.id)
-            await startPlayback(
-                with: LiveStreamRequest(
-                    url: url,
-                    networkCachingMilliseconds: presentation.request.networkCachingMilliseconds,
-                    profile: settings.configuration.streamProfile
-                )
-            )
-        } catch {
-            engine.reportFailure(error.localizedDescription)
-        }
-    }
-
-    private func revealChrome() {
-        hiddenPlayerSurfaceFocused = false
-        withAnimation(.easeOut(duration: 0.18)) { showChrome = true }
-        chromeActivity = UUID()
-    }
-
-    private func hideChrome() {
-        withAnimation(.easeOut(duration: 0.25)) { showChrome = false }
-        chromeActivity = UUID()
-        Task { @MainActor in
-            await Task.yield()
-            hiddenPlayerSurfaceFocused = true
-        }
-    }
-
-    private func formatDuration(_ seconds: TimeInterval) -> String {
-        let total = max(0, Int(seconds.rounded()))
-        let hours = total / 3_600
-        let minutes = (total % 3_600) / 60
-        let remainder = total % 60
-        if hours > 0 {
-            return String(format: "%d:%02d:%02d", hours, minutes, remainder)
-        }
-        return String(format: "%d:%02d", minutes, remainder)
-    }
-}
-
-private struct PlaybackTrackMenu: View, Equatable {
-    let title: String
-    let systemImage: String
-    let tracks: [PlaybackTrack]
-    let selectedID: Int?
-    let select: (Int) -> Void
-
-    nonisolated static func == (lhs: PlaybackTrackMenu, rhs: PlaybackTrackMenu) -> Bool {
-        lhs.title == rhs.title
-            && lhs.systemImage == rhs.systemImage
-            && lhs.tracks == rhs.tracks
-            && lhs.selectedID == rhs.selectedID
-    }
-
-    var body: some View {
-        Menu {
-            if tracks.isEmpty {
-                Text("No tracks available")
-            } else {
-                ForEach(tracks) { track in
-                    Button {
-                        select(track.id)
-                    } label: {
-                        if selectedID == track.id {
-                            Label(track.name, systemImage: "checkmark")
-                        } else {
-                            Text(track.name)
-                        }
-                    }
-                }
-            }
-        } label: {
-            Label(title, systemImage: systemImage)
-        }
-    }
-}
-
-private struct SeekableTimeline: View {
-    let elapsedSeconds: TimeInterval
-    let durationSeconds: TimeInterval
-    let seek: (TimeInterval) -> Void
-
-    @FocusState private var isFocused: Bool
-
-    private var progress: CGFloat {
-        guard durationSeconds > 0 else { return 0 }
-        return min(max(0, CGFloat(elapsedSeconds / durationSeconds)), 1)
-    }
-
-    var body: some View {
-        VStack(spacing: 8) {
-            Button(action: {}) {
-                GeometryReader { geometry in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Color.white.opacity(0.28))
-                        Capsule()
-                            .fill(AppTheme.accent)
-                            .frame(width: max(8, geometry.size.width * progress))
-                        Circle()
-                            .fill(.white)
-                            .frame(width: isFocused ? 24 : 18, height: isFocused ? 24 : 18)
-                            .offset(x: max(0, geometry.size.width * progress - (isFocused ? 12 : 9)))
-                    }
-                }
-                .frame(height: 24)
-            }
-            .buttonStyle(.plain)
-            .focusable()
-            .focused($isFocused)
-            .focusEffectDisabled()
-            .onMoveCommand { direction in
-                switch direction {
-                case .left:
-                    seek(max(0, elapsedSeconds - 15))
-                case .right:
-                    seek(min(durationSeconds, elapsedSeconds + 15))
-                default:
-                    break
-                }
-            }
-
-            HStack {
-                Text(formatDuration(elapsedSeconds))
-                Spacer()
-                Text(formatDuration(durationSeconds))
-            }
-            .font(.callout.monospacedDigit())
-            .foregroundStyle(AppTheme.secondaryText)
-        }
-    }
-
-    private func formatDuration(_ seconds: TimeInterval) -> String {
-        let total = max(0, Int(seconds.rounded()))
-        let hours = total / 3_600
-        let minutes = (total % 3_600) / 60
-        let remainder = total % 60
-        if hours > 0 { return String(format: "%d:%02d:%02d", hours, minutes, remainder) }
-        return String(format: "%d:%02d", minutes, remainder)
-    }
-}
-
-private struct LiveTimeshiftTimeline: View {
-    let windowSeconds: TimeInterval
-    let delaySeconds: TimeInterval
-
-    private var playheadProgress: CGFloat {
-        guard windowSeconds > 0 else { return 1 }
-        return min(max(0, CGFloat((windowSeconds - delaySeconds) / windowSeconds)), 1)
-    }
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            timeline(at: context.date)
-        }
-    }
-
-    private func timeline(at now: Date) -> some View {
-        VStack(spacing: 9) {
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.white.opacity(0.28))
-                    Capsule()
-                        .fill(AppTheme.accent)
-                        .frame(width: max(8, geometry.size.width * playheadProgress))
-                    Circle()
-                        .fill(.white)
-                        .frame(width: 18, height: 18)
-                        .offset(x: max(0, geometry.size.width * playheadProgress - 9))
-                }
-            }
-            .frame(height: 18)
-
-            HStack {
-                if windowSeconds > 1 {
-                    Text(formatClock(now.addingTimeInterval(-windowSeconds)))
-                } else {
-                    Text(formatClock(now))
-                }
-                Spacer()
-                if delaySeconds >= 1 {
-                    Text(formatClock(now.addingTimeInterval(-delaySeconds)))
-                }
-                Spacer()
-                Text("LIVE · \(formatClock(now))")
-                    .fontWeight(.bold)
-                    .foregroundStyle(.red)
-            }
-            .font(.callout.monospacedDigit())
-            .foregroundStyle(AppTheme.secondaryText)
-        }
-    }
-
-    private func formatClock(_ date: Date) -> String {
-        DateFormatter.localizedString(from: date, dateStyle: .none, timeStyle: .medium)
     }
 }

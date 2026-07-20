@@ -16,6 +16,7 @@ struct GuideView: View {
     @State private var detail: ProgrammeDetailPresentation?
     @State private var needsInitialFocus = true
     @State private var showLoadingSkeleton = false
+    @State private var hasRenderedGuide = false
 
     private var presentedProgram: GuideProgram? {
         model.program(withID: focusedProgramID)
@@ -68,39 +69,58 @@ struct GuideView: View {
                     }
                 )
             } else {
-                VStack(spacing: 0) {
-                    GuideInformationPanel(
-                        program: presentedProgram,
-                        channel: model.channel(containing: presentedProgram),
-                        now: model.now,
-                        loadState: model.loadState,
-                        recordingState: presentedProgram.flatMap { recordings.scheduledRecording(for: $0)?.state }
-                    )
+                ZStack {
+                    VStack(spacing: 0) {
+                        GuideInformationPanel(
+                            program: presentedProgram,
+                            channel: model.channel(containing: presentedProgram),
+                            now: model.now,
+                            loadState: model.loadState,
+                            recordingState: presentedProgram.flatMap { recordings.scheduledRecording(for: $0)?.state }
+                        )
 
-                    GuideGridView(
-                        channels: model.channels,
-                        timeline: model.timeline,
-                        now: model.now,
-                        preferredProgramID: preferredFocusProgramID,
-                        focusScope: guideFocusScope,
-                        focusedProgramID: $focusedProgramID,
-                        recenterRequest: recenterRequest,
-                        focusRestoreRequest: focusRestoreRequest,
-                        recordingsFingerprint: recordings.recordings.hashValue,
-                        recordingState: { recordings.scheduledRecording(for: $0)?.state },
-                        onActivate: { program in
-                            guard let channel = model.channel(containing: program) else { return }
-                            detail = ProgrammeDetailPresentation(program: program, channel: channel)
-                        },
-                        onPlay: { program in
-                            guard let channel = model.channel(containing: program) else { return }
-                            playback.start(
-                                channel: channel,
-                                program: program,
-                                configuration: settings.configuration
-                            )
-                        }
-                    )
+                        GuideGridView(
+                            channels: model.channels,
+                            timeline: model.timeline,
+                            now: model.now,
+                            guideRevision: model.guideRevision,
+                            preferredProgramID: preferredFocusProgramID,
+                            focusScope: guideFocusScope,
+                            focusedProgramID: $focusedProgramID,
+                            recenterRequest: recenterRequest,
+                            focusRestoreRequest: focusRestoreRequest,
+                            recordingsRevision: recordings.guideRevision,
+                            configuration: settings.configuration,
+                            recordingState: { recordings.scheduledRecording(for: $0)?.state },
+                            onActivate: { program in
+                                guard let channel = model.channel(containing: program) else { return }
+                                detail = ProgrammeDetailPresentation(program: program, channel: channel)
+                            },
+                            onPlay: { program in
+                                guard let channel = model.channel(containing: program) else { return }
+                                playback.start(
+                                    channel: channel,
+                                    program: program,
+                                    configuration: settings.configuration
+                                )
+                            },
+                            onReady: {
+                                hasRenderedGuide = true
+                            }
+                        )
+                    }
+
+                    if !hasRenderedGuide {
+                        // The collection snapshot is intentionally assembled
+                        // off the main actor. Keep a complete guide-shaped
+                        // surface visible until its first layout is installed.
+                        GuideLoadingSkeleton(
+                            channels: model.channels,
+                            timeline: model.timeline
+                        )
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                    }
                 }
             }
         }
@@ -133,6 +153,11 @@ struct GuideView: View {
         .onChange(of: playback.focusReturnRevision) { _, _ in
             guard isSelected else { return }
             restorePlaybackFocusIfAvailable()
+        }
+        .onChange(of: model.hasUsableGuide) { _, hasUsableGuide in
+            if !hasUsableGuide {
+                hasRenderedGuide = false
+            }
         }
         .onPlayPauseCommand {
             guard let program = presentedProgram,
@@ -212,28 +237,40 @@ private struct GuideLoadingSkeleton: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isDimmed = false
 
-    private let visibleRowCount = 7
+    private let informationPanelHeight: CGFloat = 154
 
     var body: some View {
-        VStack(spacing: 0) {
-            informationPlaceholder
+        GeometryReader { geometry in
+            let rowCount = visibleRowCount(for: geometry.size.height)
 
             VStack(spacing: 0) {
-                timelinePlaceholder
+                informationPlaceholder
 
-                ForEach(0..<visibleRowCount, id: \.self) { index in
-                    HStack(spacing: 0) {
-                        channelPlaceholder(at: index)
-                        programmePlaceholders(for: index)
+                VStack(spacing: 0) {
+                    timelinePlaceholder
+
+                    ForEach(0..<rowCount, id: \.self) { index in
+                        HStack(spacing: 0) {
+                            channelPlaceholder(at: index)
+                            programmePlaceholders(for: index)
+                        }
+                        .frame(height: GuideGridMetrics.rowHeight)
                     }
-                    .frame(height: GuideGridMetrics.rowHeight)
                 }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .clipped()
+                .opacity(isDimmed ? 0.48 : 0.78)
             }
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .frame(
+                width: geometry.size.width,
+                height: geometry.size.height,
+                alignment: .topLeading
+            )
+            .background(AppTheme.background)
             .clipped()
-            .opacity(isDimmed ? 0.48 : 0.78)
         }
-        .background(AppTheme.background)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AppTheme.background.ignoresSafeArea())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Loading programme guide")
         .onAppear {
@@ -242,6 +279,14 @@ private struct GuideLoadingSkeleton: View {
                 isDimmed = true
             }
         }
+    }
+
+    private func visibleRowCount(for availableHeight: CGFloat) -> Int {
+        let rowsHeight = max(
+            0,
+            availableHeight - informationPanelHeight - GuideGridMetrics.headerHeight
+        )
+        return max(1, Int(ceil(rowsHeight / GuideGridMetrics.rowHeight)))
     }
 
     private var informationPlaceholder: some View {
@@ -268,7 +313,11 @@ private struct GuideLoadingSkeleton: View {
             .frame(width: 400, alignment: .leading)
         }
         .padding(.horizontal, 72)
-        .frame(maxWidth: .infinity, minHeight: 154, maxHeight: 154)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: informationPanelHeight,
+            maxHeight: informationPanelHeight
+        )
         .background(AppTheme.chrome)
         .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.divider).frame(height: 1) }
     }

@@ -147,7 +147,7 @@ final class ChannelLogoImageCache: @unchecked Sendable {
 
     func cachedArtwork(for url: URL) -> ChannelLogoArtwork? {
         let key = Self.cacheKey(for: url)
-        if let artwork = memory.object(forKey: key as NSString)?.artwork {
+        if let artwork = memoryArtwork(forKey: key) {
             return artwork
         }
 
@@ -163,6 +163,12 @@ final class ChannelLogoImageCache: @unchecked Sendable {
 
         storeInMemory(artwork, dataCost: data.count, key: key)
         return artwork
+    }
+
+    /// Memory-only lookup for scrolling surfaces. Unlike `cachedArtwork`,
+    /// this never reads or decodes a file synchronously on the caller.
+    func memoryArtwork(for url: URL) -> ChannelLogoArtwork? {
+        memoryArtwork(forKey: Self.cacheKey(for: url))
     }
 
     @discardableResult
@@ -235,6 +241,10 @@ final class ChannelLogoImageCache: @unchecked Sendable {
         )
     }
 
+    private func memoryArtwork(forKey key: String) -> ChannelLogoArtwork? {
+        memory.object(forKey: key as NSString)?.artwork
+    }
+
     private static func decode(_ data: Data) -> ChannelLogoArtwork? {
         guard let image = UIImage(data: data) else { return nil }
         return ChannelLogoArtwork(
@@ -247,7 +257,7 @@ final class ChannelLogoImageCache: @unchecked Sendable {
 /// Shares authenticated requests between the guide, channel list, detail view
 /// and player. The decoded cache above handles immediate rendering; this actor
 /// only coalesces in-flight network requests.
-private actor ChannelLogoDataLoader {
+actor ChannelLogoDataLoader {
     static let shared = ChannelLogoDataLoader()
 
     private struct Key: Hashable {

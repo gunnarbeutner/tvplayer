@@ -23,7 +23,7 @@ final class MPEGTransportStreamMuxer {
     private var continuity: [UInt16: UInt8] = [:]
     private var packetsSinceTables = Int.max
     private var pendingBootstrapIndexes: Set<Int> = []
-    private var needsDiscontinuity = true
+    private var pendingDiscontinuityPIDs: Set<UInt16> = []
     private let pmtPID: UInt16 = 0x1000
     private let pcrPID: UInt16
 
@@ -67,9 +67,17 @@ final class MPEGTransportStreamMuxer {
                 track.isVideo && track.bootstrap != nil ? track.info.index : nil
             }
         )
+        pendingDiscontinuityPIDs = Set(tracksByIndex.values.map(\.pid))
+        pendingDiscontinuityPIDs.insert(0)
+        pendingDiscontinuityPIDs.insert(pmtPID)
     }
 
     var supportedTrackCount: Int { tracksByIndex.count }
+    var hasVideo: Bool { tracksByIndex.values.contains(where: \.isVideo) }
+
+    func isVideoStream(_ streamIndex: Int) -> Bool {
+        tracksByIndex[streamIndex]?.isVideo == true
+    }
 
     func resetAfterDiscontinuity() {
         continuity.removeAll()
@@ -79,7 +87,9 @@ final class MPEGTransportStreamMuxer {
                 track.isVideo && track.bootstrap != nil ? track.info.index : nil
             }
         )
-        needsDiscontinuity = true
+        pendingDiscontinuityPIDs = Set(tracksByIndex.values.map(\.pid))
+        pendingDiscontinuityPIDs.insert(0)
+        pendingDiscontinuityPIDs.insert(pmtPID)
     }
 
     func mux(_ packet: HTSPMuxPacket) -> Data {
@@ -112,30 +122,55 @@ final class MPEGTransportStreamMuxer {
             pid: track.pid,
             presentationUnitStart: true,
             pcrMicroseconds: track.pid == pcrPID ? (dts ?? pts) : nil,
-            discontinuity: needsDiscontinuity
+            discontinuity: consumeDiscontinuity(for: track.pid)
         )
         output.append(transportPackets)
         packetsSinceTables += transportPackets.count / 188
-        needsDiscontinuity = false
         return output
     }
 
     func tables() -> Data {
         var result = Data()
-        result.append(sectionPacket(pid: 0, section: Self.patSection(pmtPID: pmtPID)))
+        result.append(
+            sectionPacket(
+                pid: 0,
+                section: Self.patSection(pmtPID: pmtPID),
+                discontinuity: consumeDiscontinuity(for: 0)
+            )
+        )
         let tracks = tracksByIndex.values.sorted { $0.pid < $1.pid }
-        result.append(sectionPacket(pid: pmtPID, section: Self.pmtSection(pcrPID: pcrPID, tracks: tracks)))
+        result.append(
+            sectionPacket(
+                pid: pmtPID,
+                section: Self.pmtSection(pcrPID: pcrPID, tracks: tracks),
+                discontinuity: consumeDiscontinuity(for: pmtPID)
+            )
+        )
         return result
     }
 
-    private func sectionPacket(pid: UInt16, section: Data) -> Data {
+    private func sectionPacket(pid: UInt16, section: Data, discontinuity: Bool) -> Data {
         var payload = Data([0])
         payload.append(section)
         var packet = Data([0x47, UInt8(0x40 | ((pid >> 8) & 0x1f)), UInt8(pid & 0xff)])
-        packet.append(0x10 | nextContinuity(for: pid))
+        if discontinuity {
+            packet.append(0x30 | nextContinuity(for: pid))
+            let adaptationLength = 183 - payload.count
+            packet.append(UInt8(adaptationLength))
+            packet.append(0x80)
+            if adaptationLength > 1 {
+                packet.append(Data(repeating: 0xff, count: adaptationLength - 1))
+            }
+        } else {
+            packet.append(0x10 | nextContinuity(for: pid))
+        }
         packet.append(payload)
         if packet.count < 188 { packet.append(Data(repeating: 0xff, count: 188 - packet.count)) }
         return packet
+    }
+
+    private func consumeDiscontinuity(for pid: UInt16) -> Bool {
+        pendingDiscontinuityPIDs.remove(pid) != nil
     }
 
     private func packetize(

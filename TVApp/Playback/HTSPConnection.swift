@@ -240,6 +240,7 @@ final class HTSPConnection: @unchecked Sendable {
 
     private let fileDescriptor: Int32
     private let writeLock = NSLock()
+    private let sequenceLock = NSLock()
     private var nextSequence: Int64 = 1
     private(set) var capabilities: Set<String> = []
     private(set) var negotiatedVersion: Int64 = 0
@@ -312,12 +313,7 @@ final class HTSPConnection: @unchecked Sendable {
     func subscribe(channelID: UInt32, profile: String) throws -> (Int64, [HTSPStreamInfo]) {
         let response = try request(
             method: "subscribe",
-            fields: [
-                "subscriptionId": .int(1),
-                "channelId": .int(Int64(channelID)),
-                "timeshiftPeriod": .int(Int64(UInt32.max)),
-                "profile": .string(profile),
-            ]
+            fields: Self.subscriptionFields(channelID: channelID, profile: profile)
         )
         guard let period = response["timeshiftPeriod"]?.intValue, period > 0 else {
             throw HTSPError.timeshiftUnavailable
@@ -348,21 +344,56 @@ final class HTSPConnection: @unchecked Sendable {
         }
     }
 
+    static func subscriptionFields(
+        channelID: UInt32,
+        profile: String
+    ) -> [String: HTSPValue] {
+        [
+            "subscriptionId": .int(1),
+            "channelId": .int(Int64(channelID)),
+            "timeshiftPeriod": .int(Int64(UInt32.max)),
+            "normts": .int(1),
+            "queueDepth": .int(10_000_000),
+            "profile": .string(profile),
+        ]
+    }
+
     func request(method: String, fields: [String: HTSPValue] = [:]) throws -> [String: HTSPValue] {
-        let sequence = nextSequence
-        nextSequence += 1
-        var message = fields
-        message["method"] = .string(method)
-        message["seq"] = .int(sequence)
-        try send(message)
+        let sequence = reserveSequence()
+        try sendRequest(method: method, sequence: sequence, fields: fields)
 
         while true {
             let response = try readMessage()
             guard response["seq"]?.intValue == sequence else { continue }
-            if response["noaccess"]?.intValue == 1 { throw HTSPError.authenticationFailed }
-            if let error = response["error"]?.stringValue { throw HTSPError.server(error) }
+            try Self.validate(response: response)
             return response
         }
+    }
+
+    func reserveSequence() -> Int64 {
+        sequenceLock.withLock {
+            let sequence = nextSequence
+            nextSequence += 1
+            return sequence
+        }
+    }
+
+    func sendRequest(
+        method: String,
+        sequence: Int64,
+        fields: [String: HTSPValue] = [:],
+        includesSubscriptionID: Bool = false
+    ) throws {
+        var message = fields
+        message["method"] = .string(method)
+        message["seq"] = .int(sequence)
+        if includesSubscriptionID { message["subscriptionId"] = .int(1) }
+        try send(message)
+    }
+
+    static func validate(response: [String: HTSPValue]) throws {
+        if response["noaccess"]?.intValue == 1 { throw HTSPError.authenticationFailed }
+        if let error = response["error"]?.stringValue { throw HTSPError.server(error) }
     }
 
     func sendControl(method: String, fields: [String: HTSPValue] = [:]) throws {

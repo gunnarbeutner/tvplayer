@@ -10,15 +10,28 @@ enum GuideLoadState: Equatable {
 @MainActor
 final class GuideViewModel: ObservableObject {
     @Published private(set) var now: Date
-    @Published private(set) var timeline: GuideTimeline
-    @Published private(set) var channels: [GuideChannel]
+    @Published private(set) var timeline: GuideTimeline {
+        didSet { guideRevision &+= 1 }
+    }
+    @Published private(set) var channels: [GuideChannel] {
+        didSet {
+            rebuildGuideIndexes()
+            guideRevision &+= 1
+        }
+    }
     @Published private(set) var loadState: GuideLoadState = .needsConfiguration
     @Published private(set) var hasUsableGuide = false
+
+    /// Changes only when layout-bearing guide data changes. This lets the
+    /// UIKit grid skip expensive value comparisons during unrelated updates.
+    @Published private(set) var guideRevision = 0
 
     private var lastConfiguration: TVHeadendConfiguration?
     private var lastLoadedAt: Date?
     private var activeSnapshotIdentifier: String?
     private var isLoading = false
+    private var programByID: [GuideProgram.ID: GuideProgram] = [:]
+    private var channelByID: [GuideChannel.ID: GuideChannel] = [:]
 
     private static let refreshInterval: TimeInterval = 120
 
@@ -31,6 +44,7 @@ final class GuideViewModel: ObservableObject {
         self.now = now
         self.timeline = timeline
         channels = []
+        defer { rebuildGuideIndexes() }
 
         guard let cachedSnapshot else { return }
         if let configuration, configuration.isComplete,
@@ -153,12 +167,12 @@ final class GuideViewModel: ObservableObject {
 
     func program(withID id: GuideProgram.ID?) -> GuideProgram? {
         guard let id else { return nil }
-        return channels.lazy.flatMap(\.programs).first { $0.id == id }
+        return programByID[id]
     }
 
     func channel(containing program: GuideProgram?) -> GuideChannel? {
         guard let program else { return nil }
-        return channels.first { $0.id == program.channelID }
+        return channelByID[program.channelID]
     }
 
     var firstCurrentProgram: GuideProgram? {
@@ -174,6 +188,17 @@ final class GuideViewModel: ObservableObject {
 
     var isColdLoading: Bool {
         !hasUsableGuide && loadState == .loading
+    }
+
+    private func rebuildGuideIndexes() {
+        channelByID = Dictionary(
+            channels.map { ($0.id, $0) },
+            uniquingKeysWith: { _, newest in newest }
+        )
+        programByID = Dictionary(
+            channels.lazy.flatMap(\.programs).map { ($0.id, $0) },
+            uniquingKeysWith: { _, newest in newest }
+        )
     }
 }
 
