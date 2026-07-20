@@ -1,6 +1,27 @@
 import Foundation
 import OSLog
 
+enum HTSPStreamLifecycleEvent: Equatable, Sendable {
+    case reconnecting(reason: String, attempt: Int)
+    case readyAfterRecovery
+    case terminalFailure(String)
+}
+
+struct HTSPStreamHealthSnapshot: Equatable, Sendable {
+    let isRecovering: Bool
+    let isNavigating: Bool
+    let desiredSpeed: Int32
+    let lastMuxPacketAt: Date?
+}
+
+private enum HTSPStreamFailure: LocalizedError {
+    case packetStalled
+
+    var errorDescription: String? {
+        "TVHeadend delivered no stream packets for 10 seconds."
+    }
+}
+
 final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unchecked Sendable {
     private static let maximumQueuedBytes = 8 * 1_024 * 1_024
     private static let controlResponseTimeout: TimeInterval = 5
@@ -8,11 +29,18 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
     private struct PendingControlRequest {
         let method: String
+        let connectionGeneration: Int
         let succeeded: @Sendable () -> Void
         let failed: @Sendable (Error) -> Void
     }
 
-    private let connection: HTSPConnection
+    private let configuration: TVHeadendConfiguration
+    private let channelID: UInt32
+    private let profile: String
+    private let connectionLock = NSLock()
+    private var connection: any HTSPConnectionTransport
+    private var connectionGeneration = 0
+    private let connectionFactory: HTSPConnectionFactory
     private let condition = NSCondition()
     private let processLock = NSLock()
     private let deliveryGate = HTSPTimeshiftDeliveryGate()
@@ -32,6 +60,12 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     private var currentWindow: TimeInterval = 0
     private var currentBufferStart: Date?
     private var timelineEpoch: Date?
+    private var lastMuxPacketAt: Date?
+    private var subscriptionReadyAt = Date()
+    private var recovering = false
+    private var recoveryWaitsForVideoKeyframe = false
+    private var desiredPlaybackSpeed: Int32 = 100
+    private var lifecycleHandler: (@Sendable (HTSPStreamLifecycleEvent) -> Void)?
     private var navigationCompletionHandler: (
         @Sendable (Result<HTSPNavigationResult, HTSPNavigationError>) -> Void
     )?
@@ -52,11 +86,19 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     let acceptedTimeshiftPeriod: TimeInterval
 
     private init(
-        connection: HTSPConnection,
+        configuration: TVHeadendConfiguration,
+        channelID: UInt32,
+        profile: String,
+        connection: any HTSPConnectionTransport,
+        connectionFactory: @escaping HTSPConnectionFactory,
         streams: [HTSPStreamInfo],
         acceptedTimeshiftPeriod: TimeInterval
     ) throws {
+        self.configuration = configuration
+        self.channelID = channelID
+        self.profile = profile
         self.connection = connection
+        self.connectionFactory = connectionFactory
         muxer = try MPEGTransportStreamMuxer(streams: streams)
         self.acceptedTimeshiftPeriod = acceptedTimeshiftPeriod
         super.init(data: Data())
@@ -65,21 +107,30 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     static func connect(
         configuration: TVHeadendConfiguration,
         channelID: UInt32,
-        profile: String
+        profile: String,
+        connectionFactory suppliedFactory: HTSPConnectionFactory? = nil
     ) async throws -> HTSPLiveInputStream {
         guard let host = configuration.baseURL?.host else { throw HTSPError.invalidHost }
-        let connection = try await HTSPConnection.open(host: host, port: configuration.htspPort)
-        let subscription = try await Task.detached(priority: .userInitiated) {
+        let connectionFactory: HTSPConnectionFactory = suppliedFactory ?? {
+            try HTSPConnection.openSynchronously(host: host, port: configuration.htspPort)
+        }
+        let connected = try await Task.detached(priority: .userInitiated) {
+            let connection = try connectionFactory()
             try connection.handshake(username: configuration.username, password: configuration.password)
             guard connection.capabilities.contains("timeshift") else {
                 throw HTSPError.timeshiftUnavailable
             }
-            return try connection.subscribe(channelID: channelID, profile: profile)
+            let subscription = try connection.subscribe(channelID: channelID, profile: profile)
+            return (connection, subscription)
         }.value
         let stream = try HTSPLiveInputStream(
-            connection: connection,
-            streams: subscription.1,
-            acceptedTimeshiftPeriod: TimeInterval(subscription.0)
+            configuration: configuration,
+            channelID: channelID,
+            profile: profile,
+            connection: connected.0,
+            connectionFactory: connectionFactory,
+            streams: connected.1.1,
+            acceptedTimeshiftPeriod: TimeInterval(connected.1.0)
         )
         return stream
     }
@@ -114,6 +165,24 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
     var isNavigatingTimeshift: Bool {
         !deliveryGate.shouldDeliverPackets || condition.withLock { postSeekBuffer.result != nil }
+    }
+
+    var healthSnapshot: HTSPStreamHealthSnapshot {
+        let navigating = !deliveryGate.shouldDeliverPackets
+        return condition.withLock {
+            HTSPStreamHealthSnapshot(
+                isRecovering: recovering,
+                isNavigating: navigating || postSeekBuffer.result != nil,
+                desiredSpeed: desiredPlaybackSpeed,
+                lastMuxPacketAt: lastMuxPacketAt
+            )
+        }
+    }
+
+    func setLifecycleHandler(
+        _ handler: (@Sendable (HTSPStreamLifecycleEvent) -> Void)?
+    ) {
+        condition.withLock { lifecycleHandler = handler }
     }
 
     func setNavigationCompletionHandler(
@@ -154,20 +223,29 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         receiverThread?.cancel()
         receiverThread = nil
         deliveryGate.cancelAllNavigation()
-        connection.close()
+        currentConnection().connection.close()
     }
 
     func play() {
-        guard !isNavigatingTimeshift else { return }
+        let canSend = condition.withLock {
+            desiredPlaybackSpeed = 100
+            return !recovering
+        }
+        guard canSend, !isNavigatingTimeshift else { return }
         enqueueSpeed(100)
     }
 
     func pause() {
+        let canSend = condition.withLock {
+            desiredPlaybackSpeed = 0
+            return !recovering
+        }
+        guard canSend else { return }
         enqueueSpeed(0)
     }
 
     func seek(by seconds: TimeInterval) {
-        guard seconds != 0 else { return }
+        guard seconds != 0, !condition.withLock({ recovering }) else { return }
         beginNavigation()
         controlQueue.async { [weak self] in
             guard let self else { return }
@@ -181,6 +259,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     }
 
     func returnToLive() {
+        guard !condition.withLock({ recovering }) else { return }
         beginNavigation()
         controlQueue.async { [weak self] in
             guard let self else { return }
@@ -226,26 +305,35 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     }
 
     private func receiveLoop() {
-        do {
-            while !Thread.current.isCancelled {
-                let message = try connection.readMessage()
-                try process(message)
+        while !Thread.current.isCancelled {
+            let active = currentConnection()
+            do {
+                let message = try active.connection.readMessage()
+                try process(message, connectionGeneration: active.generation)
+                if shouldRecoverForPacketStall(at: Date()) {
+                    throw HTSPStreamFailure.packetStalled
+                }
+            } catch HTSPError.readTimedOut {
+                guard shouldRecoverForPacketStall(at: Date()) else { continue }
+                guard recoverConnection(after: HTSPStreamFailure.packetStalled) else { return }
+            } catch {
+                guard !condition.withLock({ stopped }) else { return }
+                guard recoverConnection(after: error) else { return }
             }
-        } catch {
-            condition.withLock {
-                guard !stopped else { return }
-                currentError = error
-                currentStatus = .error
-                condition.broadcast()
-            }
-            logger.error("HTSP stream ended: \(error.localizedDescription, privacy: .public)")
         }
     }
 
-    private func process(_ message: [String: HTSPValue]) throws {
+    private func process(
+        _ message: [String: HTSPValue],
+        connectionGeneration: Int
+    ) throws {
         if let sequence = message["seq"]?.intValue {
             controlQueue.async { [weak self] in
-                self?.handleControlResponse(message, sequence: sequence)
+                self?.handleControlResponse(
+                    message,
+                    sequence: sequence,
+                    connectionGeneration: connectionGeneration
+                )
             }
             return
         }
@@ -264,6 +352,16 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 payload: payload
             )
             let isVideo = processLock.withLock { muxer.isVideoStream(packet.streamIndex) }
+            let recoveryAcceptsPacket = condition.withLock {
+                lastMuxPacketAt = Date()
+                guard recovering, recoveryWaitsForVideoKeyframe else { return true }
+                guard isVideo, packet.frameType == Character("I").asciiValue else {
+                    return false
+                }
+                recoveryWaitsForVideoKeyframe = false
+                return true
+            }
+            guard recoveryAcceptsPacket else { return }
             let acceptsPacket = condition.withLock {
                 postSeekBuffer.shouldAcceptPacket(
                     isVideo: isVideo,
@@ -279,6 +377,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 enqueueSpeed(100)
                 completion.handler(.success(completion.result))
             }
+            finishRecoveryAfterFirstDecodablePacketIfNeeded()
 
         case "timeshiftStatus":
             let metrics = HTSPTimeshiftMetrics.decode(from: message)
@@ -674,14 +773,20 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         succeeded: @escaping @Sendable () -> Void,
         failed: @escaping @Sendable (Error) -> Void
     ) -> Int64? {
-        let sequence = connection.reserveSequence()
+        guard !condition.withLock({ recovering }) else {
+            failed(HTSPError.disconnected)
+            return nil
+        }
+        let active = currentConnection()
+        let sequence = active.connection.reserveSequence()
         pendingControlRequests[sequence] = PendingControlRequest(
             method: method,
+            connectionGeneration: active.generation,
             succeeded: succeeded,
             failed: failed
         )
         do {
-            try connection.sendRequest(
+            try active.connection.sendRequest(
                 method: method,
                 sequence: sequence,
                 fields: fields,
@@ -689,24 +794,34 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             )
         } catch {
             pendingControlRequests.removeValue(forKey: sequence)
+            if !HTSPRecoveryPolicy.isTerminal(error) {
+                active.connection.close()
+            }
             failed(error)
             return nil
         }
 
         controlQueue.asyncAfter(deadline: .now() + Self.controlResponseTimeout) { [weak self] in
             guard let self,
-                  let request = self.pendingControlRequests.removeValue(forKey: sequence)
+                  let request = self.pendingControlRequests[sequence],
+                  request.connectionGeneration == active.generation
             else { return }
+            self.pendingControlRequests.removeValue(forKey: sequence)
             request.failed(HTSPNavigationError.timedOut)
+            active.connection.close()
         }
         return sequence
     }
 
     private func handleControlResponse(
         _ message: [String: HTSPValue],
-        sequence: Int64
+        sequence: Int64,
+        connectionGeneration: Int
     ) {
-        guard let request = pendingControlRequests.removeValue(forKey: sequence) else { return }
+        guard let request = pendingControlRequests[sequence],
+              request.connectionGeneration == connectionGeneration
+        else { return }
+        pendingControlRequests.removeValue(forKey: sequence)
         do {
             try HTSPConnection.validate(response: message)
             request.succeeded()
@@ -723,12 +838,193 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         return .controlFailed(error.localizedDescription)
     }
 
+    private func currentConnection() -> (
+        connection: any HTSPConnectionTransport,
+        generation: Int
+    ) {
+        connectionLock.withLock { (connection, connectionGeneration) }
+    }
+
+    private func shouldRecoverForPacketStall(at date: Date) -> Bool {
+        let navigating = !deliveryGate.shouldDeliverPackets
+        return condition.withLock {
+            guard !stopped else { return false }
+            let expectsPackets = recovering || (desiredPlaybackSpeed > 0 && !navigating)
+            guard expectsPackets else { return false }
+            let baseline = lastMuxPacketAt ?? subscriptionReadyAt
+            return date.timeIntervalSince(baseline) >= HTSPRecoveryPolicy.stalledPacketThreshold
+        }
+    }
+
+    private func recoverConnection(after initialError: Error) -> Bool {
+        if HTSPRecoveryPolicy.isTerminal(initialError) {
+            failStream(initialError)
+            return false
+        }
+
+        beginRecovery()
+        currentConnection().connection.close()
+        var attempt = 1
+        var reason = initialError.localizedDescription
+
+        while !Thread.current.isCancelled, !condition.withLock({ stopped }) {
+            notifyLifecycle(.reconnecting(reason: reason, attempt: attempt))
+            let delay = HTSPRecoveryPolicy.delay(beforeAttempt: attempt)
+            guard waitForRetryDelay(delay) else { return false }
+
+            do {
+                let replacement = try connectionFactory()
+                try replacement.handshake(
+                    username: configuration.username,
+                    password: configuration.password
+                )
+                guard replacement.capabilities.contains("timeshift") else {
+                    throw HTSPError.timeshiftUnavailable
+                }
+                let subscription = try replacement.subscribe(
+                    channelID: channelID,
+                    profile: profile
+                )
+                let replacementMuxer = try MPEGTransportStreamMuxer(streams: subscription.1)
+                guard !condition.withLock({ stopped }) else {
+                    replacement.close()
+                    return false
+                }
+                installReplacementConnection(replacement, muxer: replacementMuxer)
+                logger.info("Rebuilt TVHeadend subscription at the live edge")
+                return true
+            } catch {
+                if HTSPRecoveryPolicy.isTerminal(error) {
+                    failStream(error)
+                    return false
+                }
+                reason = error.localizedDescription
+                logger.error(
+                    "HTSP reconnect attempt \(attempt, privacy: .public) failed: \(reason, privacy: .public)"
+                )
+                attempt += 1
+            }
+        }
+        return false
+    }
+
+    private func beginRecovery() {
+        let wasAlreadyRecovering = condition.withLock {
+            let wasRecovering = recovering
+            recovering = true
+            recoveryWaitsForVideoKeyframe = false
+            lastMuxPacketAt = nil
+            buffer.removeAll(keepingCapacity: true)
+            readOffset = 0
+            condition.broadcast()
+            return wasRecovering
+        }
+        guard !wasAlreadyRecovering else { return }
+
+        processLock.withLock { muxer.resetAfterDiscontinuity() }
+        deliveryGate.cancelAllNavigation()
+        let navigationHandler = controlQueue.sync { () -> (
+            @Sendable (Result<HTSPNavigationResult, HTSPNavigationError>) -> Void
+        )? in
+            let hadNavigation = navigationCommandInFlight
+                || activeSeekSequence != nil
+                || condition.withLock { postSeekBuffer.result != nil }
+            navigationGeneration += 1
+            pendingControlRequests.removeAll()
+            activeSeekSequence = nil
+            seekRPCAccepted = false
+            asynchronousLandingTime = nil
+            pendingLiveCommand = false
+            navigationCommandInFlight = false
+            navigationAcceptsLiveEdge = false
+            navigationTargetsLiveEdge = false
+            seekCoordinator.fail()
+            condition.withLock { postSeekBuffer.cancel() }
+            return hadNavigation ? condition.withLock({ navigationCompletionHandler }) : nil
+        }
+        navigationHandler?(
+            .failure(.controlFailed("The TVHeadend subscription restarted at the live edge."))
+        )
+    }
+
+    private func installReplacementConnection(
+        _ replacement: any HTSPConnectionTransport,
+        muxer replacementMuxer: MPEGTransportStreamMuxer
+    ) {
+        connectionLock.withLock {
+            connection = replacement
+            connectionGeneration += 1
+        }
+        processLock.withLock { muxer = replacementMuxer }
+        let desiredSpeed = condition.withLock {
+            currentLiveDelay = 0
+            currentWindow = 0
+            currentBufferStart = nil
+            timelineEpoch = nil
+            subscriptionReadyAt = Date()
+            lastMuxPacketAt = nil
+            recoveryWaitsForVideoKeyframe = replacementMuxer.hasVideo
+            buffer.removeAll(keepingCapacity: true)
+            readOffset = 0
+            condition.broadcast()
+            return desiredPlaybackSpeed
+        }
+        controlQueue.sync {
+            speedController = HTSPSubscriptionSpeedController()
+            if desiredSpeed == 0 {
+                // Keep the new subscription moving until one decodable packet
+                // is available. finishRecovery... reapplies the viewer's pause.
+                speedController.expectServerSpeed(100)
+            }
+        }
+    }
+
+    private func finishRecoveryAfterFirstDecodablePacketIfNeeded() {
+        let completion = condition.withLock { () -> (
+            handler: (@Sendable (HTSPStreamLifecycleEvent) -> Void)?,
+            desiredSpeed: Int32
+        )? in
+            guard recovering, !recoveryWaitsForVideoKeyframe else { return nil }
+            recovering = false
+            subscriptionReadyAt = Date()
+            return (lifecycleHandler, desiredPlaybackSpeed)
+        }
+        guard let completion else { return }
+        controlQueue.async { [weak self] in
+            guard let self else { return }
+            self.speedController = HTSPSubscriptionSpeedController()
+            self.requestSpeed(completion.desiredSpeed)
+        }
+        completion.handler?(.readyAfterRecovery)
+    }
+
+    private func waitForRetryDelay(_ delay: TimeInterval) -> Bool {
+        guard delay > 0 else { return !condition.withLock({ stopped }) }
+        condition.lock()
+        if !stopped {
+            _ = condition.wait(until: Date().addingTimeInterval(delay))
+        }
+        let shouldContinue = !stopped
+        condition.unlock()
+        return shouldContinue
+    }
+
+    private func notifyLifecycle(_ event: HTSPStreamLifecycleEvent) {
+        let handler = condition.withLock { lifecycleHandler }
+        handler?(event)
+    }
+
     private func failStream(_ error: Error) {
-        condition.withLock {
-            guard !stopped else { return }
+        let handler = condition.withLock { () -> (
+            @Sendable (HTSPStreamLifecycleEvent) -> Void
+        )? in
+            guard !stopped else { return nil }
             currentError = error
             currentStatus = .error
             condition.broadcast()
+            return lifecycleHandler
         }
+        handler?(.terminalFailure(error.localizedDescription))
+        logger.error("HTSP stream ended: \(error.localizedDescription, privacy: .public)")
     }
 }

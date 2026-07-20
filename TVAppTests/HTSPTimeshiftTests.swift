@@ -166,6 +166,74 @@ final class HTSPTimeshiftTests: XCTestCase {
         XCTAssertNil(DiscoveredTVHeadendSettings(fields: invalidFields))
     }
 
+    func testDroppedSubscriptionReconnectsWithoutClosingTheInputStream() async throws {
+        let streams = [
+            HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil),
+        ]
+        let first = ScriptedHTSPConnection(
+            streams: streams,
+            reads: [.failure(.disconnected)]
+        )
+        let second = ScriptedHTSPConnection(
+            streams: streams,
+            reads: [
+                .message([
+                    "method": .string("muxpkt"),
+                    "stream": .int(1),
+                    "frametype": .int(73),
+                    "pts": .int(1_000_000),
+                    "dts": .int(1_000_000),
+                    "payload": .data(Data([0, 0, 0, 1, 0x65, 0x88, 0x84])),
+                ]),
+            ]
+        )
+        let factory = ScriptedHTSPConnectionFactory([first, second])
+        let configuration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://tvheadend.local:9981"),
+            username: "viewer",
+            password: "secret",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil
+        )
+        let stream = try await HTSPLiveInputStream.connect(
+            configuration: configuration,
+            channelID: 42,
+            profile: "pass",
+            connectionFactory: { try factory.makeConnection() }
+        )
+        let events = LockedLifecycleEvents()
+        let recovered = expectation(description: "replacement subscription became readable")
+        stream.setLifecycleHandler { event in
+            events.append(event)
+            if event == .readyAfterRecovery { recovered.fulfill() }
+        }
+
+        // A paused viewer still needs one decodable packet from the replacement
+        // subscription before the server-side pause is restored.
+        stream.pause()
+        stream.open()
+        await fulfillment(of: [recovered], timeout: 2)
+
+        XCTAssertEqual(stream.streamStatus.rawValue, Stream.Status.open.rawValue)
+        XCTAssertNil(stream.streamError)
+        XCTAssertFalse(stream.healthSnapshot.isRecovering)
+        XCTAssertEqual(stream.healthSnapshot.desiredSpeed, 0)
+        XCTAssertTrue(
+            events.values.contains {
+                if case .reconnecting(_, attempt: 1) = $0 { return true }
+                return false
+            }
+        )
+
+        for _ in 0..<100 where !second.requestedSpeeds.contains(0) {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(second.requestedSpeeds.contains(0))
+        XCTAssertEqual(factory.connectionCount, 2)
+        stream.close()
+    }
+
     private func firstPacketHasDiscontinuity(pid: UInt16, in data: Data) -> Bool {
         for offset in stride(from: 0, to: data.count, by: 188) {
             guard offset + 188 <= data.count, data[offset] == 0x47 else { continue }
@@ -176,5 +244,113 @@ final class HTSPTimeshiftTests: XCTestCase {
             return adaptationLength > 0 && data[offset + 5] & 0x80 != 0
         }
         return false
+    }
+}
+
+private enum ScriptedHTSPRead: Sendable {
+    case message([String: HTSPValue])
+    case failure(HTSPError)
+}
+
+private final class ScriptedHTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
+    let capabilities: Set<String> = ["timeshift"]
+
+    private let condition = NSCondition()
+    private let streams: [HTSPStreamInfo]
+    private var reads: [ScriptedHTSPRead]
+    private var closed = false
+    private var nextSequence: Int64 = 1
+    private var speeds: [Int32] = []
+
+    init(streams: [HTSPStreamInfo], reads: [ScriptedHTSPRead]) {
+        self.streams = streams
+        self.reads = reads
+    }
+
+    var requestedSpeeds: [Int32] {
+        condition.withLock { speeds }
+    }
+
+    func handshake(username: String, password: String) throws {}
+
+    func subscribe(channelID: UInt32, profile: String) throws -> (Int64, [HTSPStreamInfo]) {
+        (Int64(UInt32.max), streams)
+    }
+
+    func reserveSequence() -> Int64 {
+        condition.withLock {
+            defer { nextSequence += 1 }
+            return nextSequence
+        }
+    }
+
+    func sendRequest(
+        method: String,
+        sequence: Int64,
+        fields: [String: HTSPValue],
+        includesSubscriptionID: Bool
+    ) throws {
+        condition.withLock {
+            if method == "subscriptionSpeed", let speed = fields["speed"]?.intValue {
+                speeds.append(Int32(clamping: speed))
+            }
+        }
+    }
+
+    func readMessage() throws -> [String: HTSPValue] {
+        condition.lock()
+        while reads.isEmpty, !closed { condition.wait() }
+        guard !closed else {
+            condition.unlock()
+            throw HTSPError.disconnected
+        }
+        let read = reads.removeFirst()
+        condition.unlock()
+        switch read {
+        case let .message(message): return message
+        case let .failure(error): throw error
+        }
+    }
+
+    func close() {
+        condition.withLock {
+            closed = true
+            condition.broadcast()
+        }
+    }
+}
+
+private final class ScriptedHTSPConnectionFactory: @unchecked Sendable {
+    private let lock = NSLock()
+    private var connections: [ScriptedHTSPConnection]
+    private var madeConnectionCount = 0
+
+    init(_ connections: [ScriptedHTSPConnection]) {
+        self.connections = connections
+    }
+
+    var connectionCount: Int {
+        lock.withLock { madeConnectionCount }
+    }
+
+    func makeConnection() throws -> any HTSPConnectionTransport {
+        try lock.withLock {
+            guard !connections.isEmpty else { throw HTSPError.disconnected }
+            madeConnectionCount += 1
+            return connections.removeFirst()
+        }
+    }
+}
+
+private final class LockedLifecycleEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [HTSPStreamLifecycleEvent] = []
+
+    var values: [HTSPStreamLifecycleEvent] {
+        lock.withLock { events }
+    }
+
+    func append(_ event: HTSPStreamLifecycleEvent) {
+        lock.withLock { events.append(event) }
     }
 }

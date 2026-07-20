@@ -90,6 +90,188 @@ final class TimeshiftActionTests: XCTestCase {
         XCTAssertEqual(sink.commands, [.pause, .returnToLive])
     }
 
+    func testKodiRecoveryScheduleRetriesImmediatelyThenBacksOff() {
+        XCTAssertEqual(HTSPRecoveryPolicy.delay(beforeAttempt: 1), 0)
+        for attempt in 2...6 {
+            XCTAssertEqual(
+                HTSPRecoveryPolicy.delay(beforeAttempt: attempt),
+                HTSPRecoveryPolicy.fastRetryDelay
+            )
+        }
+        XCTAssertEqual(
+            HTSPRecoveryPolicy.delay(beforeAttempt: 7),
+            HTSPRecoveryPolicy.slowRetryDelay
+        )
+        XCTAssertEqual(
+            HTSPRecoveryPolicy.delay(beforeAttempt: 100),
+            HTSPRecoveryPolicy.slowRetryDelay
+        )
+    }
+
+    func testRecoveryPolicyOnlyStopsForConfigurationAndCapabilityFailures() {
+        XCTAssertTrue(HTSPRecoveryPolicy.isTerminal(HTSPError.authenticationFailed))
+        XCTAssertTrue(HTSPRecoveryPolicy.isTerminal(HTSPError.streamingUnavailable))
+        XCTAssertTrue(HTSPRecoveryPolicy.isTerminal(HTSPError.timeshiftUnavailable))
+        XCTAssertTrue(HTSPRecoveryPolicy.isTerminal(HTSPError.unsupportedStream))
+        XCTAssertFalse(HTSPRecoveryPolicy.isTerminal(HTSPError.disconnected))
+        XCTAssertFalse(HTSPRecoveryPolicy.isTerminal(HTSPError.readTimedOut))
+        XCTAssertFalse(
+            HTSPRecoveryPolicy.isTerminal(HTSPError.connectionFailed("reset"))
+        )
+        XCTAssertFalse(HTSPRecoveryPolicy.isTerminal(HTSPError.server("temporary")))
+    }
+
+    func testOutputWatchdogRebuildsWhenFreshInputHasNoOutputForTenSeconds() {
+        var monitor = PlaybackOutputHealthMonitor()
+        let start = Date(timeIntervalSinceReferenceDate: 10_000)
+        let output = PlaybackOutputCounters(displayedPictures: 20, playedAudioBuffers: 30)
+
+        XCTAssertEqual(
+            monitor.observe(
+                output: output,
+                at: start,
+                expectsOutput: true,
+                hasFreshInput: true
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            monitor.observe(
+                output: output,
+                at: start.addingTimeInterval(9.9),
+                expectsOutput: true,
+                hasFreshInput: true
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            monitor.observe(
+                output: output,
+                at: start.addingTimeInterval(10),
+                expectsOutput: true,
+                hasFreshInput: true
+            ),
+            .rebuildPlayer
+        )
+    }
+
+    func testOutputWatchdogIsSuppressedWhilePausedNavigatingOrInputIsStalled() {
+        var monitor = PlaybackOutputHealthMonitor()
+        let start = Date(timeIntervalSinceReferenceDate: 10_000)
+        let output = PlaybackOutputCounters(displayedPictures: 20, playedAudioBuffers: 30)
+
+        monitor.restartGracePeriod(output: output, at: start)
+        XCTAssertEqual(
+            monitor.observe(
+                output: output,
+                at: start.addingTimeInterval(30),
+                expectsOutput: false,
+                hasFreshInput: true
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            monitor.observe(
+                output: output,
+                at: start.addingTimeInterval(60),
+                expectsOutput: true,
+                hasFreshInput: false
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            monitor.observe(
+                output: output,
+                at: start.addingTimeInterval(69),
+                expectsOutput: true,
+                hasFreshInput: true
+            ),
+            .none
+        )
+    }
+
+    func testOutputProgressRestartsTheWatchdogGracePeriod() {
+        var monitor = PlaybackOutputHealthMonitor()
+        let start = Date(timeIntervalSinceReferenceDate: 10_000)
+        let initial = PlaybackOutputCounters(displayedPictures: 20, playedAudioBuffers: 30)
+        let advanced = PlaybackOutputCounters(displayedPictures: 21, playedAudioBuffers: 30)
+
+        monitor.restartGracePeriod(output: initial, at: start)
+        XCTAssertEqual(
+            monitor.observe(
+                output: advanced,
+                at: start.addingTimeInterval(9),
+                expectsOutput: true,
+                hasFreshInput: true
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            monitor.observe(
+                output: advanced,
+                at: start.addingTimeInterval(18),
+                expectsOutput: true,
+                hasFreshInput: true
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            monitor.observe(
+                output: advanced,
+                at: start.addingTimeInterval(19),
+                expectsOutput: true,
+                hasFreshInput: true
+            ),
+            .rebuildPlayer
+        )
+    }
+
+    func testOutputWatchdogRequestsOnlyOneRecoveryUntilProgressResumes() {
+        var monitor = PlaybackOutputHealthMonitor()
+        let start = Date(timeIntervalSinceReferenceDate: 10_000)
+        let stalled = PlaybackOutputCounters(displayedPictures: 20, playedAudioBuffers: 30)
+
+        monitor.restartGracePeriod(output: stalled, at: start)
+        XCTAssertEqual(
+            monitor.observe(
+                output: stalled,
+                at: start.addingTimeInterval(10),
+                expectsOutput: true,
+                hasFreshInput: true
+            ),
+            .rebuildPlayer
+        )
+        XCTAssertEqual(
+            monitor.observe(
+                output: stalled,
+                at: start.addingTimeInterval(30),
+                expectsOutput: true,
+                hasFreshInput: true
+            ),
+            .none
+        )
+
+        let resumed = PlaybackOutputCounters(displayedPictures: 21, playedAudioBuffers: 30)
+        XCTAssertEqual(
+            monitor.observe(
+                output: resumed,
+                at: start.addingTimeInterval(31),
+                expectsOutput: true,
+                hasFreshInput: true
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            monitor.observe(
+                output: resumed,
+                at: start.addingTimeInterval(41),
+                expectsOutput: true,
+                hasFreshInput: true
+            ),
+            .rebuildPlayer
+        )
+    }
+
     func testNativeTimeshiftIsSeekableBeforeFirstStatusUpdate() {
         XCTAssertTrue(
             PlaybackCapabilityPolicy.isSeekable(
@@ -159,6 +341,24 @@ final class TimeshiftActionTests: XCTestCase {
 
         XCTAssertEqual(firstUpdate, pauseTime.addingTimeInterval(-7.4))
         XCTAssertEqual(secondUpdate, firstUpdate)
+    }
+
+    func testRecoveryMovesTheMarkerOnceToTheNewLiveEdgeAndKeepsItFrozen() {
+        var tracker = LivePlaybackPositionTracker()
+        let originalPause = Date(timeIntervalSinceReferenceDate: 10_000)
+        let recoveredLiveEdge = originalPause.addingTimeInterval(30)
+        tracker.pause(at: originalPause, liveDelay: 5, bufferStartedAt: nil)
+
+        tracker.recoverAtLiveEdge(recoveredLiveEdge)
+
+        XCTAssertEqual(
+            tracker.playbackDate(
+                at: recoveredLiveEdge.addingTimeInterval(60),
+                liveDelay: 60,
+                bufferStartedAt: nil
+            ),
+            recoveredLiveEdge
+        )
     }
 
     func testRepeatedPauseKeepsTheOriginalPlaybackDate() {

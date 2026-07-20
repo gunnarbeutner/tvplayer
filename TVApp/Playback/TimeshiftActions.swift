@@ -66,6 +66,36 @@ struct NativeTimeshiftActionPlan: Equatable {
     }
 }
 
+enum HTSPRecoveryPolicy {
+    static let stalledPacketThreshold: TimeInterval = 10
+    static let fastRetryDelay: TimeInterval = 0.5
+    static let slowRetryDelay: TimeInterval = 10
+    static let fastRetryCount = 5
+
+    /// The first replacement connection is attempted immediately. As in
+    /// Kodi, failed connection attempts are retried quickly five times before
+    /// settling into a slower, unbounded retry loop.
+    static func delay(beforeAttempt attempt: Int) -> TimeInterval {
+        guard attempt > 1 else { return 0 }
+        return attempt <= fastRetryCount + 1 ? fastRetryDelay : slowRetryDelay
+    }
+
+    static func isTerminal(_ error: Error) -> Bool {
+        guard let error = error as? HTSPError else { return false }
+        switch error {
+        case .invalidHost,
+             .authenticationFailed,
+             .streamingUnavailable,
+             .timeshiftUnavailable,
+             .channelUnavailable,
+             .unsupportedStream:
+            return true
+        case .connectionFailed, .disconnected, .readTimedOut, .server:
+            return false
+        }
+    }
+}
+
 enum NativeTimeshiftLocalPlaybackEffect: Equatable {
     case none
     case pause
@@ -142,6 +172,66 @@ struct PlaybackOutputCounters: Equatable {
     }
 }
 
+enum PlaybackHealthAction: Equatable {
+    case none
+    case rebuildPlayer
+}
+
+struct PlaybackOutputHealthMonitor {
+    static let stalledOutputThreshold: TimeInterval = 10
+
+    private var previousOutput: PlaybackOutputCounters?
+    private var lastProgressDate: Date?
+    private var hasRequestedRecovery = false
+
+    mutating func observe(
+        output: PlaybackOutputCounters,
+        at date: Date,
+        expectsOutput: Bool,
+        hasFreshInput: Bool
+    ) -> PlaybackHealthAction {
+        guard expectsOutput, hasFreshInput else {
+            restartGracePeriod(output: output, at: date)
+            return .none
+        }
+
+        guard let previousOutput else {
+            restartGracePeriod(output: output, at: date)
+            return .none
+        }
+
+        self.previousOutput = output
+        if output.hasAdvanced(since: previousOutput) {
+            lastProgressDate = date
+            hasRequestedRecovery = false
+            return .none
+        }
+
+        guard !hasRequestedRecovery,
+              date.timeIntervalSince(lastProgressDate ?? date)
+                >= Self.stalledOutputThreshold
+        else { return .none }
+
+        hasRequestedRecovery = true
+        return .rebuildPlayer
+    }
+
+    mutating func restartGracePeriod(
+        output: PlaybackOutputCounters,
+        at date: Date
+    ) {
+        previousOutput = output
+        lastProgressDate = date
+        hasRequestedRecovery = false
+    }
+
+    mutating func reset() {
+        previousOutput = nil
+        lastProgressDate = nil
+        hasRequestedRecovery = false
+    }
+}
+
 struct LivePlaybackPositionTracker {
     private var pausedDate: Date?
     private var lastResumeOutput: PlaybackOutputCounters?
@@ -204,6 +294,14 @@ struct LivePlaybackPositionTracker {
 
     mutating func moveAnchorToLive(at liveEdge: Date) {
         guard pausedDate != nil else { return }
+        pausedDate = liveEdge
+        lastResumeOutput = nil
+        lastOutputObservationDate = nil
+        highestPlaybackTimeMilliseconds = nil
+        awaitingPlaybackProgress = false
+    }
+
+    mutating func recoverAtLiveEdge(_ liveEdge: Date) {
         pausedDate = liveEdge
         lastResumeOutput = nil
         lastOutputObservationDate = nil

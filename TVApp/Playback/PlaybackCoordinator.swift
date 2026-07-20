@@ -37,7 +37,7 @@ final class PlaybackCoordinator: ObservableObject {
         switch engine.state {
         case .idle, .failed:
             sessionCanResume = false
-        case .preparing, .playing, .paused:
+        case .preparing, .playing, .paused, .recovering:
             sessionCanResume = true
         }
 
@@ -181,7 +181,7 @@ final class PlaybackCoordinator: ObservableObject {
         let sessionCanResume: Bool
         switch engine.state {
         case .idle, .failed: sessionCanResume = false
-        case .preparing, .playing, .paused: sessionCanResume = true
+        case .preparing, .playing, .paused, .recovering: sessionCanResume = true
         }
 
         if presentation?.recording?.id == recording.id, sessionCanResume {

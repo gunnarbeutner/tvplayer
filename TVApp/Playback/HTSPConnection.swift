@@ -202,10 +202,11 @@ enum HTSPMessageCodec {
     }
 }
 
-enum HTSPError: LocalizedError {
+enum HTSPError: LocalizedError, Sendable {
     case invalidHost
     case connectionFailed(String)
     case disconnected
+    case readTimedOut
     case authenticationFailed
     case streamingUnavailable
     case timeshiftUnavailable
@@ -218,6 +219,7 @@ enum HTSPError: LocalizedError {
         case .invalidHost: "The TVHeadend server URL has no HTSP host."
         case let .connectionFailed(message): "HTSP connection failed: \(message)"
         case .disconnected: "The HTSP connection closed unexpectedly."
+        case .readTimedOut: "The HTSP connection did not deliver a message in time."
         case .authenticationFailed: "TVHeadend rejected HTSP authentication."
         case .streamingUnavailable: "This account does not have HTSP streaming permission."
         case .timeshiftUnavailable: "TVHeadend did not enable timeshift for this stream."
@@ -235,7 +237,25 @@ struct HTSPStreamInfo: Equatable, Sendable {
     let metadata: Data?
 }
 
-final class HTSPConnection: @unchecked Sendable {
+protocol HTSPConnectionTransport: AnyObject, Sendable {
+    var capabilities: Set<String> { get }
+
+    func handshake(username: String, password: String) throws
+    func subscribe(channelID: UInt32, profile: String) throws -> (Int64, [HTSPStreamInfo])
+    func reserveSequence() -> Int64
+    func sendRequest(
+        method: String,
+        sequence: Int64,
+        fields: [String: HTSPValue],
+        includesSubscriptionID: Bool
+    ) throws
+    func readMessage() throws -> [String: HTSPValue]
+    func close()
+}
+
+typealias HTSPConnectionFactory = @Sendable () throws -> any HTSPConnectionTransport
+
+final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
     static let protocolVersion: Int64 = 44
 
     private let fileDescriptor: Int32
@@ -266,8 +286,12 @@ final class HTSPConnection: @unchecked Sendable {
 
     static func open(host: String, port: Int) async throws -> HTSPConnection {
         try await Task.detached(priority: .userInitiated) {
-            HTSPConnection(fileDescriptor: try connectSocket(host: host, port: port))
+            try openSynchronously(host: host, port: port)
         }.value
+    }
+
+    static func openSynchronously(host: String, port: Int) throws -> HTSPConnection {
+        HTSPConnection(fileDescriptor: try connectSocket(host: host, port: port))
     }
 
     func handshake(username: String, password: String) throws {
@@ -451,6 +475,9 @@ final class HTSPConnection: @unchecked Sendable {
                 )
                 if result < 0 {
                     if errno == EINTR { continue }
+                    if offset == 0, errno == EAGAIN || errno == EWOULDBLOCK {
+                        throw HTSPError.readTimedOut
+                    }
                     throw HTSPError.connectionFailed(String(cString: strerror(errno)))
                 }
                 if result == 0 { throw HTSPError.disconnected }

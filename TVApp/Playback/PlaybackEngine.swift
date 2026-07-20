@@ -9,7 +9,20 @@ enum PlaybackState: Equatable {
     case preparing
     case playing
     case paused
+    case recovering(PlaybackRecoveryReason, attempt: Int)
     case failed(String)
+}
+
+enum PlaybackRecoveryReason: Equatable {
+    case tvHeadend
+    case player
+
+    var message: String {
+        switch self {
+        case .tvHeadend: "Reconnecting to TVHeadend…"
+        case .player: "Restarting video playback…"
+        }
+    }
 }
 
 struct LiveStreamRequest: Equatable {
@@ -110,6 +123,12 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     private var nativeInputStream: HTSPLiveInputStream?
     private var nativeTimeshiftActions: NativeTimeshiftActionController?
     private var nativeTimeshiftSessionID: UUID?
+    private var pipelineRecoveryTask: Task<Void, Never>?
+    private var pipelineRecoveryID: UUID?
+    private var recoveryReason: PlaybackRecoveryReason?
+    private var recoveryAttempt = 0
+    private var outputHealthMonitor = PlaybackOutputHealthMonitor()
+    private var navigationShouldResume = true
     private var pauseRequested = false
     private var livePlaybackPosition = LivePlaybackPositionTracker()
     private var lastMetricsUpdate = Date()
@@ -124,6 +143,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     }
 
     func prepare(_ request: LiveStreamRequest) async throws {
+        pipelineRecoveryTask?.cancel()
+        pipelineRecoveryTask = nil
+        pipelineRecoveryID = nil
+        recoveryReason = nil
+        recoveryAttempt = 0
         setState(.preparing)
         logger.info("Preparing stream from \(request.url.host ?? "unknown host", privacy: .public)")
 
@@ -151,21 +175,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
                     nativeTimeshiftActions = NativeTimeshiftActionController(sink: stream)
                     let sessionID = UUID()
                     nativeTimeshiftSessionID = sessionID
-                    stream.setNavigationCompletionHandler { [weak self] result in
-                        Task { @MainActor [weak self] in
-                            guard let self, self.nativeTimeshiftSessionID == sessionID else { return }
-                            switch result {
-                            case let .success(navigation):
-                                self.applyNavigationLanding(navigation)
-                                self.resumeLocalPlaybackAfterTimeshiftNavigation()
-                            case let .failure(error):
-                                self.logger.error(
-                                    "Timeshift navigation failed; resuming the previous position: \(error.localizedDescription, privacy: .public)"
-                                )
-                                self.resumeLocalPlaybackAfterTimeshiftNavigation()
-                            }
-                        }
-                    }
+                    configureNativeCallbacks(for: stream, sessionID: sessionID)
                     activeLivePlaybackMode = .tvHeadend
                     logger.info("Using TVHeadend native timeshift over HTSP")
                 } catch {
@@ -180,9 +190,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         case .recording:
             media = VLCMedia(url: request.url)
         }
-        media.addOption(":network-caching=\(request.networkCachingMilliseconds)")
-        media.addOption(":live-caching=\(request.networkCachingMilliseconds)")
-        media.addOption(":file-caching=\(request.networkCachingMilliseconds)")
+        addCachingOptions(to: media, milliseconds: request.networkCachingMilliseconds)
 
         activeRequest = request
         activeProfile = request.profile
@@ -215,6 +223,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     func play() {
         guard nativeInputStream?.isNavigatingTimeshift != true else {
             logger.info("Playback remains paused until TVHeadend completes the timeshift seek")
+            navigationShouldResume = true
             pauseRequested = true
             setState(.paused)
             return
@@ -233,16 +242,24 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         publishLivePlaybackMarker()
         _ = nativeTimeshiftActions?.perform(.play)
         mediaPlayer.play()
-        setState(waitsForPlaybackProgress || !wasPaused ? .preparing : .playing)
+        if let recoveryReason {
+            setState(.recovering(recoveryReason, attempt: recoveryAttempt))
+        } else {
+            setState(waitsForPlaybackProgress || !wasPaused ? .preparing : .playing)
+        }
         lastMetricsUpdate = Date()
     }
 
     func pause() {
-        if activeRequest?.kind.isLive == true, nativeInputStream == nil {
+        if activeRequest?.kind.isLive == true,
+           case .liveOnly = activeLivePlaybackMode {
             logger.info("Pause ignored for a live-only HTTP stream")
             return
         }
         anchorLivePlaybackPositionIfNeeded()
+        if nativeInputStream?.isNavigatingTimeshift == true {
+            navigationShouldResume = false
+        }
         pauseRequested = true
         mediaPlayer.rate = 1
         playbackRate = 1
@@ -253,11 +270,20 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         } else {
             logger.info("Paused TVHeadend timeshift subscription")
         }
-        setState(.paused)
+        if let recoveryReason {
+            setState(.recovering(recoveryReason, attempt: recoveryAttempt))
+        } else {
+            setState(.paused)
+        }
         refreshPlaybackInformation()
     }
 
     func stop() {
+        pipelineRecoveryTask?.cancel()
+        pipelineRecoveryTask = nil
+        pipelineRecoveryID = nil
+        recoveryReason = nil
+        recoveryAttempt = 0
         mediaPlayer.stop()
         mediaPlayer.drawable = nil
         nativeInputStream?.close()
@@ -293,8 +319,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     /// Returns true when the caller should reconnect at the live edge.
     func skipForward(by seconds: TimeInterval) -> Bool {
         refreshPlaybackInformation()
+        guard recoveryReason == nil else { return false }
 
         if let nativeTimeshiftActions {
+            rememberNavigationPlaybackIntent()
             nativeTimeshiftActions.perform(
                 .skipForward(seconds, liveDelay: liveDelaySeconds),
                 beforeServerCommands: { [self] effect in
@@ -314,7 +342,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
 
     func skipBackward(by seconds: TimeInterval) {
         refreshPlaybackInformation()
+        guard recoveryReason == nil else { return }
         if let nativeTimeshiftActions {
+            rememberNavigationPlaybackIntent()
             nativeTimeshiftActions.perform(
                 .skipBackward(seconds),
                 beforeServerCommands: { [self] effect in
@@ -337,7 +367,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
     }
 
     func returnToLive() {
-        guard let nativeTimeshiftActions else { return }
+        guard recoveryReason == nil, let nativeTimeshiftActions else { return }
+        rememberNavigationPlaybackIntent()
         nativeTimeshiftActions.perform(
             .returnToLive,
             beforeServerCommands: { [self] effect in
@@ -385,16 +416,21 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         }
         confirmPlaybackResumeIfOutputAdvanced(at: date)
         publishLivePlaybackMarker(at: date)
+        monitorPlaybackHealth(at: date)
 
+        let hasNativeTimeshiftSession = activeLivePlaybackMode == .tvHeadend
+        let nativeTimeshiftIsReady = hasNativeTimeshiftSession
+            && recoveryReason == nil
+            && (nativeInputStream.map { !$0.healthSnapshot.isRecovering } ?? false)
         let updatedSeekable = PlaybackCapabilityPolicy.isSeekable(
             isLive: isLive,
-            hasNativeTimeshift: nativeInputStream != nil,
+            hasNativeTimeshift: nativeTimeshiftIsReady,
             mediaIsSeekable: mediaPlayer.isSeekable
         )
         if isSeekable != updatedSeekable { isSeekable = updatedSeekable }
         let updatedCanPause = PlaybackCapabilityPolicy.canPause(
             isLive: isLive,
-            hasNativeTimeshift: nativeInputStream != nil,
+            hasNativeTimeshift: hasNativeTimeshiftSession,
             mediaCanPause: mediaPlayer.canPause
         )
         if canPause != updatedCanPause { canPause = updatedCanPause }
@@ -469,6 +505,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         case .opening, .buffering:
             if pauseRequested {
                 setState(.paused)
+            } else if let recoveryReason {
+                setState(.recovering(recoveryReason, attempt: recoveryAttempt))
             } else if livePlaybackPosition.isAwaitingPlaybackProgress {
                 setState(.preparing)
             } else {
@@ -476,19 +514,36 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
             }
         case .playing, .esAdded:
             hasStartedPlayback = true
-            setState(
-                pauseRequested
-                    ? .paused
-                    : (livePlaybackPosition.isAwaitingPlaybackProgress ? .preparing : .playing)
-            )
+            if pauseRequested {
+                setState(.paused)
+            } else if let recoveryReason {
+                setState(.recovering(recoveryReason, attempt: recoveryAttempt))
+            } else {
+                setState(livePlaybackPosition.isAwaitingPlaybackProgress ? .preparing : .playing)
+            }
         case .paused:
             anchorLivePlaybackPositionIfNeeded()
-            setState(.paused)
+            if let recoveryReason {
+                setState(.recovering(recoveryReason, attempt: recoveryAttempt))
+            } else {
+                setState(.paused)
+            }
         case .error:
             let detail = VLCLibrary.currentErrorMessage
             logger.error("VLC playback failed: \(detail ?? "No additional error was reported", privacy: .public)")
-            setState(.failed(detail ?? "VLC could not play this TVHeadend stream."))
+            if let streamError = nativeInputStream?.streamError {
+                recoveryReason = nil
+                recoveryAttempt = 0
+                setState(.failed(streamError.localizedDescription))
+            } else if nativeInputStream != nil, activeRequest?.kind.isLive == true {
+                scheduleNativePipelineRecovery(
+                    detail: detail ?? "VLC reported a playback error."
+                )
+            } else {
+                setState(.failed(detail ?? "VLC could not play this TVHeadend stream."))
+            }
         case .stopped, .ended:
+            guard recoveryReason == nil, pipelineRecoveryTask == nil else { break }
             hasStartedPlayback = false
             pauseRequested = false
             livePlaybackPosition.reset()
@@ -504,8 +559,244 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         state = updatedState
     }
 
+    private func configureNativeCallbacks(
+        for stream: HTSPLiveInputStream,
+        sessionID: UUID
+    ) {
+        stream.setNavigationCompletionHandler { [weak self] result in
+            Task { @MainActor [weak self] in
+                guard let self, self.nativeTimeshiftSessionID == sessionID else { return }
+                if case let .success(navigation) = result {
+                    self.applyNavigationLanding(navigation)
+                } else if case let .failure(error) = result {
+                    self.logger.error(
+                        "Timeshift navigation failed: \(error.localizedDescription, privacy: .public)"
+                    )
+                }
+
+                if self.navigationShouldResume {
+                    self.resumeLocalPlaybackAfterTimeshiftNavigation()
+                } else {
+                    self.pauseRequested = true
+                    self.nativeInputStream?.pause()
+                    self.mediaPlayer.pause()
+                    self.setState(.paused)
+                    self.publishLivePlaybackMarker()
+                }
+                self.navigationShouldResume = true
+            }
+        }
+        stream.setLifecycleHandler { [weak self] event in
+            Task { @MainActor [weak self] in
+                guard let self, self.nativeTimeshiftSessionID == sessionID else { return }
+                self.handleNativeLifecycleEvent(event)
+            }
+        }
+    }
+
+    private func rememberNavigationPlaybackIntent() {
+        guard nativeInputStream?.isNavigatingTimeshift != true else { return }
+        navigationShouldResume = !pauseRequested
+    }
+
+    private func handleNativeLifecycleEvent(_ event: HTSPStreamLifecycleEvent) {
+        switch event {
+        case let .reconnecting(reason, attempt):
+            logger.error(
+                "Recovering TVHeadend stream (attempt \(attempt, privacy: .public)): \(reason, privacy: .public)"
+            )
+            anchorLivePlaybackPositionIfNeeded()
+            publishLivePlaybackMarker()
+            recoveryReason = .tvHeadend
+            recoveryAttempt = attempt
+            isSeekable = false
+            mediaPlayer.pause()
+            outputHealthMonitor.restartGracePeriod(
+                output: playbackOutputCounters,
+                at: Date()
+            )
+            setState(.recovering(.tvHeadend, attempt: attempt))
+
+        case .readyAfterRecovery:
+            let now = Date()
+            livePlaybackPosition.recoverAtLiveEdge(now)
+            publishLivePlaybackMarker(at: now)
+            outputHealthMonitor.restartGracePeriod(
+                output: playbackOutputCounters,
+                at: now
+            )
+            isSeekable = true
+            if pauseRequested {
+                nativeInputStream?.pause()
+                recoveryReason = nil
+                recoveryAttempt = 0
+                setState(.paused)
+            } else {
+                _ = livePlaybackPosition.requestResume(from: playbackOutputCounters)
+                mediaPlayer.play()
+                setState(.recovering(.tvHeadend, attempt: recoveryAttempt))
+            }
+
+        case let .terminalFailure(message):
+            recoveryReason = nil
+            recoveryAttempt = 0
+            setState(.failed(message))
+        }
+    }
+
+    private func monitorPlaybackHealth(at date: Date) {
+        guard let stream = nativeInputStream else {
+            outputHealthMonitor.reset()
+            return
+        }
+        let health = stream.healthSnapshot
+        let hasFreshInput = health.lastMuxPacketAt.map {
+            date.timeIntervalSince($0) < HTSPRecoveryPolicy.stalledPacketThreshold
+        } ?? false
+        let expectsOutput = !pauseRequested
+            && !health.isRecovering
+            && !health.isNavigating
+            && pipelineRecoveryTask == nil
+        guard outputHealthMonitor.observe(
+            output: playbackOutputCounters,
+            at: date,
+            expectsOutput: expectsOutput,
+            hasFreshInput: hasFreshInput
+        ) == .rebuildPlayer else { return }
+
+        scheduleNativePipelineRecovery(
+            detail: "HTSP packets are arriving but VLC output has not advanced for 10 seconds."
+        )
+    }
+
+    private func scheduleNativePipelineRecovery(detail: String) {
+        guard pipelineRecoveryTask == nil,
+              let request = activeRequest,
+              case .live(.nativeTimeshift) = request.kind
+        else { return }
+
+        logger.error("Restarting stalled VLC pipeline: \(detail, privacy: .public)")
+        anchorLivePlaybackPositionIfNeeded()
+        publishLivePlaybackMarker()
+        recoveryReason = .player
+        recoveryAttempt = 1
+        setState(.recovering(.player, attempt: 1))
+
+        let recoveryID = UUID()
+        pipelineRecoveryID = recoveryID
+        nativeTimeshiftSessionID = nil
+        nativeTimeshiftActions = nil
+        mediaPlayer.pause()
+        mediaPlayer.stop()
+        nativeInputStream?.close()
+        nativeInputStream = nil
+        outputHealthMonitor.restartGracePeriod(
+            output: playbackOutputCounters,
+            at: Date()
+        )
+
+        pipelineRecoveryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.rebuildNativePipeline(
+                request: request,
+                recoveryID: recoveryID
+            )
+        }
+    }
+
+    private func rebuildNativePipeline(
+        request: LiveStreamRequest,
+        recoveryID: UUID
+    ) async {
+        guard case let .live(.nativeTimeshift(htsp)) = request.kind else { return }
+        var attempt = 1
+
+        while !Task.isCancelled, pipelineRecoveryID == recoveryID {
+            recoveryAttempt = attempt
+            setState(.recovering(.player, attempt: attempt))
+            let delay = HTSPRecoveryPolicy.delay(beforeAttempt: attempt)
+            if delay > 0 {
+                try? await Task.sleep(for: .seconds(delay))
+                guard !Task.isCancelled, pipelineRecoveryID == recoveryID else { return }
+            }
+
+            do {
+                let stream = try await HTSPLiveInputStream.connect(
+                    configuration: htsp.configuration,
+                    channelID: htsp.channelID,
+                    profile: request.profile
+                )
+                guard !Task.isCancelled, pipelineRecoveryID == recoveryID else {
+                    stream.close()
+                    return
+                }
+
+                let media = VLCMedia(stream: stream)
+                media.addOption(":demux=ts")
+                addCachingOptions(to: media, milliseconds: request.networkCachingMilliseconds)
+                nativeInputStream = stream
+                nativeTimeshiftActions = NativeTimeshiftActionController(sink: stream)
+                let sessionID = UUID()
+                nativeTimeshiftSessionID = sessionID
+                configureNativeCallbacks(for: stream, sessionID: sessionID)
+                mediaPlayer.media = media
+                mediaPlayer.currentAudioPlaybackDelay = audioDelayMilliseconds * 1_000
+                mediaPlayer.currentVideoSubTitleDelay = subtitleDelayMilliseconds * 1_000
+
+                let now = Date()
+                liveDelaySeconds = 0
+                timeshiftWindowSeconds = 0
+                bufferStartedAt = nil
+                livePlaybackPosition.recoverAtLiveEdge(now)
+                publishLivePlaybackMarker(at: now)
+                outputHealthMonitor.restartGracePeriod(
+                    output: playbackOutputCounters,
+                    at: now
+                )
+                pipelineRecoveryTask = nil
+                pipelineRecoveryID = nil
+
+                if pauseRequested {
+                    stream.open()
+                    stream.pause()
+                    recoveryReason = nil
+                    recoveryAttempt = 0
+                    setState(.paused)
+                } else {
+                    _ = livePlaybackPosition.requestResume(from: playbackOutputCounters)
+                    stream.play()
+                    mediaPlayer.play()
+                    setState(.recovering(.player, attempt: attempt))
+                }
+                logger.info("Rebuilt VLC and HTSP playback at the live edge")
+                return
+            } catch {
+                guard !Task.isCancelled, pipelineRecoveryID == recoveryID else { return }
+                if HTSPRecoveryPolicy.isTerminal(error) {
+                    pipelineRecoveryTask = nil
+                    pipelineRecoveryID = nil
+                    recoveryReason = nil
+                    recoveryAttempt = 0
+                    setState(.failed(error.localizedDescription))
+                    return
+                }
+                logger.error(
+                    "VLC pipeline rebuild attempt \(attempt, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
+                )
+                attempt += 1
+            }
+        }
+    }
+
+    private func addCachingOptions(to media: VLCMedia, milliseconds: Int) {
+        media.addOption(":network-caching=\(milliseconds)")
+        media.addOption(":live-caching=\(milliseconds)")
+        media.addOption(":file-caching=\(milliseconds)")
+    }
+
     private func resumeLocalPlaybackAfterTimeshiftNavigation() {
         pauseRequested = false
+        nativeInputStream?.play()
         let waitsForPlaybackProgress = livePlaybackPosition.requestResume(
             from: playbackOutputCounters
         )
@@ -547,7 +838,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
             at: date
         ) else { return }
         hasStartedPlayback = true
-        if !pauseRequested { setState(.playing) }
+        if !pauseRequested {
+            recoveryReason = nil
+            setState(.playing)
+        }
     }
 
     private func publishLivePlaybackMarker(at date: Date = Date()) {
@@ -631,9 +925,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
 
         let delivery: String
         if activeRequest?.kind.isLive == true {
-            delivery = nativeInputStream == nil
-                ? "TVheadend HTTP · live only · \(activeProfile)"
-                : "TVheadend HTSP · timeshift · \(activeProfile)"
+            if activeLivePlaybackMode == .tvHeadend {
+                delivery = "TVheadend HTSP · timeshift · \(activeProfile)"
+            } else {
+                delivery = "TVheadend HTTP · live only · \(activeProfile)"
+            }
         } else {
             delivery = "TVheadend recording"
         }
@@ -695,6 +991,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, VLCMe
         timeshiftWindowSeconds = 0
         playbackRate = 1
         pauseRequested = false
+        navigationShouldResume = true
+        recoveryReason = nil
+        recoveryAttempt = 0
+        outputHealthMonitor.reset()
         livePlaybackPosition.reset()
         livePlaybackMarkerDate = nil
         bufferStartedAt = nil

@@ -26,7 +26,6 @@ struct PlaybackView: View {
     @State private var profiles: [TVHeadendStreamProfile] = []
     @State private var hasStartedCurrentPresentation = false
     @State private var isRefreshingGrowingRecording = false
-    @State private var nativeFailureFallbackAttempted = false
     @State private var videoAttachmentRevision = 0
     @FocusState private var wakeSurfaceFocused: Bool
 
@@ -125,10 +124,26 @@ struct PlaybackView: View {
                     .padding(24)
                     .background(.red.opacity(0.88), in: RoundedRectangle(cornerRadius: 16))
             }
+
+            if case let .recovering(reason, attempt) = engine.state {
+                HStack(spacing: 14) {
+                    ProgressView()
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(reason.message)
+                            .font(.headline)
+                        Text("Attempt \(attempt)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 22)
+                .padding(.vertical, 16)
+                .background(.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 14))
+            }
         }
         .task(id: presentation.id) {
             hasStartedCurrentPresentation = false
-            nativeFailureFallbackAttempted = false
             if engine.state == .idle {
                 await startPlayback(with: presentation.request)
             } else if engine.state == .paused || engine.state == .preparing {
@@ -167,7 +182,12 @@ struct PlaybackView: View {
             hideChrome(automatically: true)
         }
         .onDisappear {
-            if engine.state == .playing || engine.state == .preparing { engine.pause() }
+            switch engine.state {
+            case .playing, .preparing, .recovering:
+                engine.pause()
+            case .idle, .paused, .failed:
+                break
+            }
         }
         .onPlayPauseCommand {
             toggleTimelinePlayback()
@@ -220,12 +240,6 @@ struct PlaybackView: View {
                       Date() < recording.end.addingTimeInterval(120),
                       !isRefreshingGrowingRecording {
                 Task { await refreshGrowingRecording() }
-            } else if case .failed = state,
-                      !presentation.isRecording,
-                      engine.activeLivePlaybackMode == .tvHeadend,
-                      !nativeFailureFallbackAttempted {
-                nativeFailureFallbackAttempted = true
-                Task { await fallBackToLiveOnly() }
             } else {
                 showTimeline()
             }
@@ -358,22 +372,6 @@ struct PlaybackView: View {
         }
     }
 
-    private func fallBackToLiveOnly() async {
-        do {
-            let url = try await TVHeadendClient(configuration: settings.configuration)
-                .canonicalLiveStreamURL(channelID: presentation.channel.id, profile: engine.activeProfile)
-            await startPlayback(
-                with: LiveStreamRequest(
-                    url: url,
-                    networkCachingMilliseconds: presentation.request.networkCachingMilliseconds,
-                    profile: engine.activeProfile,
-                    kind: .live(.liveOnly(reason: "The native HTSP session failed"))
-                )
-            )
-        } catch {
-            engine.reportFailure(error.localizedDescription)
-        }
-    }
 }
 
 private struct RecordingPlaybackTimeline: View {
