@@ -13,6 +13,8 @@ struct RootTabView: View {
     @StateObject private var guide: GuideViewModel
     @StateObject private var recordings = RecordingStore()
     @StateObject private var playback = PlaybackCoordinator()
+    @State private var playbackAlertMessage: String?
+    @State private var recordingAlertMessage: String?
 
     init() {
         let settings = ServerSettingsStore()
@@ -71,24 +73,38 @@ struct RootTabView: View {
         .alert(
             "Playback unavailable",
             isPresented: Binding(
-                get: { playback.errorMessage != nil },
-                set: { if !$0 { playback.errorMessage = nil } }
+                get: { playbackAlertMessage != nil },
+                set: { if !$0 { playbackAlertMessage = nil } }
             )
         ) {
-            Button("OK", role: .cancel) { playback.errorMessage = nil }
+            Button("OK", role: .cancel) {}
         } message: {
-            Text(playback.errorMessage ?? "Unknown playback error")
+            Text(playbackAlertMessage ?? "Unknown playback error")
         }
         .alert(
             "Recording unavailable",
             isPresented: Binding(
-                get: { recordings.errorMessage != nil },
-                set: { if !$0 { recordings.errorMessage = nil } }
+                get: { recordingAlertMessage != nil },
+                set: { if !$0 { recordingAlertMessage = nil } }
             )
         ) {
-            Button("OK", role: .cancel) { recordings.errorMessage = nil }
+            Button("OK", role: .cancel) {}
         } message: {
-            Text(recordings.errorMessage ?? "Unknown recording error")
+            Text(recordingAlertMessage ?? "Unknown recording error")
+        }
+        .onChange(of: playback.errorMessage) { _, message in
+            playbackAlertMessage = message
+        }
+        .onChange(of: playbackAlertMessage) { _, message in
+            guard message == nil, playback.errorMessage != nil else { return }
+            playback.errorMessage = nil
+        }
+        .onChange(of: recordings.errorMessage) { _, message in
+            recordingAlertMessage = message
+        }
+        .onChange(of: recordingAlertMessage) { _, message in
+            guard message == nil, recordings.errorMessage != nil else { return }
+            recordings.errorMessage = nil
         }
         .onChange(of: selection) { _, tab in
             guard tab == .recordings else { return }
