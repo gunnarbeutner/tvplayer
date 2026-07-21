@@ -20,6 +20,9 @@ struct ProgrammeDetailView: View {
 
     private var program: GuideProgram? { presentation.program }
     private var channel: GuideChannel { presentation.channel }
+    private var canWatchLive: Bool {
+        program?.isAiring(at: Date()) ?? true
+    }
     private var existingRecording: TVRecording? {
         program.flatMap(recordings.scheduledRecording(for:))
     }
@@ -154,7 +157,9 @@ struct ProgrammeDetailView: View {
         }
         .programmeDetailWindowSizing()
         .televisionPlayPauseCommand {
-            watchLive()
+            if canWatchLive {
+                watchLive()
+            }
         }
         .platformExitCommand { dismiss() }
         .confirmationDialog(
@@ -291,13 +296,15 @@ struct ProgrammeDetailView: View {
 
     @ViewBuilder
     private var actionButtons: some View {
-        Button {
-            watchLive()
-        } label: {
-            Label("Watch Live", systemImage: "play.fill")
+        if canWatchLive {
+            Button {
+                watchLive()
+            } label: {
+                Label("Watch Live", systemImage: "play.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(AppTheme.focused)
         }
-        .buttonStyle(.borderedProminent)
-        .tint(AppTheme.focused)
 
         if let program, program.phase(at: Date()) != .past {
             if let existingRecording {
@@ -363,6 +370,7 @@ struct ProgrammeDetailView: View {
     }
 
     private func watchLive() {
+        guard canWatchLive else { return }
         playback.start(
             channel: channel,
             program: program,

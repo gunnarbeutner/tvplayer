@@ -142,11 +142,16 @@ struct RootTabView: View {
         }
 #if os(tvOS)
         .onChange(of: scenePhase) { _, phase in
-            guard phase == .background, !playback.pictureInPicture.isActive else { return }
-            if playback.presentation?.isRecording == true {
-                playback.engine.pause()
-            } else {
-                playback.engine.stop()
+            guard !playback.pictureInPicture.isActive else { return }
+            switch phase {
+            case .background:
+                playback.suspendForBackground()
+            case .active:
+                playback.resumeAfterBackground()
+            case .inactive:
+                break
+            @unknown default:
+                break
             }
         }
 #endif

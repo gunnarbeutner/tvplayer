@@ -1,5 +1,8 @@
 import Foundation
 import OSLog
+#if os(tvOS)
+import AVFAudio
+#endif
 
 struct PlaybackPresentation: Identifiable {
     let id = UUID()
@@ -32,6 +35,15 @@ final class PlaybackCoordinator: ObservableObject {
     private var prewarmTask: Task<Void, Never>?
     private var prewarmedChannelID: String?
     private var channelSwitchTask: Task<Void, Never>?
+#if os(tvOS)
+    private struct BackgroundSuspension {
+        let presentationID: UUID
+        let wasPlaying: Bool
+    }
+
+    private var backgroundSuspension: BackgroundSuspension?
+    private var foregroundResumeTask: Task<Void, Never>?
+#endif
 
     init() {
         let engine = VLCPlaybackEngine()
@@ -188,6 +200,72 @@ final class PlaybackCoordinator: ObservableObject {
 #if os(tvOS)
     func restorePlayerFromPictureInPicture() {
         returnToPlayer()
+    }
+
+    func suspendForBackground() {
+        foregroundResumeTask?.cancel()
+        foregroundResumeTask = nil
+
+        guard isUserInitiatedPlayback, let presentation else {
+            backgroundSuspension = nil
+            return
+        }
+
+        let wasPlaying: Bool
+        switch engine.state {
+        case .preparing, .playing, .recovering:
+            wasPlaying = true
+        case .paused:
+            wasPlaying = false
+        case .idle, .failed:
+            backgroundSuspension = nil
+            return
+        }
+        backgroundSuspension = BackgroundSuspension(
+            presentationID: presentation.id,
+            wasPlaying: wasPlaying
+        )
+
+        if presentation.isRecording {
+            if wasPlaying { engine.pause() }
+        } else {
+            // A live HTSP/VLC pipeline cannot be assumed to retain its audio
+            // and video outputs while tvOS suspends the process. Close it and
+            // establish a fresh subscription when the scene becomes active.
+            engine.stop()
+        }
+    }
+
+    func resumeAfterBackground() {
+        guard let suspension = backgroundSuspension else { return }
+        backgroundSuspension = nil
+        guard let presentation, presentation.id == suspension.presentationID else { return }
+
+        try? AVAudioSession.sharedInstance().setActive(true)
+
+        if presentation.isRecording {
+            if suspension.wasPlaying { engine.play() }
+            return
+        }
+
+        foregroundResumeTask?.cancel()
+        foregroundResumeTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await engine.prepare(presentation.request)
+                try Task.checkCancellation()
+                engine.play()
+                if !suspension.wasPlaying {
+                    guard await engine.waitForPlaybackStart() else { return }
+                    try Task.checkCancellation()
+                    engine.pause()
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 #endif
 
