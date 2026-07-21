@@ -196,7 +196,10 @@ struct GuideView: View {
             onPresentedChannelChange(channelID)
         }
         .onChange(of: isSelected) { _, selected in
-            guard selected else { return }
+            guard selected else {
+                playback.cancelLivePlaybackPrefetch()
+                return
+            }
             requestInitialFocus()
         }
         .onChange(of: preferredFocusProgramID) { _, _ in
@@ -227,7 +230,21 @@ struct GuideView: View {
         }
         .onChange(of: focusedProgramID) { oldValue, newValue in
             guard let newValue, newValue != oldValue else { return }
+            if isSelected { playback.cancelLivePlaybackPrefetch() }
             NavigationSoundPlayer.shared.play()
+        }
+        .task(id: isSelected ? focusedProgramID : nil) {
+            guard isSelected,
+                  let focusedProgramID,
+                  let program = model.program(withID: focusedProgramID),
+                  let channel = model.channel(containing: program)
+            else { return }
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled, isSelected else { return }
+            playback.prefetchLivePlaybackRequest(
+                channelID: channel.id,
+                configuration: settings.configuration
+            )
         }
         .task(id: model.isColdLoading) {
             guard model.isColdLoading else {

@@ -126,11 +126,15 @@ struct ChannelsView: View {
         }
         .onChange(of: focusedChannelID) { oldValue, newValue in
             guard let newValue, newValue != oldValue else { return }
+            if isSelected { playback.cancelLivePlaybackPrefetch() }
             NavigationSoundPlayer.shared.play()
         }
         .onAppear { restorePlaybackFocusIfAvailable() }
         .onChange(of: isSelected) { _, selected in
-            guard selected else { return }
+            guard selected else {
+                playback.cancelLivePlaybackPrefetch()
+                return
+            }
             restorePlaybackFocusIfAvailable()
         }
         .onChange(of: playback.focusReturnRevision) { _, _ in
@@ -156,6 +160,15 @@ struct ChannelsView: View {
             pageChannels(direction)
         }
 #endif
+        .task(id: isSelected ? focusedChannelID : nil) {
+            guard isSelected, let channel = focusedChannel else { return }
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled, isSelected else { return }
+            playback.prefetchLivePlaybackRequest(
+                channelID: channel.id,
+                configuration: settings.configuration
+            )
+        }
     }
 
     private var focusedChannel: GuideChannel? {

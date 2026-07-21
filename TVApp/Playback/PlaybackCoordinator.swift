@@ -79,6 +79,24 @@ final class PlaybackStartIntentTracker {
 
 @MainActor
 final class PlaybackCoordinator: ObservableObject {
+    private struct LivePrefetchKey: Equatable {
+        let channelID: String
+        let configuration: TVHeadendConfiguration
+    }
+
+    private struct CachedLivePrefetch {
+        let key: LivePrefetchKey
+        let request: LiveStreamRequest
+        let completedAt: Date
+    }
+
+    private struct InFlightLivePrefetch {
+        let id: UUID
+        let key: LivePrefetchKey
+        let task: Task<LiveStreamRequest, Error>
+    }
+
+    private static let livePrefetchLifetime: TimeInterval = 8
     private let logger = Logger(subsystem: "de.beutner.TVPlayer", category: "PlaybackCoordinator")
     @Published var presentation: PlaybackPresentation?
     @Published private(set) var launchPresentation: PlaybackLaunchPresentation?
@@ -95,6 +113,9 @@ final class PlaybackCoordinator: ObservableObject {
     private var prewarmedChannelID: String?
     private let playbackStartIntents = PlaybackStartIntentTracker()
     private var launchShouldRestoreAudio = false
+    private var cachedLivePrefetch: CachedLivePrefetch?
+    private var inFlightLivePrefetch: InFlightLivePrefetch?
+    private var launchStartedAt: [UUID: Date] = [:]
     private var playbackClient: TVHeadendClient?
     private var playbackClientConfiguration: TVHeadendConfiguration?
 #if os(tvOS)
@@ -141,6 +162,7 @@ final class PlaybackCoordinator: ObservableObject {
            existingPresentation.recording == nil,
            existingPresentation.channel.id == channel.id,
            sessionCanResume {
+            cancelLivePlaybackPrefetch()
             let presentationID = UUID()
             let needsLaunch = !engine.mediaPlayer.hasVideoOut
             if prewarmedChannelID == channel.id {
@@ -163,6 +185,7 @@ final class PlaybackCoordinator: ObservableObject {
                     program: program,
                     recording: nil
                 ))
+                logLaunchStage("request-ready", id: presentationID)
             }
             navigationSelection = PlaybackNavigationSelection(
                 channelID: channel.id,
@@ -195,10 +218,13 @@ final class PlaybackCoordinator: ObservableObject {
             guard let self else { return }
             do {
                 guard configuration.isComplete else { throw TVProviderError.incompleteConfiguration }
-                let request = try await client(for: configuration)
-                    .livePlaybackRequest(channelID: channel.id)
+                let request = try await livePlaybackRequestForStart(
+                    channelID: channel.id,
+                    configuration: configuration
+                )
                 try Task.checkCancellation()
                 guard playbackStartIntents.isCurrent(intentID) else { return }
+                logLaunchStage("request-ready", id: intentID)
                 engine.stop()
                 presentation = PlaybackPresentation(
                     id: intentID,
@@ -212,6 +238,7 @@ final class PlaybackCoordinator: ObservableObject {
                 finishPlaybackStartIntent(intentID)
             } catch {
                 guard playbackStartIntents.isCurrent(intentID) else { return }
+                logLaunchStage("request-failed", id: intentID)
                 errorMessage = error.localizedDescription
                 finishLaunch(intentID, dismissPlayer: true)
                 finishPlaybackStartIntent(intentID)
@@ -242,6 +269,7 @@ final class PlaybackCoordinator: ObservableObject {
 
         cancelPlaybackStartIntent()
         clearLaunch(dismissPlayer: false)
+        cancelLivePlaybackPrefetch()
         let intentID = playbackStartIntents.begin()
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -280,6 +308,7 @@ final class PlaybackCoordinator: ObservableObject {
 
     func leavePlayer() {
         cancelPlaybackStartIntent()
+        cancelLivePlaybackPrefetch()
         if let launchPresentation {
             if presentation?.id == launchPresentation.id {
                 engine.stop()
@@ -309,11 +338,60 @@ final class PlaybackCoordinator: ObservableObject {
     }
 
     func playbackDidStart(presentationID: UUID) {
+        logLaunchStage("audio-video-ready", id: presentationID)
         finishLaunch(presentationID, dismissPlayer: false)
     }
 
     func playbackDidFail(presentationID: UUID) {
+        logLaunchStage("playback-failed", id: presentationID)
         finishLaunch(presentationID, dismissPlayer: false)
+    }
+
+    func prefetchLivePlaybackRequest(
+        channelID: String,
+        configuration: TVHeadendConfiguration
+    ) {
+        guard configuration.isComplete else { return }
+        let key = LivePrefetchKey(channelID: channelID, configuration: configuration)
+        if let cachedLivePrefetch,
+           cachedLivePrefetch.key == key,
+           Date().timeIntervalSince(cachedLivePrefetch.completedAt) < Self.livePrefetchLifetime {
+            return
+        }
+        if inFlightLivePrefetch?.key == key { return }
+
+        cancelLivePlaybackPrefetch()
+        let id = UUID()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { throw CancellationError() }
+            return try await client(for: configuration)
+                .livePlaybackRequest(channelID: channelID)
+        }
+        inFlightLivePrefetch = InFlightLivePrefetch(id: id, key: key, task: task)
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let request = try await task.value
+                guard !Task.isCancelled, inFlightLivePrefetch?.id == id else { return }
+                cachedLivePrefetch = CachedLivePrefetch(
+                    key: key,
+                    request: request,
+                    completedAt: Date()
+                )
+                inFlightLivePrefetch = nil
+                logger.debug("Prefetched playback request for channel \(channelID, privacy: .public)")
+            } catch {
+                guard inFlightLivePrefetch?.id == id else { return }
+                inFlightLivePrefetch = nil
+            }
+        }
+    }
+
+    func cancelLivePlaybackPrefetch() {
+        inFlightLivePrefetch?.task.cancel()
+        inFlightLivePrefetch = nil
+        cachedLivePrefetch = nil
     }
 
 #if os(tvOS)
@@ -403,8 +481,10 @@ final class PlaybackCoordinator: ObservableObject {
             guard let self else { return }
             do {
                 guard configuration.isComplete else { return }
-                let request = try await client(for: configuration)
-                    .livePlaybackRequest(channelID: channel.id)
+                let request = try await livePlaybackRequestForStart(
+                    channelID: channel.id,
+                    configuration: configuration
+                )
                 guard !Task.isCancelled else { return }
 
                 guard case .live(.nativeTimeshift) = request.kind else {
@@ -462,6 +542,7 @@ final class PlaybackCoordinator: ObservableObject {
     ) {
         cancelPlaybackStartIntent()
         clearLaunch(dismissPlayer: false)
+        cancelLivePlaybackPrefetch()
         let sessionCanResume: Bool
         switch engine.state {
         case .idle, .failed: sessionCanResume = false
@@ -476,6 +557,7 @@ final class PlaybackCoordinator: ObservableObject {
                     program: nil,
                     recording: recording
                 ))
+                logLaunchStage("request-ready", id: presentation.id)
             }
             if let channelID = channel?.id ?? presentation?.channel.id {
                 navigationSelection = PlaybackNavigationSelection(
@@ -515,6 +597,7 @@ final class PlaybackCoordinator: ObservableObject {
                     .recordingStreamURL(recordingID: recording.id)
                 try Task.checkCancellation()
                 guard playbackStartIntents.isCurrent(intentID) else { return }
+                logLaunchStage("request-ready", id: intentID)
                 engine.stop()
                 presentation = PlaybackPresentation(
                     id: intentID,
@@ -534,6 +617,7 @@ final class PlaybackCoordinator: ObservableObject {
                 finishPlaybackStartIntent(intentID)
             } catch {
                 guard playbackStartIntents.isCurrent(intentID) else { return }
+                logLaunchStage("request-failed", id: intentID)
                 errorMessage = error.localizedDescription
                 finishLaunch(intentID, dismissPlayer: true)
                 finishPlaybackStartIntent(intentID)
@@ -594,6 +678,8 @@ final class PlaybackCoordinator: ObservableObject {
 
     private func beginLaunch(_ presentation: PlaybackLaunchPresentation) {
         launchPresentation = presentation
+        launchStartedAt[presentation.id] = Date()
+        logLaunchStage("intent", id: presentation.id)
         if let audio = engine.mediaPlayer.audio, !audio.isMuted {
             audio.isMuted = true
             launchShouldRestoreAudio = true
@@ -601,12 +687,50 @@ final class PlaybackCoordinator: ObservableObject {
     }
 
     private func clearLaunch(dismissPlayer: Bool) {
+        if let id = launchPresentation?.id { launchStartedAt[id] = nil }
         launchPresentation = nil
         if launchShouldRestoreAudio {
             engine.mediaPlayer.audio?.isMuted = false
             launchShouldRestoreAudio = false
         }
         if dismissPlayer { isPlayerPresented = false }
+    }
+
+    private func livePlaybackRequestForStart(
+        channelID: String,
+        configuration: TVHeadendConfiguration
+    ) async throws -> LiveStreamRequest {
+        let key = LivePrefetchKey(channelID: channelID, configuration: configuration)
+        if let cachedLivePrefetch,
+           cachedLivePrefetch.key == key,
+           Date().timeIntervalSince(cachedLivePrefetch.completedAt) < Self.livePrefetchLifetime {
+            self.cachedLivePrefetch = nil
+            logger.debug("Using prefetched playback request for channel \(channelID, privacy: .public)")
+            return cachedLivePrefetch.request
+        }
+
+        if let inFlightLivePrefetch, inFlightLivePrefetch.key == key {
+            self.inFlightLivePrefetch = nil
+            logger.debug("Joining playback request prefetch for channel \(channelID, privacy: .public)")
+            let task = inFlightLivePrefetch.task
+            return try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
+        }
+
+        cancelLivePlaybackPrefetch()
+        return try await client(for: configuration)
+            .livePlaybackRequest(channelID: channelID)
+    }
+
+    private func logLaunchStage(_ stage: String, id: UUID) {
+        guard let startedAt = launchStartedAt[id] else { return }
+        let milliseconds = Int(Date().timeIntervalSince(startedAt) * 1_000)
+        logger.notice(
+            "Playback startup \(stage, privacy: .public) after \(milliseconds, privacy: .public) ms"
+        )
     }
 
     private static func placeholderChannel(for recording: TVRecording) -> GuideChannel {
