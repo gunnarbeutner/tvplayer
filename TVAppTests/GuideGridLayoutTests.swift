@@ -390,6 +390,41 @@ final class GuideGridLayoutTests: XCTestCase {
         )
     }
 
+    func testTimelineHeaderContentIsVerticallyCentered() {
+        XCTAssertEqual(
+            GuideGridMetrics.headerContentY + GuideGridMetrics.headerContentHeight / 2,
+            GuideGridMetrics.headerHeight / 2,
+            accuracy: 0.001
+        )
+    }
+
+    func testNowIndicatorUsesTheSharedTimelineCoordinate() throws {
+        let start = Date(timeIntervalSince1970: 10_000)
+        let timeline = GuideTimeline(
+            start: start,
+            end: start.addingTimeInterval(3_600)
+        )
+        let now = start.addingTimeInterval(1_800)
+
+        XCTAssertEqual(
+            try XCTUnwrap(GuideGridMetrics.nowIndicatorX(in: timeline, at: now)),
+            timeline.xOffset(for: now),
+            accuracy: 0.001
+        )
+        XCTAssertNil(
+            GuideGridMetrics.nowIndicatorX(
+                in: timeline,
+                at: start.addingTimeInterval(-1)
+            )
+        )
+        XCTAssertNil(
+            GuideGridMetrics.nowIndicatorX(
+                in: timeline,
+                at: timeline.end.addingTimeInterval(1)
+            )
+        )
+    }
+
     func testCollectionSnapshotQueriesOnlyIntersectingProgrammes() {
         let start = Date(timeIntervalSince1970: 0)
         let timeline = GuideTimeline(

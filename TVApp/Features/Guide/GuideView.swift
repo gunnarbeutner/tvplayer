@@ -990,6 +990,7 @@ private struct ProgrammeArtworkView: View {
     let isLivePlayback: Bool
 
     @EnvironmentObject private var settings: ServerSettingsStore
+    @EnvironmentObject private var playback: PlaybackCoordinator
     @State private var loadedArtwork: ChannelLogoArtwork?
     @State private var loadedKey: String?
 
@@ -1039,7 +1040,16 @@ private struct ProgrammeArtworkView: View {
                 // and is resized to this artwork rectangle. Keeping this
                 // branch transparent avoids moving a live VLC output between
                 // native views, which is unreliable during playback.
+#if os(macOS)
+                Button(action: playback.returnToPlayer) {
+                    Color.clear
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Return to full-screen player")
+#else
                 Color.clear
+#endif
             } else {
                 ZStack {
                     // Continue the ambient header colour through the reserved
@@ -1065,7 +1075,11 @@ private struct ProgrammeArtworkView: View {
             }
         }
         .clipped()
+#if os(macOS)
+        .accessibilityHidden(!showsLivePlayer)
+#else
         .accessibilityHidden(true)
+#endif
         .task(id: ProgrammeArtworkLoadID(url: url, settingsRevision: settings.revision)) {
             await loadArtwork()
         }

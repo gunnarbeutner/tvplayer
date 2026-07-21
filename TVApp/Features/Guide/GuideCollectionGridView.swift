@@ -17,11 +17,23 @@ let guideFocusLogger = Logger(
 enum GuideGridMetrics {
     static let channelWidth: CGFloat = 280
     static let headerHeight: CGFloat = 58
+    static let headerContentHeight: CGFloat = 34
+    static let headerContentY = (headerHeight - headerContentHeight) / 2
+    static let timelineMarkLeadingInset: CGFloat = 10
+    static let timelineTickY: CGFloat = 43
+    static let timelineTickHeight: CGFloat = 14
+    static let nowIndicatorWidth: CGFloat = 3
+    static let nowIndicatorCapDiameter: CGFloat = 13
     static let rowHeight: CGFloat = 94
     static let cardInset: CGFloat = 5
     static let rowInset: CGFloat = 5
     static let cardHeight = rowHeight - (rowInset * 2)
     static let focusTargetWidth: CGFloat = 120
+
+    static func nowIndicatorX(in timeline: GuideTimeline, at date: Date) -> CGFloat? {
+        guard timeline.start <= date, date <= timeline.end else { return nil }
+        return timeline.xOffset(for: date)
+    }
 }
 
 enum GuideCollectionNavigationDirection: Equatable {
@@ -586,11 +598,13 @@ private final class GuideCollectionLayout: UICollectionViewLayout {
             )
             attributes.zIndex = 40
         case GuideCollectionElementKind.nowIndicator:
-            let isVisible = snapshot.timeline.start <= now && now <= snapshot.timeline.end
+            let indicatorX = GuideGridMetrics.nowIndicatorX(in: snapshot.timeline, at: now)
             attributes.frame = CGRect(
-                x: GuideGridMetrics.channelWidth + snapshot.timeline.xOffset(for: now) - 1.5,
+                x: GuideGridMetrics.channelWidth
+                    + (indicatorX ?? 0)
+                    - GuideGridMetrics.nowIndicatorWidth / 2,
                 y: offset.y + GuideGridMetrics.headerHeight,
-                width: isVisible ? 3 : 0,
+                width: indicatorX == nil ? 0 : GuideGridMetrics.nowIndicatorWidth,
                 height: max(0, viewport.height - GuideGridMetrics.headerHeight)
             )
             attributes.zIndex = 20
@@ -1827,13 +1841,23 @@ private final class GuideTimelineHeaderReusableView: UICollectionReusableView {
             height: GuideGridMetrics.headerHeight
         )
         for mark in snapshot.marks {
-            let label = UILabel(frame: CGRect(x: mark.x + 10, y: 12, width: 170, height: 34))
+            let label = UILabel(frame: CGRect(
+                x: mark.x + GuideGridMetrics.timelineMarkLeadingInset,
+                y: GuideGridMetrics.headerContentY,
+                width: 170,
+                height: GuideGridMetrics.headerContentHeight
+            ))
             label.text = mark.title
             label.textColor = .white
             label.font = .monospacedDigitSystemFont(ofSize: 19, weight: .semibold)
             content.addSubview(label)
 
-            let tick = UIView(frame: CGRect(x: mark.x + 10, y: 43, width: 1, height: 14))
+            let tick = UIView(frame: CGRect(
+                x: mark.x + GuideGridMetrics.timelineMarkLeadingInset,
+                y: GuideGridMetrics.timelineTickY,
+                width: 1,
+                height: GuideGridMetrics.timelineTickHeight
+            ))
             tick.backgroundColor = UIColor(AppTheme.divider)
             content.addSubview(tick)
         }
@@ -1883,9 +1907,15 @@ private final class GuideNowIndicatorReusableView: UICollectionReusableView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .red
-        let cap = UIView(frame: CGRect(x: -5, y: -6, width: 13, height: 13))
+        let diameter = GuideGridMetrics.nowIndicatorCapDiameter
+        let cap = UIView(frame: CGRect(
+            x: (GuideGridMetrics.nowIndicatorWidth - diameter) / 2,
+            y: -diameter / 2,
+            width: diameter,
+            height: diameter
+        ))
         cap.backgroundColor = .red
-        cap.layer.cornerRadius = 6.5
+        cap.layer.cornerRadius = diameter / 2
         addSubview(cap)
         isAccessibilityElement = false
     }
@@ -2123,13 +2153,18 @@ struct GuideGridView: View {
     let onFocusAcquired: () -> Void
     let onExitToNavigator: () -> Void
 
-    private var visiblePrograms: [[GuideProgram]] {
-        channels.map { channel in
-            channel.programs.filter { $0.end > timeline.start && $0.start < timeline.end }
-        }
+    private var snapshot: GuideGridSnapshot {
+        GuideGridSnapshot(
+            channels: channels,
+            timeline: timeline,
+            revision: guideRevision
+        )
     }
 
     var body: some View {
+        let snapshot = snapshot
+        let nowIndicatorX = GuideGridMetrics.nowIndicatorX(in: timeline, at: now)
+
         ScrollView([.horizontal, .vertical]) {
             LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                 Section {
@@ -2140,37 +2175,54 @@ struct GuideGridView: View {
                                 .zIndex(1)
 
                             ZStack(alignment: .topLeading) {
-                                ForEach(visiblePrograms[row]) { program in
-                                    let interval = DateInterval(
-                                        start: max(program.start, timeline.start),
-                                        end: min(program.end, timeline.end)
-                                    )
+                                ForEach(snapshot.rows[row]) { item in
                                     Button {
-                                        focusedProgramID = program.id
-                                        onActivate(program)
+                                        focusedProgramID = item.id
+                                        onActivate(item.program)
                                     } label: {
                                         GuideProgramCard(
-                                            program: program,
+                                            program: item.program,
                                             now: now,
-                                            isFocused: focusedProgramID == program.id,
-                                            recordingState: recordingState(program),
+                                            isFocused: focusedProgramID == item.id,
+                                            recordingState: recordingState(item.program),
                                             leadingContentInset: 0
                                         )
                                     }
                                     .buttonStyle(.plain)
                                     .frame(
-                                        width: max(56, timeline.width(for: interval) - GuideGridMetrics.cardInset),
-                                        height: GuideGridMetrics.cardHeight
+                                        width: item.frame.width,
+                                        height: item.frame.height
                                     )
-                                    .offset(x: timeline.xOffset(for: interval.start) + 2)
+                                    .offset(
+                                        x: item.frame.minX - GuideGridMetrics.channelWidth,
+                                        y: item.frame.minY
+                                            - GuideGridMetrics.headerHeight
+                                            - CGFloat(row) * GuideGridMetrics.rowHeight
+                                    )
                                     .contextMenu {
                                         Button("Programme Details", systemImage: "info.circle") {
-                                            onActivate(program)
+                                            onActivate(item.program)
                                         }
                                         Button("Watch", systemImage: "play.fill") {
-                                            onPlay(program)
+                                            onPlay(item.program)
                                         }
                                     }
+                                }
+
+                                if let nowIndicatorX {
+                                    Rectangle()
+                                        .fill(.red)
+                                        .frame(
+                                            width: GuideGridMetrics.nowIndicatorWidth,
+                                            height: GuideGridMetrics.rowHeight
+                                        )
+                                        .offset(
+                                            x: nowIndicatorX
+                                                - GuideGridMetrics.nowIndicatorWidth / 2
+                                        )
+                                        .allowsHitTesting(false)
+                                        .accessibilityHidden(true)
+                                        .zIndex(2)
                                 }
                             }
                             .frame(
@@ -2187,17 +2239,56 @@ struct GuideGridView: View {
                             .font(.headline)
                             .foregroundStyle(AppTheme.accent)
                             .padding(.horizontal, 18)
-                            .frame(width: GuideGridMetrics.channelWidth, height: GuideGridMetrics.headerHeight, alignment: .leading)
+                            .frame(
+                                width: GuideGridMetrics.channelWidth,
+                                height: GuideGridMetrics.headerContentHeight,
+                                alignment: .leading
+                            )
+                            .frame(height: GuideGridMetrics.headerHeight)
                             .background(AppTheme.chrome)
                             .guidePinnedToLeadingEdge()
                             .zIndex(1)
 
                         ZStack(alignment: .topLeading) {
-                            ForEach(timeline.halfHourMarks, id: \.self) { mark in
-                                Text(mark.formatted(date: .omitted, time: .shortened))
-                                    .font(.caption.monospacedDigit())
+                            ForEach(snapshot.marks, id: \.date) { mark in
+                                Text(mark.title)
+                                    .font(.headline.weight(.semibold).monospacedDigit())
                                     .foregroundStyle(AppTheme.secondaryText)
-                                    .offset(x: timeline.xOffset(for: mark) + 10, y: 10)
+                                    .frame(
+                                        width: 170,
+                                        height: GuideGridMetrics.headerContentHeight,
+                                        alignment: .leading
+                                    )
+                                    .offset(
+                                        x: mark.x + GuideGridMetrics.timelineMarkLeadingInset,
+                                        y: GuideGridMetrics.headerContentY
+                                    )
+
+                                Rectangle()
+                                    .fill(AppTheme.divider)
+                                    .frame(width: 1, height: GuideGridMetrics.timelineTickHeight)
+                                    .offset(
+                                        x: mark.x + GuideGridMetrics.timelineMarkLeadingInset,
+                                        y: GuideGridMetrics.timelineTickY
+                                    )
+                            }
+
+                            if let nowIndicatorX {
+                                Circle()
+                                    .fill(.red)
+                                    .frame(
+                                        width: GuideGridMetrics.nowIndicatorCapDiameter,
+                                        height: GuideGridMetrics.nowIndicatorCapDiameter
+                                    )
+                                    .offset(
+                                        x: nowIndicatorX
+                                            - GuideGridMetrics.nowIndicatorCapDiameter / 2,
+                                        y: GuideGridMetrics.headerHeight
+                                            - GuideGridMetrics.nowIndicatorCapDiameter / 2
+                                    )
+                                    .allowsHitTesting(false)
+                                    .accessibilityHidden(true)
+                                    .zIndex(2)
                             }
                         }
                         .frame(

@@ -174,6 +174,12 @@ final class PlaybackCoordinator: ObservableObject {
         isPlayerPresented = false
     }
 
+    func returnToPlayer() {
+        guard presentation != nil else { return }
+        isPlayerPresented = true
+        errorMessage = nil
+    }
+
     func playerDidDismiss() {
         guard navigationSelection != nil else { return }
         focusReturnRevision &+= 1
@@ -181,8 +187,7 @@ final class PlaybackCoordinator: ObservableObject {
 
 #if os(tvOS)
     func restorePlayerFromPictureInPicture() {
-        guard presentation != nil else { return }
-        isPlayerPresented = true
+        returnToPlayer()
     }
 #endif
 
