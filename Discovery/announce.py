@@ -34,6 +34,27 @@ def required(name: str) -> str:
     return value
 
 
+def tvheadend_credentials() -> tuple[str, str]:
+    username = os.environ.get("TVPLAYER_TVH_USERNAME", "").strip()
+    password = os.environ.get("TVPLAYER_TVH_PASSWORD", "")
+    if bool(username) != bool(password):
+        raise ValueError(
+            "TVPLAYER_TVH_USERNAME and TVPLAYER_TVH_PASSWORD must both be set or both be empty"
+        )
+    return username, password
+
+
+def credential_txt_properties(username: str, password: str) -> dict[str, str]:
+    if bool(username) != bool(password):
+        raise ValueError("A username and password must be advertised together")
+    if not username:
+        return {}
+    return {
+        "username": txt_property("username", username),
+        "password": txt_property("password", password),
+    }
+
+
 def txt_property(key: str, value: str) -> str:
     if len(f"{key}={value}".encode("utf-8")) > 255:
         raise ValueError(f"{key} is too long for a DNS-SD TXT property")
@@ -253,8 +274,7 @@ def guide_handler(cache: GuideCache) -> type[BaseHTTPRequestHandler]:
 def main() -> int:
     try:
         url = required("TVPLAYER_TVH_URL").strip()
-        username = required("TVPLAYER_TVH_USERNAME").strip()
-        password = required("TVPLAYER_TVH_PASSWORD")
+        username, password = tvheadend_credentials()
         profile = os.environ.get("TVPLAYER_TVH_PROFILE", "pass").strip() or "pass"
         htsp_port = integer_setting("TVPLAYER_TVH_HTSP_PORT", 9982, 1, 65535)
         instance = os.environ.get("TVPLAYER_MDNS_NAME", "TVPlayer TVHeadend").strip()
@@ -324,11 +344,10 @@ def main() -> int:
             "id": stable_id,
             "scheme": parsed.scheme,
             "path": txt_property("path", parsed.path or "/"),
-            "username": txt_property("username", username),
-            "password": txt_property("password", password),
             "profile": txt_property("profile", profile),
             "htsp_port": txt_property("htsp_port", str(htsp_port)),
         }
+        tvheadend_properties.update(credential_txt_properties(username, password))
         guide_properties = {
             "txtvers": "1",
             "id": stable_id,

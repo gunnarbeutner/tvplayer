@@ -20,14 +20,60 @@ sys.modules.setdefault("ifaddr", SimpleNamespace(get_adapters=lambda: []))
 
 from announce import (
     addresses_served_by_guide,
+    credential_txt_properties,
     discovery_id,
     guide_advertised_addresses,
     resolved_addresses,
     service_target,
+    tvheadend_credentials,
 )
 
 
 class AnnounceTests(unittest.TestCase):
+    def test_tvheadend_credentials_allow_authenticated_access(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "TVPLAYER_TVH_USERNAME": " viewer ",
+                "TVPLAYER_TVH_PASSWORD": "secret",
+            },
+            clear=False,
+        ):
+            self.assertEqual(tvheadend_credentials(), ("viewer", "secret"))
+
+    def test_tvheadend_credentials_allow_anonymous_access(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "TVPLAYER_TVH_USERNAME": "",
+                "TVPLAYER_TVH_PASSWORD": "",
+            },
+            clear=False,
+        ):
+            self.assertEqual(tvheadend_credentials(), ("", ""))
+
+    def test_tvheadend_credentials_reject_partial_credentials(self) -> None:
+        for username, password in [("viewer", ""), ("", "secret")]:
+            with self.subTest(username=username, password=password), patch.dict(
+                os.environ,
+                {
+                    "TVPLAYER_TVH_USERNAME": username,
+                    "TVPLAYER_TVH_PASSWORD": password,
+                },
+                clear=False,
+            ):
+                with self.assertRaisesRegex(ValueError, "must both be set or both be empty"):
+                    tvheadend_credentials()
+
+    def test_txt_credentials_distinguish_supported_access_modes(self) -> None:
+        self.assertEqual(credential_txt_properties("", ""), {})
+        self.assertEqual(
+            credential_txt_properties("viewer", "secret"),
+            {"username": "viewer", "password": "secret"},
+        )
+        with self.assertRaisesRegex(ValueError, "advertised together"):
+            credential_txt_properties("viewer", "")
+
     def test_configured_discovery_id_takes_precedence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "discovery-id"

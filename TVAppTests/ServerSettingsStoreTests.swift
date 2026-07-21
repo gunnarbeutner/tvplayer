@@ -58,6 +58,41 @@ final class ServerSettingsStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testDiscoveryAdoptsAnonymousAccess() throws {
+        let store = makeStore()
+
+        store.handleDiscoveryEvent(.upsert(
+            service(id: "anonymous", host: "server.test", password: "", username: "")
+        ))
+
+        XCTAssertEqual(store.configuration.username, "")
+        XCTAssertEqual(store.configuration.password, "")
+        XCTAssertTrue(store.configuration.isComplete)
+    }
+
+    @MainActor
+    func testManualSettingsRejectPartialCredentials() {
+        let store = makeStore()
+        store.baseURLText = "http://server.test:9981"
+
+        store.username = "viewer"
+        store.password = ""
+        XCTAssertThrowsError(try store.validatedDraft()) { error in
+            guard let error = error as? ConfigurationError,
+                  case .incompleteCredentials = error
+            else { return XCTFail("Expected incomplete credentials") }
+        }
+
+        store.username = ""
+        store.password = "secret"
+        XCTAssertThrowsError(try store.validatedDraft()) { error in
+            guard let error = error as? ConfigurationError,
+                  case .incompleteCredentials = error
+            else { return XCTFail("Expected incomplete credentials") }
+        }
+    }
+
+    @MainActor
     func testUneditedDiscoveryProfileFollowsAdvertisedChangesUsingStableID() throws {
         let store = makeStore()
         store.handleDiscoveryEvent(.upsert(service(id: "stable", host: "old.test", password: "old")))
@@ -173,16 +208,18 @@ final class ServerSettingsStoreTests: XCTestCase {
         password: String = "secret",
         username: String = "viewer"
     ) -> DiscoveredTVHeadendService {
-        let fields = [
+        var fields = [
             "txtvers": Data("1".utf8),
             "id": Data(id.utf8),
             "scheme": Data("http".utf8),
             "path": Data("/".utf8),
-            "username": Data(username.utf8),
-            "password": Data(password.utf8),
             "profile": Data("pass".utf8),
             "htsp_port": Data("9982".utf8),
         ]
+        if !username.isEmpty, !password.isEmpty {
+            fields["username"] = Data(username.utf8)
+            fields["password"] = Data(password.utf8)
+        }
         return DiscoveredTVHeadendService(
             name: name,
             serviceIdentity: "local.|_tvplayer._tcp.|\(id)",

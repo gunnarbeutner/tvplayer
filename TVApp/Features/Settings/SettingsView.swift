@@ -36,7 +36,7 @@ struct SettingsView: View {
                             Text("TVHeadend servers")
                                 .font(.largeTitle.bold())
 
-                            Text("Choose one active server for channels, guide, recordings, and playback. Passwords are stored in this device's Keychain.")
+                            Text("Choose one active server for channels, guide, recordings, and playback.")
                                 .font(.callout)
                                 .foregroundStyle(AppTheme.secondaryText)
                         }
@@ -77,11 +77,17 @@ struct SettingsView: View {
                     }
 
                     adaptiveLayout {
-                        SettingsField(title: "Username", hint: "TVHeadend account") {
+                        SettingsField(
+                            title: "Username",
+                            hint: "Leave both fields empty for anonymous access"
+                        ) {
                             TextField("Username", text: $settings.username)
                         }
 
-                        SettingsField(title: "Password", hint: "Saved securely in Keychain") {
+                        SettingsField(
+                            title: "Password",
+                            hint: "Required when a username is set"
+                        ) {
                             SecureField("Password", text: $settings.password)
                         }
                     }

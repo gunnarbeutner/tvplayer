@@ -198,10 +198,14 @@ final class ServerSettingsStore: ObservableObject {
         guard let htspPort = normalizedHTSPPort else {
             throw ConfigurationError.invalidHTSPPort
         }
+        let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedUsername.isEmpty != password.isEmpty {
+            throw ConfigurationError.incompleteCredentials
+        }
         return TVHeadendConfiguration(
             serverProfileID: editingProfileID,
             baseURL: baseURL,
-            username: username.trimmingCharacters(in: .whitespacesAndNewlines),
+            username: trimmedUsername,
             password: password,
             streamProfile: normalizedProfile,
             htspPort: htspPort,

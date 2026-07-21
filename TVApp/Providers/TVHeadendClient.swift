@@ -387,6 +387,11 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
             return
         }
 
+        guard configuration.usesAuthentication else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+
         completionHandler(
             .useCredential,
             URLCredential(

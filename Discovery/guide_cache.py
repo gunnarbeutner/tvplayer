@@ -37,7 +37,7 @@ class GuideCache:
         self._channels: dict[str, dict[str, Any]] = {}
         self._events: dict[str, dict[str, Any]] = {}
         self._last_refresh: float | None = None
-        self._opener = opener or self._authenticated_opener(username, password)
+        self._opener = opener or self._request_opener(username, password)
         self._load()
 
     def refresh(self, now: float | None = None) -> tuple[int, int]:
@@ -117,11 +117,15 @@ class GuideCache:
                 "last_refresh": self._last_refresh,
             }
 
-    def _authenticated_opener(
+    def _request_opener(
         self,
         username: str,
         password: str,
     ) -> urllib.request.OpenerDirector:
+        if bool(username) != bool(password):
+            raise ValueError("TVHeadend username and password must be provided together")
+        if not username:
+            return urllib.request.build_opener()
         password_manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
         password_manager.add_password(None, self.base_url, username, password)
         return urllib.request.build_opener(

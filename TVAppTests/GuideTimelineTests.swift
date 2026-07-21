@@ -52,6 +52,30 @@ final class GuideTimelineTests: XCTestCase {
         XCTAssertNil(discovered.xmltvURL)
     }
 
+    func testDiscoveredSettingsAcceptAnonymousAccess() throws {
+        let discovered = try XCTUnwrap(DiscoveredTVHeadendSettings(
+            fields: [
+                "txtvers": Data("1".utf8),
+                "id": Data("server-anonymous".utf8),
+                "scheme": Data("http".utf8),
+                "path": Data("/".utf8),
+            ],
+            hostName: "tvheadend.local.",
+            port: 9981
+        ))
+
+        XCTAssertEqual(discovered.username, "")
+        XCTAssertEqual(discovered.password, "")
+        XCTAssertTrue(TVHeadendConfiguration(
+            baseURL: discovered.baseURL,
+            username: discovered.username,
+            password: discovered.password,
+            streamProfile: discovered.streamProfile,
+            guideCacheURL: nil,
+            xmltvURL: nil
+        ).isComplete)
+    }
+
     func testDiscoveredGuideCacheParsesItsResolvedEndpoint() throws {
         let endpoint = try XCTUnwrap(DiscoveredGuideCacheEndpoint(
             fields: [
@@ -155,6 +179,12 @@ final class GuideTimelineTests: XCTestCase {
             "id": Data("server-0123".utf8),
             "scheme": Data("ftp".utf8),
             "username": Data("viewer".utf8),
+            "password": Data("secret".utf8),
+        ], hostName: "tvheadend.local.", port: 9981))
+        XCTAssertNil(DiscoveredTVHeadendSettings(fields: [
+            "txtvers": Data("1".utf8),
+            "id": Data("server-0123".utf8),
+            "scheme": Data("http".utf8),
             "password": Data("secret".utf8),
         ], hostName: "tvheadend.local.", port: 9981))
         XCTAssertNil(DiscoveredTVHeadendSettings(fields: [

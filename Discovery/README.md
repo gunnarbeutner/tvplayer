@@ -19,7 +19,7 @@ mDNS uses link-local multicast, so Compose uses host networking.
 
 ```sh
 cp .env.example .env
-# Edit .env and set the URL, username, and password.
+# Edit .env and set the URL. Add credentials if the server requires them.
 docker compose up -d --build
 docker compose logs -f
 ```
@@ -28,8 +28,8 @@ The local `.env` is covered by the repository's git-ignore rules. The compose
 file accepts:
 
 - `TVPLAYER_TVH_URL` (required)
-- `TVPLAYER_TVH_USERNAME` (required)
-- `TVPLAYER_TVH_PASSWORD` (required)
+- `TVPLAYER_TVH_USERNAME` (optional; must be set together with the password)
+- `TVPLAYER_TVH_PASSWORD` (optional; must be set together with the username)
 - `TVPLAYER_TVH_PROFILE` (default `pass`)
 - `TVPLAYER_TVH_HTSP_PORT` (default `9982`)
 - `TVPLAYER_GUIDE_PORT` (default `49382`)
@@ -55,7 +55,7 @@ to run their own mDNS responders.
 <name>._tvplayer._tcp.local.
   SRV -> <TVheadend host>:<TVheadend HTTP port>
   TXT -> txtvers=1, id=<stable ID>, scheme=<http|https>, path=<HTTP root>,
-         username=..., password=..., profile=..., htsp_port=...
+         [username=..., password=...], profile=..., htsp_port=...
 
 <name>._tvplayer-guide._tcp.local.
   SRV -> <discovery daemon host>:<guide port>
@@ -98,8 +98,9 @@ network. It may run on the TVheadend host or a separate host.
 
 The JSON guide endpoint is intentionally unauthenticated on the local network and
 contains programme metadata but no TVheadend credentials. DNS-SD TXT records
-are not encrypted. This service deliberately publishes the
+are not encrypted. When configured, this service deliberately publishes the
 TVheadend username and password because it is a bootstrap mechanism requested
-for a trusted home network. Any device able to observe mDNS on that network can
-read them. Use a restricted TVheadend account, isolate untrusted Wi-Fi clients,
-and do not run this announcer on an untrusted network.
+for a trusted home network. Omitting both means anonymous access; partial
+credentials are rejected. Any device able to observe mDNS on that network can
+read configured credentials. Use a restricted TVheadend account, isolate
+untrusted Wi-Fi clients, and do not run this announcer on an untrusted network.

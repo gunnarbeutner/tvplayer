@@ -294,7 +294,7 @@ actor TopShelfSnapshotPublisher {
         if let baseURL = configuration.baseURL,
            url.scheme?.lowercased() == baseURL.scheme?.lowercased(),
            url.host?.lowercased() == baseURL.host?.lowercased(),
-           !configuration.username.isEmpty {
+           configuration.usesAuthentication {
             let credentials = Data("\(configuration.username):\(configuration.password)".utf8)
                 .base64EncodedString()
             request.setValue("Basic \(credentials)", forHTTPHeaderField: "Authorization")

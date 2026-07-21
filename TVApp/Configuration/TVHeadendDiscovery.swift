@@ -22,10 +22,11 @@ struct DiscoveredTVHeadendSettings: Equatable {
         guard let record = DNSServiceTXTRecord(fields: fields),
               record.value("txtvers") == "1",
               let discoveryID = record.value("id"), !discoveryID.isEmpty,
-              let baseURL = record.endpointURL(hostName: hostName, port: port),
-              let username = record.value("username"), !username.isEmpty,
-              let password = record.rawValue("password"), !password.isEmpty
+              let baseURL = record.endpointURL(hostName: hostName, port: port)
         else { return nil }
+        let username = record.value("username") ?? ""
+        let password = record.rawValue("password") ?? ""
+        guard username.isEmpty == password.isEmpty else { return nil }
 
         let profile = record.value("profile") ?? "pass"
         let htspPort: Int

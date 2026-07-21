@@ -169,6 +169,28 @@ final class HTSPTimeshiftTests: XCTestCase {
         XCTAssertEqual(fields["profile"], .string("pass"))
     }
 
+    func testHTSPAuthenticationSupportsAnonymousOrCompleteCredentials() throws {
+        XCTAssertNil(try HTSPConnection.authenticationFields(
+            username: "",
+            password: "",
+            challenge: nil
+        ))
+
+        let fields = try XCTUnwrap(HTSPConnection.authenticationFields(
+            username: "viewer",
+            password: "secret",
+            challenge: Data(repeating: 0x2a, count: 32)
+        ))
+        XCTAssertEqual(fields["username"], .string("viewer"))
+        XCTAssertNotNil(fields["digest"]?.dataValue)
+
+        XCTAssertThrowsError(try HTSPConnection.authenticationFields(
+            username: "viewer",
+            password: "",
+            challenge: Data(repeating: 0x2a, count: 32)
+        ))
+    }
+
     func testControlResponseValidationRejectsRPCError() {
         XCTAssertThrowsError(
             try HTSPConnection.validate(response: ["error": .string("seek unavailable")])

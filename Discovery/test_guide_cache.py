@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from guide_cache import GuideCache
 
@@ -21,6 +22,35 @@ class FakeOpener:
 
 
 class GuideCacheTests(unittest.TestCase):
+    def test_anonymous_cache_uses_an_unauthenticated_opener(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "guide_cache.urllib.request.build_opener"
+        ) as build_opener:
+            opener = object()
+            build_opener.return_value = opener
+
+            cache = GuideCache(
+                base_url="http://tvheadend.test:9981",
+                username="",
+                password="",
+                cache_path=str(Path(directory) / "guide-cache.json"),
+            )
+
+            self.assertIs(cache._opener, opener)
+            build_opener.assert_called_once_with()
+
+    def test_cache_rejects_partial_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            for username, password in [("viewer", ""), ("", "secret")]:
+                with self.subTest(username=username, password=password):
+                    with self.assertRaisesRegex(ValueError, "provided together"):
+                        GuideCache(
+                            base_url="http://tvheadend.test:9981",
+                            username=username,
+                            password=password,
+                            cache_path=str(Path(directory) / "guide-cache.json"),
+                        )
+
     def test_finished_programmes_remain_in_json_until_retention_expires(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "guide-cache.json")

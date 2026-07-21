@@ -303,9 +303,6 @@ final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
                 "htspversion": .int(Self.protocolVersion),
             ]
         )
-        guard let challenge = hello["challenge"]?.dataValue else {
-            throw HTSPCodecError.malformedMessage
-        }
         negotiatedVersion = min(
             Self.protocolVersion,
             hello["htspversion"]?.intValue ?? 0
@@ -314,24 +311,44 @@ final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
             hello["servercapability"]?.listValue?.compactMap(\.stringValue) ?? []
         )
 
-        var authenticationData = Data(password.utf8)
-        authenticationData.append(challenge)
-        let digest = Data(Insecure.SHA1.hash(data: authenticationData))
-        let authentication = try request(
-            method: "authenticate",
-            fields: [
-                "username": .string(username),
-                "digest": .data(digest),
-            ]
-        )
-        if authentication["noaccess"]?.intValue == 1 {
-            throw HTSPError.authenticationFailed
+        if let authenticationFields = try Self.authenticationFields(
+            username: username,
+            password: password,
+            challenge: hello["challenge"]?.dataValue
+        ) {
+            let authentication = try request(
+                method: "authenticate",
+                fields: authenticationFields
+            )
+            if authentication["noaccess"]?.intValue == 1 {
+                throw HTSPError.authenticationFailed
+            }
         }
         do {
             _ = try request(method: "getSysTime")
         } catch HTSPError.authenticationFailed {
             throw HTSPError.streamingUnavailable
         }
+    }
+
+    static func authenticationFields(
+        username: String,
+        password: String,
+        challenge: Data?
+    ) throws -> [String: HTSPValue]? {
+        let hasUsername = !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard hasUsername == !password.isEmpty else {
+            throw HTSPError.authenticationFailed
+        }
+        guard hasUsername else { return nil }
+        guard let challenge else { throw HTSPCodecError.malformedMessage }
+
+        var authenticationData = Data(password.utf8)
+        authenticationData.append(challenge)
+        return [
+            "username": .string(username),
+            "digest": .data(Data(Insecure.SHA1.hash(data: authenticationData))),
+        ]
     }
 
     private static var clientName: String {

@@ -31,7 +31,15 @@ struct TVHeadendConfiguration: Equatable, Sendable {
     }
 
     var isComplete: Bool {
-        baseURL != nil && !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !password.isEmpty
+        baseURL != nil && hasValidAuthentication
+    }
+
+    var usesAuthentication: Bool {
+        !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var hasValidAuthentication: Bool {
+        usesAuthentication == !password.isEmpty
     }
 
     /// Separates on-device guide snapshots by source without persisting the
@@ -91,6 +99,7 @@ enum ConfigurationError: LocalizedError {
     case invalidHTSPPort
     case invalidGuideCacheURL
     case invalidXMLTVURL
+    case incompleteCredentials
     case keychain(String)
 
     var errorDescription: String? {
@@ -103,6 +112,8 @@ enum ConfigurationError: LocalizedError {
             return "The guide cache must be a valid HTTP or HTTPS URL."
         case .invalidXMLTVURL:
             return "The XMLTV override must be a valid HTTP or HTTPS URL."
+        case .incompleteCredentials:
+            return "Enter both a username and password, or clear both fields for anonymous access."
         case let .keychain(message):
             return "The password could not be saved securely: \(message)"
         }
