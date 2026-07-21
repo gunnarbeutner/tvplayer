@@ -21,6 +21,7 @@ struct ChannelsView: View {
     @EnvironmentObject private var channelPreferences: ChannelPreferencesStore
     @FocusState private var focusedChannelID: GuideChannel.ID?
     @State private var detail: ProgrammeDetailPresentation?
+    @State private var reorderedChannelID: GuideChannel.ID?
 
     private let columns = [
         GridItem(
@@ -48,64 +49,70 @@ struct ChannelsView: View {
                     }
                 )
             } else {
-                ScrollView {
-                    LazyVGrid(columns: columns, alignment: .leading, spacing: 30) {
-                        ForEach(displayedChannels) { channel in
-                            ChannelCard(
-                                channel: channel,
-                                currentProgram: currentProgram(for: channel),
-                                isFavorite: channelPreferences.isFavorite(channel.id),
-                                isFocused: focusedChannelID == channel.id,
-                                onWatch: {
-                                    playback.start(
-                                        channel: channel,
+                ScrollViewReader { scrollProxy in
+                    ScrollView {
+                        LazyVGrid(columns: columns, alignment: .leading, spacing: 30) {
+                            ForEach(displayedChannels) { channel in
+                                ChannelCard(
+                                    channel: channel,
+                                    currentProgram: currentProgram(for: channel),
+                                    isFavorite: channelPreferences.isFavorite(channel.id),
+                                    isFocused: focusedChannelID == channel.id,
+                                    onWatch: {
+                                        playback.start(
+                                            channel: channel,
+                                            program: currentProgram(for: channel),
+                                            configuration: settings.configuration
+                                        )
+                                    }
+                                )
+                                .id(channel.id)
+                                .contentShape(RoundedRectangle(cornerRadius: 14))
+                                .focusable()
+                                .focused($focusedChannelID, equals: channel.id)
+                                .focusEffectDisabled()
+                                .onTapGesture {
+                                    detail = ProgrammeDetailPresentation(
                                         program: currentProgram(for: channel),
-                                        configuration: settings.configuration
+                                        channel: channel
                                     )
                                 }
-                            )
-                            .contentShape(RoundedRectangle(cornerRadius: 14))
-                            .focusable()
-                            .focused($focusedChannelID, equals: channel.id)
-                            .focusEffectDisabled()
-                            .onTapGesture {
-                                detail = ProgrammeDetailPresentation(
-                                    program: currentProgram(for: channel),
-                                    channel: channel
-                                )
-                            }
-                            .contextMenu {
-                                Button {
-                                    channelPreferences.toggleFavorite(channel.id)
-                                } label: {
-                                    Label(
-                                        channelPreferences.isFavorite(channel.id)
-                                            ? "Remove Channel from Favourites"
-                                            : "Add Channel to Favourites",
-                                        systemImage: channelPreferences.isFavorite(channel.id)
-                                            ? "star.slash"
-                                            : "star"
+                                .contextMenu {
+                                    Button {
+                                        toggleFavorite(channel.id)
+                                    } label: {
+                                        Label(
+                                            channelPreferences.isFavorite(channel.id)
+                                                ? "Remove Channel from Favourites"
+                                                : "Add Channel to Favourites",
+                                            systemImage: channelPreferences.isFavorite(channel.id)
+                                                ? "star.slash"
+                                                : "star"
+                                        )
+                                    }
+                                }
+                                .accessibilityAddTraits(.isButton)
+                                .accessibilityAction {
+                                    detail = ProgrammeDetailPresentation(
+                                        program: currentProgram(for: channel),
+                                        channel: channel
                                     )
                                 }
-                            }
-                            .accessibilityAddTraits(.isButton)
-                            .accessibilityAction {
-                                detail = ProgrammeDetailPresentation(
-                                    program: currentProgram(for: channel),
-                                    channel: channel
-                                )
-                            }
-                            .accessibilityAction(
-                                named: channelPreferences.isFavorite(channel.id)
-                                    ? "Remove Channel from Favourites"
-                                    : "Add Channel to Favourites"
-                            ) {
-                                channelPreferences.toggleFavorite(channel.id)
+                                .accessibilityAction(
+                                    named: channelPreferences.isFavorite(channel.id)
+                                        ? "Remove Channel from Favourites"
+                                        : "Add Channel to Favourites"
+                                ) {
+                                    toggleFavorite(channel.id)
+                                }
                             }
                         }
+                        .padding(.horizontal, PlatformLayout.contentPadding)
+                        .padding(.vertical, PlatformLayout.contentVerticalPadding)
                     }
-                    .padding(.horizontal, PlatformLayout.contentPadding)
-                    .padding(.vertical, PlatformLayout.contentVerticalPadding)
+                    .onChange(of: channelPreferences.revision) { _, _ in
+                        revealReorderedChannel(using: scrollProxy)
+                    }
                 }
             }
         }
@@ -178,6 +185,26 @@ struct ChannelsView: View {
 
     private func currentProgram(for channel: GuideChannel) -> GuideProgram? {
         channel.programs.first { $0.isAiring(at: model.now) }
+    }
+
+    private func toggleFavorite(_ channelID: GuideChannel.ID) {
+        reorderedChannelID = channelID
+        channelPreferences.toggleFavorite(channelID)
+    }
+
+    private func revealReorderedChannel(using scrollProxy: ScrollViewProxy) {
+        guard let channelID = reorderedChannelID else { return }
+        reorderedChannelID = nil
+        Task { @MainActor in
+            // Let the LazyVGrid apply its new favourites-first ordering before
+            // resolving the channel ID to a scroll position.
+            await Task.yield()
+            guard displayedChannels.contains(where: { $0.id == channelID }) else { return }
+            withAnimation(.easeOut(duration: 0.2)) {
+                scrollProxy.scrollTo(channelID, anchor: .center)
+            }
+            focusedChannelID = channelID
+        }
     }
 
     private func playFromDetails(_ channel: GuideChannel, _ program: GuideProgram?) {
