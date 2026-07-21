@@ -179,15 +179,36 @@ struct PlaybackOutputCounters: Equatable {
 /// discontinuity and presented media decoded after it. VLC can retain decoded
 /// pictures and audio while paused; those samples must not become visible when
 /// playback is resumed after moving within the timeshift buffer.
+struct PostSeekPlaybackOutputGateDiagnostics: Equatable {
+    enum Phase: String {
+        case inactive
+        case armed
+        case waitingForDiscontinuity
+        case establishingDiscontinuityBaseline
+        case waitingForSustainedOutput
+        case waitingForStablePictures
+        case ready
+    }
+
+    let phase: Phase
+    let sustainedOutputMilliseconds: Int64
+    let requiredSustainedOutputMilliseconds: Int64
+    let displayedPictureAdvance: Int
+    let requiredDisplayedPictureAdvance: Int
+}
+
 struct PostSeekPlaybackOutputGate {
     private(set) var isArmed = false
     private(set) var isConcealing = false
     private var isEvaluatingFreshOutput = false
     private var baselineDiscontinuities = 0
-    private var minimumPlaybackProgressMilliseconds: Int64 = 0
+    private var minimumPrerollDurationMilliseconds: Int64 = 0
+    private var minimumSustainedOutputMilliseconds: Int64 = 0
     private var minimumDisplayedPictureAdvance = 0
     private var outputAfterDiscontinuity: PlaybackOutputCounters?
-    private var outputAfterMinimumPlaybackProgress: PlaybackOutputCounters?
+    private var firstFreshOutputAt: Date?
+    private var previousObservedOutput: PlaybackOutputCounters?
+    private var pictureEpochBaseline: PlaybackOutputCounters?
     private var startsWithFreshPipeline = false
 
     mutating func arm(from output: PlaybackOutputCounters) {
@@ -196,12 +217,20 @@ struct PostSeekPlaybackOutputGate {
         isEvaluatingFreshOutput = false
         baselineDiscontinuities = output.demuxDiscontinuities
         outputAfterDiscontinuity = nil
-        outputAfterMinimumPlaybackProgress = nil
+        firstFreshOutputAt = nil
+        previousObservedOutput = nil
+        pictureEpochBaseline = nil
         startsWithFreshPipeline = false
     }
 
-    mutating func requirePlaybackProgress(_ duration: TimeInterval) {
-        minimumPlaybackProgressMilliseconds = Int64(
+    mutating func requirePrerollDuration(_ duration: TimeInterval) {
+        minimumPrerollDurationMilliseconds = Int64(
+            (max(0, duration) * 1_000).rounded(.up)
+        )
+    }
+
+    mutating func requireSustainedOutput(_ duration: TimeInterval) {
+        minimumSustainedOutputMilliseconds = Int64(
             (max(0, duration) * 1_000).rounded(.up)
         )
     }
@@ -222,7 +251,9 @@ struct PostSeekPlaybackOutputGate {
         startsWithFreshPipeline = true
         baselineDiscontinuities = 0
         outputAfterDiscontinuity = nil
-        outputAfterMinimumPlaybackProgress = nil
+        firstFreshOutputAt = nil
+        previousObservedOutput = nil
+        pictureEpochBaseline = nil
     }
 
     @discardableResult
@@ -242,20 +273,25 @@ struct PostSeekPlaybackOutputGate {
             // The demuxer may consume the marker while VLC is paused. In that
             // case presentation still needs to advance after playback starts.
             outputAfterDiscontinuity = output
+            previousObservedOutput = output
+            pictureEpochBaseline = output
         }
         return true
     }
 
     /// Returns true once output can safely be revealed.
-    mutating func observe(_ output: PlaybackOutputCounters) -> Bool {
+    mutating func observe(_ output: PlaybackOutputCounters, at date: Date = Date()) -> Bool {
         guard isArmed, isEvaluatingFreshOutput else { return false }
 
         if output.demuxDiscontinuities < baselineDiscontinuities {
             // VLC statistics restart if the media pipeline is recreated.
             baselineDiscontinuities = 0
             outputAfterDiscontinuity = nil
+            firstFreshOutputAt = nil
+            previousObservedOutput = nil
+            pictureEpochBaseline = nil
         }
-        // Counter/clock progress alone is unsafe here: VLC can drain many
+        // Counter progress alone is unsafe here: VLC can drain many
         // seconds of queued pre-seek media before it consumes our transport
         // discontinuity. Keep that stale output hidden until the demuxer has
         // explicitly crossed into the new epoch.
@@ -263,22 +299,38 @@ struct PostSeekPlaybackOutputGate {
 
         guard let outputAfterDiscontinuity else {
             self.outputAfterDiscontinuity = output
+            previousObservedOutput = output
+            pictureEpochBaseline = output
             return false
         }
-        guard isConcealing, hasReachedMinimumPlaybackProgress(in: output) else { return false }
-        let freshnessBaseline: PlaybackOutputCounters
-        if minimumPlaybackProgressMilliseconds > 0 {
-            guard let outputAfterMinimumPlaybackProgress else {
-                self.outputAfterMinimumPlaybackProgress = output
-                return false
-            }
-            freshnessBaseline = outputAfterMinimumPlaybackProgress
-        } else {
-            freshnessBaseline = outputAfterDiscontinuity
+
+        guard isConcealing else { return false }
+        let previous = previousObservedOutput ?? outputAfterDiscontinuity
+        let countersReset = output.displayedPictures < previous.displayedPictures
+            || output.playedAudioBuffers < previous.playedAudioBuffers
+        if countersReset {
+            pictureEpochBaseline = output
         }
+        let outputAdvancedNow = output.hasAdvanced(since: previous)
+        if firstFreshOutputAt == nil, outputAdvancedNow { firstFreshOutputAt = date }
+        let videoAdvancedNow = output.displayedPictures > previous.displayedPictures
+        previousObservedOutput = output
+
+        guard let firstFreshOutputAt else { return false }
+        let requiredDuration = max(
+            minimumPrerollDurationMilliseconds,
+            minimumSustainedOutputMilliseconds
+        )
+        let wallProgress = Int64(
+            (max(0, date.timeIntervalSince(firstFreshOutputAt)) * 1_000).rounded(.down)
+        )
+        guard wallProgress >= requiredDuration else { return false }
+
+        let freshnessBaseline = pictureEpochBaseline ?? outputAfterDiscontinuity
         let hasFreshOutput = minimumDisplayedPictureAdvance > 0
-            ? output.displayedPictures - freshnessBaseline.displayedPictures
-                >= minimumDisplayedPictureAdvance
+            ? videoAdvancedNow
+                && output.displayedPictures - freshnessBaseline.displayedPictures
+                    >= minimumDisplayedPictureAdvance
             : output.hasAdvanced(since: freshnessBaseline)
         guard hasFreshOutput else { return false }
 
@@ -286,13 +338,76 @@ struct PostSeekPlaybackOutputGate {
         return true
     }
 
+    func diagnostics(
+        for output: PlaybackOutputCounters,
+        at date: Date = Date()
+    ) -> PostSeekPlaybackOutputGateDiagnostics {
+        func result(
+            _ phase: PostSeekPlaybackOutputGateDiagnostics.Phase,
+            progress: Int64 = 0,
+            pictures: Int = 0
+        ) -> PostSeekPlaybackOutputGateDiagnostics {
+            PostSeekPlaybackOutputGateDiagnostics(
+                phase: phase,
+                sustainedOutputMilliseconds: progress,
+                requiredSustainedOutputMilliseconds: max(
+                    minimumPrerollDurationMilliseconds,
+                    minimumSustainedOutputMilliseconds
+                ),
+                displayedPictureAdvance: pictures,
+                requiredDisplayedPictureAdvance: minimumDisplayedPictureAdvance
+            )
+        }
+
+        guard isArmed else { return result(.inactive) }
+        guard isEvaluatingFreshOutput else { return result(.armed) }
+        guard hasObservedDiscontinuity(in: output) else {
+            return result(.waitingForDiscontinuity)
+        }
+        guard let outputAfterDiscontinuity else {
+            return result(.establishingDiscontinuityBaseline)
+        }
+
+        let freshOutputAt = firstFreshOutputAt
+            ?? (output.hasAdvanced(since: previousObservedOutput ?? outputAfterDiscontinuity)
+                ? date
+                : nil)
+        let sustainedOutput = Int64(
+            (max(0, date.timeIntervalSince(freshOutputAt ?? date)) * 1_000).rounded(.down)
+        )
+        let requiredProgress = max(
+            minimumPrerollDurationMilliseconds,
+            minimumSustainedOutputMilliseconds
+        )
+        guard isConcealing, sustainedOutput >= requiredProgress else {
+            return result(.waitingForSustainedOutput, progress: sustainedOutput)
+        }
+        let freshnessBaseline = pictureEpochBaseline ?? outputAfterDiscontinuity
+        let pictureAdvance = max(
+            0,
+            output.displayedPictures - freshnessBaseline.displayedPictures
+        )
+        let videoAdvancedNow = output.displayedPictures
+            > (previousObservedOutput ?? outputAfterDiscontinuity).displayedPictures
+        guard pictureAdvance >= minimumDisplayedPictureAdvance,
+              minimumDisplayedPictureAdvance == 0 || videoAdvancedNow else {
+            return result(
+                .waitingForStablePictures,
+                progress: sustainedOutput,
+                pictures: pictureAdvance
+            )
+        }
+        return result(.ready, progress: sustainedOutput, pictures: pictureAdvance)
+    }
+
     @discardableResult
     mutating func suspendConcealing() -> Bool {
         let wasConcealing = isConcealing
         isConcealing = false
         outputAfterDiscontinuity = nil
-        outputAfterMinimumPlaybackProgress = nil
-        outputAfterMinimumPlaybackProgress = nil
+        firstFreshOutputAt = nil
+        previousObservedOutput = nil
+        pictureEpochBaseline = nil
         return wasConcealing
     }
 
@@ -307,24 +422,18 @@ struct PostSeekPlaybackOutputGate {
         startsWithFreshPipeline || output.demuxDiscontinuities > baselineDiscontinuities
     }
 
-    private func hasReachedMinimumPlaybackProgress(
-        in output: PlaybackOutputCounters
-    ) -> Bool {
-        guard minimumPlaybackProgressMilliseconds > 0 else { return true }
-        guard let baselineTime = outputAfterDiscontinuity?.playbackTimeMilliseconds,
-              let outputTime = output.playbackTimeMilliseconds
-        else { return false }
-        return abs(outputTime - baselineTime) >= minimumPlaybackProgressMilliseconds
-    }
-
     private mutating func reset() {
         isArmed = false
         isConcealing = false
         isEvaluatingFreshOutput = false
         baselineDiscontinuities = 0
-        minimumPlaybackProgressMilliseconds = 0
+        minimumPrerollDurationMilliseconds = 0
+        minimumSustainedOutputMilliseconds = 0
         minimumDisplayedPictureAdvance = 0
         outputAfterDiscontinuity = nil
+        firstFreshOutputAt = nil
+        previousObservedOutput = nil
+        pictureEpochBaseline = nil
         startsWithFreshPipeline = false
     }
 }
@@ -770,7 +879,9 @@ struct HTSPAbsoluteSeekCoordinator {
             return .seek(desiredTarget)
         }
 
-        if !satisfiedLiveEdge, let desiredTarget, serverLandingTime > desiredTarget {
+        if !satisfiedLiveEdge,
+           let desiredTarget,
+           serverLandingTime > desiredTarget + Self.landingTolerance {
             let earlierTarget = clamp(desiredTarget - earlierSeekBackoff)
             if earlierTarget < desiredTarget {
                 earlierSeekBackoff = min(earlierSeekBackoff, Int64.max / 2) * 2

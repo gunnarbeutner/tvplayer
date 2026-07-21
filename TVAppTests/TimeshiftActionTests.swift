@@ -3,6 +3,12 @@ import XCTest
 @testable import TVApp
 
 final class TimeshiftActionTests: XCTestCase {
+    func testTimelineSeekCommitPolicyCoalescesTapsButCommitsHeldSeekOnRelease() {
+        XCTAssertEqual(TimelineSeekCommitPolicy.coalescingDelayMilliseconds, 250)
+        XCTAssertNil(TimelineSeekCommitPolicy.delayAfterRemoteRelease(didRepeat: false))
+        XCTAssertEqual(TimelineSeekCommitPolicy.delayAfterRemoteRelease(didRepeat: true), 0)
+    }
+
     func testPlayStartsNativeTimeshift() {
         let (controller, sink) = makeController()
 
@@ -907,6 +913,27 @@ final class TimeshiftActionTests: XCTestCase {
         )
     }
 
+    func testAbsoluteSeekAcceptsLandingWithinToleranceAfterTarget() {
+        var coordinator = HTSPAbsoluteSeekCoordinator()
+        _ = coordinator.update(
+            metrics: timeshiftMetrics(start: 0, end: 120, delay: 30),
+            updateCurrentPosition: true
+        )
+
+        XCTAssertEqual(coordinator.requestRelative(seconds: -15), 75_000_000)
+        XCTAssertEqual(
+            coordinator.complete(landingTime: 75_200_000),
+            .buffer(
+                HTSPNavigationResult(
+                    landingTime: 75_000_000,
+                    serverLandingTime: 75_200_000,
+                    bufferStartTime: 0,
+                    liveEdgeTime: 120_000_000
+                )
+            )
+        )
+    }
+
     func testSeekRequestedBeforeStatusWaitsForServerBounds() {
         var coordinator = HTSPAbsoluteSeekCoordinator()
 
@@ -1192,6 +1219,79 @@ final class TimeshiftActionTests: XCTestCase {
         )
     }
 
+    func testPostSeekOutputGateDiagnosticsSeparateProgressAndStablePictures() {
+        var gate = PostSeekPlaybackOutputGate()
+        let startedAt = Date(timeIntervalSinceReferenceDate: 1_000)
+        let initial = PlaybackOutputCounters(
+            displayedPictures: 0,
+            playedAudioBuffers: 0,
+            playbackTimeMilliseconds: 1_000
+        )
+        gate.arm(from: initial)
+        gate.requirePrerollDuration(0.1)
+        gate.requireDisplayedPictures(2)
+        gate.markPipelineRecreated()
+        XCTAssertTrue(gate.beginConcealing(from: initial))
+
+        XCTAssertEqual(
+            gate.diagnostics(for: initial, at: startedAt).phase,
+            .waitingForSustainedOutput
+        )
+        let targetReached = PlaybackOutputCounters(
+            displayedPictures: 1,
+            playedAudioBuffers: 1,
+            playbackTimeMilliseconds: 1_100
+        )
+        XCTAssertFalse(gate.observe(targetReached, at: startedAt))
+        XCTAssertEqual(
+            gate.diagnostics(
+                for: targetReached,
+                at: startedAt.addingTimeInterval(0.099)
+            ).phase,
+            .waitingForSustainedOutput
+        )
+        let stable = PlaybackOutputCounters(
+            displayedPictures: 3,
+            playedAudioBuffers: 3,
+            playbackTimeMilliseconds: 1_180
+        )
+        let readyAt = startedAt.addingTimeInterval(0.1)
+        XCTAssertEqual(gate.diagnostics(for: stable, at: readyAt).phase, .ready)
+        XCTAssertTrue(gate.observe(stable, at: readyAt))
+    }
+
+    func testPostSeekOutputGateRejectsBurstUntilVideoAdvancesAfterStabilityWindow() {
+        var gate = PostSeekPlaybackOutputGate()
+        let startedAt = Date(timeIntervalSinceReferenceDate: 2_000)
+        let initial = PlaybackOutputCounters(
+            displayedPictures: 0,
+            playedAudioBuffers: 0
+        )
+        gate.arm(from: initial)
+        gate.requireSustainedOutput(1)
+        gate.requireDisplayedPictures(12)
+        gate.markPipelineRecreated()
+        XCTAssertTrue(gate.beginConcealing(from: initial))
+
+        let burst = PlaybackOutputCounters(
+            displayedPictures: 12,
+            playedAudioBuffers: 20
+        )
+        XCTAssertFalse(gate.observe(burst, at: startedAt))
+        XCTAssertFalse(
+            gate.observe(burst, at: startedAt.addingTimeInterval(1.1))
+        )
+        XCTAssertTrue(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 13,
+                    playedAudioBuffers: 21
+                ),
+                at: startedAt.addingTimeInterval(1.201)
+            )
+        )
+    }
+
     func testPostSeekOutputGatePrimesFreshPictureAfterImmediatePausedConcealment() {
         var gate = PostSeekPlaybackOutputGate()
         let beforeSeek = PlaybackOutputCounters(
@@ -1373,6 +1473,7 @@ final class TimeshiftActionTests: XCTestCase {
 
     func testPostSeekOutputGateConcealsKeyframePrerollUntilExactTarget() {
         var gate = PostSeekPlaybackOutputGate()
+        let startedAt = Date(timeIntervalSinceReferenceDate: 3_000)
         let beforeResume = PlaybackOutputCounters(
             displayedPictures: 100,
             playedAudioBuffers: 200,
@@ -1380,7 +1481,7 @@ final class TimeshiftActionTests: XCTestCase {
             playbackTimeMilliseconds: 10_000
         )
         gate.arm(from: beforeResume)
-        gate.requirePlaybackProgress(1.2)
+        gate.requirePrerollDuration(1.2)
         XCTAssertTrue(gate.beginConcealing(from: beforeResume))
 
         XCTAssertFalse(
@@ -1390,7 +1491,8 @@ final class TimeshiftActionTests: XCTestCase {
                     playedAudioBuffers: 201,
                     demuxDiscontinuities: 6,
                     playbackTimeMilliseconds: 8_000
-                )
+                ),
+                at: startedAt
             )
         )
         XCTAssertFalse(
@@ -1400,7 +1502,8 @@ final class TimeshiftActionTests: XCTestCase {
                     playedAudioBuffers: 220,
                     demuxDiscontinuities: 6,
                     playbackTimeMilliseconds: 9_199
-                )
+                ),
+                at: startedAt
             )
         )
         XCTAssertFalse(
@@ -1410,7 +1513,8 @@ final class TimeshiftActionTests: XCTestCase {
                     playedAudioBuffers: 221,
                     demuxDiscontinuities: 6,
                     playbackTimeMilliseconds: 9_200
-                )
+                ),
+                at: startedAt.addingTimeInterval(1.199)
             )
         )
         XCTAssertTrue(
@@ -1420,7 +1524,8 @@ final class TimeshiftActionTests: XCTestCase {
                     playedAudioBuffers: 222,
                     demuxDiscontinuities: 6,
                     playbackTimeMilliseconds: 9_240
-                )
+                ),
+                at: startedAt.addingTimeInterval(1.201)
             )
         )
     }

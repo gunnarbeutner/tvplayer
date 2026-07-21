@@ -31,6 +31,16 @@ enum PlaybackRecoveryReason: Equatable {
     }
 }
 
+#if DEBUG
+private struct TimeshiftSeekPhaseTrace {
+    let startedAt: TimeInterval
+    var pipelineBaseline: PlaybackOutputCounters?
+    var didLogFirstAudio = false
+    var didLogFirstVideo = false
+    var lastGatePhase: PostSeekPlaybackOutputGateDiagnostics.Phase?
+}
+#endif
+
 struct LiveStreamRequest: Equatable {
     let url: URL
     let networkCachingMilliseconds: Int
@@ -150,6 +160,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private var recoveryAttempt = 0
     private var outputHealthMonitor = PlaybackOutputHealthMonitor()
     private var postSeekOutputGate = PostSeekPlaybackOutputGate()
+#if DEBUG
+    private var timeshiftSeekPhaseTrace: TimeshiftSeekPhaseTrace?
+#endif
     private var shouldRestoreAudioAfterOutputGate = false
     private var isPrimingPausedSeekFrame = false
     private var concealsSeekAfterPausedFrameCapture = false
@@ -588,7 +601,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             bufferedBytes = 0
         }
         let output = playbackOutputCounters
-        updatePostSeekOutputGate(with: output)
+        updatePostSeekOutputGate(with: output, at: date)
         if !postSeekOutputGate.isConcealing {
             confirmPlaybackResumeIfOutputAdvanced(output: output, at: date)
         }
@@ -777,6 +790,14 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                 case let .success(navigation):
                     navigationSucceeded = true
                     self.timeshiftNavigationDebugState = "server navigation completed"
+#if DEBUG
+                    self.traceTimeshiftSeekPhase(
+                        String(
+                            format: "server-buffer-ready preroll=%.1fms",
+                            navigation.prerollDuration * 1_000
+                        )
+                    )
+#endif
                     self.applyNavigationLanding(navigation)
                     await self.replaceVLCPipelineAfterTimeshiftNavigation()
                 case let .failure(error):
@@ -1142,6 +1163,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             // accelerating here leaks fast audio and can starve video after
             // the output gate opens.
             postSeekOutputGate.requireDisplayedPictures(12)
+            // VLC can publish a burst of destination pictures and then pause
+            // video for roughly half a second while audio continues. Require
+            // a full second of wall-clock output and a picture advancing in
+            // the reveal observation; VLC's startup clock is not monotonic.
+            postSeekOutputGate.requireSustainedOutput(1)
         }
         playbackRate = 1
         beginPostSeekOutputConcealmentIfNeeded()
@@ -1153,6 +1179,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 
     private func replaceVLCPipelineAfterTimeshiftNavigation() async {
         guard let stream = nativeInputStream, let request = activeRequest else { return }
+#if DEBUG
+        let replacementStartedAt = ProcessInfo.processInfo.systemUptime
+#endif
         mediaPlayer.stop()
         // LibVLC 4 stops asynchronously. Installing and playing the fresh
         // media before the Stopped callback lets the old input teardown race
@@ -1161,6 +1190,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             guard !Task.isCancelled else { return }
             try? await Task.sleep(for: .milliseconds(10))
         }
+#if DEBUG
+        let stoppedAt = ProcessInfo.processInfo.systemUptime
+#endif
         let reader = stream.makeVLCReader()
         retainedNativeVLCReaders.append(reader)
         let media = Self.makeMedia(stream: reader)
@@ -1168,6 +1200,19 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         addCachingOptions(to: media, milliseconds: request.networkCachingMilliseconds)
         mediaPlayer.media = media
         postSeekOutputGate.markPipelineRecreated()
+#if DEBUG
+        let installedAt = ProcessInfo.processInfo.systemUptime
+        if timeshiftSeekPhaseTrace != nil {
+            timeshiftSeekPhaseTrace?.pipelineBaseline = playbackOutputCounters
+            traceTimeshiftSeekPhase(
+                String(
+                    format: "pipeline-installed stop=%.1fms install=%.1fms",
+                    (stoppedAt - replacementStartedAt) * 1_000,
+                    (installedAt - stoppedAt) * 1_000
+                )
+            )
+        }
+#endif
         outputHealthMonitor.restartGracePeriod(
             output: PlaybackOutputCounters(displayedPictures: 0, playedAudioBuffers: 0),
             at: Date()
@@ -1183,7 +1228,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         _ navigation: HTSPNavigationResult,
         at date: Date = Date()
     ) {
-        postSeekOutputGate.requirePlaybackProgress(navigation.prerollDuration)
+        postSeekOutputGate.requirePrerollDuration(navigation.prerollDuration)
         let liveEdge = date
         let landingDate = liveEdge.addingTimeInterval(-navigation.liveDelay)
         livePlaybackPosition.moveAnchor(
@@ -1224,8 +1269,14 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         }
     }
 
-    private func updatePostSeekOutputGate(with output: PlaybackOutputCounters) {
-        guard postSeekOutputGate.observe(output) else { return }
+    private func updatePostSeekOutputGate(
+        with output: PlaybackOutputCounters,
+        at date: Date
+    ) {
+#if DEBUG
+        traceTimeshiftSeekOutput(output, at: date)
+#endif
+        guard postSeekOutputGate.observe(output, at: date) else { return }
         if isPrimingPausedSeekFrame {
             isPrimingPausedSeekFrame = false
             mediaPlayer.rate = 1
@@ -1242,7 +1293,63 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             revealPostSeekPlaybackOutput()
         }
         logger.info("Revealed stable VLC output after the post-seek discontinuity")
+#if DEBUG
+        traceTimeshiftSeekPhase("output-revealed")
+        timeshiftSeekPhaseTrace = nil
+#endif
     }
+
+#if DEBUG
+    private func beginTimeshiftSeekPhaseTrace() {
+        timeshiftSeekPhaseTrace = TimeshiftSeekPhaseTrace(
+            startedAt: ProcessInfo.processInfo.systemUptime
+        )
+        traceTimeshiftSeekPhase("navigation-started")
+    }
+
+    private func traceTimeshiftSeekPhase(_ detail: String) {
+        guard let trace = timeshiftSeekPhaseTrace else { return }
+        let elapsed = (ProcessInfo.processInfo.systemUptime - trace.startedAt) * 1_000
+        print(String(format: "VLC_TIMESHIFT_PHASE +%.1fms %@", elapsed, detail))
+        fflush(stdout)
+    }
+
+    private func traceTimeshiftSeekOutput(
+        _ output: PlaybackOutputCounters,
+        at date: Date
+    ) {
+        guard var trace = timeshiftSeekPhaseTrace else { return }
+        if let baseline = trace.pipelineBaseline {
+            if !trace.didLogFirstAudio,
+               output.playedAudioBuffers > baseline.playedAudioBuffers {
+                trace.didLogFirstAudio = true
+                timeshiftSeekPhaseTrace = trace
+                traceTimeshiftSeekPhase("first-audio-output")
+            }
+            if !trace.didLogFirstVideo,
+               output.displayedPictures > baseline.displayedPictures {
+                trace.didLogFirstVideo = true
+                timeshiftSeekPhaseTrace = trace
+                traceTimeshiftSeekPhase("first-video-output")
+            }
+        }
+
+        let diagnostics = postSeekOutputGate.diagnostics(for: output, at: date)
+        if diagnostics.phase != trace.lastGatePhase {
+            trace.lastGatePhase = diagnostics.phase
+            timeshiftSeekPhaseTrace = trace
+            traceTimeshiftSeekPhase(
+                "gate=\(diagnostics.phase.rawValue) "
+                    + "output=\(diagnostics.sustainedOutputMilliseconds)/"
+                    + "\(diagnostics.requiredSustainedOutputMilliseconds)ms "
+                    + "pictures=\(diagnostics.displayedPictureAdvance)/"
+                    + "\(diagnostics.requiredDisplayedPictureAdvance)"
+            )
+        } else {
+            timeshiftSeekPhaseTrace = trace
+        }
+    }
+#endif
 
     private func suspendPostSeekOutputConcealment() {
         guard !isPrimingPausedSeekFrame else { return }
@@ -1255,6 +1362,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         isPrimingPausedSeekFrame = false
         concealsSeekAfterPausedFrameCapture = false
         postSeekOutputGate.cancel()
+#if DEBUG
+        timeshiftSeekPhaseTrace = nil
+#endif
         revealPostSeekPlaybackOutput()
     }
 
@@ -1339,6 +1449,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                 clearPausedFrame()
             }
             postSeekOutputGate.arm(from: playbackOutputCounters)
+#if DEBUG
+            beginTimeshiftSeekPhaseTrace()
+#endif
             isReplacingPipelineForTimeshiftSeek = true
             let hasCurrentPausedFrame = preservesCurrentPausedFrame && pausedFrame != nil
             if hasCurrentPausedFrame, postSeekOutputGate.concealImmediately() {

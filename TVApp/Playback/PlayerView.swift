@@ -14,6 +14,14 @@ private enum PlayerOverlayTab: String, CaseIterable, Identifiable {
     var id: Self { self }
 }
 
+enum TimelineSeekCommitPolicy {
+    static let coalescingDelayMilliseconds = 250
+
+    static func delayAfterRemoteRelease(didRepeat: Bool) -> Int? {
+        didRepeat ? 0 : nil
+    }
+}
+
 #if os(macOS)
 enum MacOSPlayerKeyboardCommand: Equatable {
     case togglePlayback
@@ -77,6 +85,9 @@ struct PlaybackView: View {
     @State private var timelineSeekTargetsLiveEdge = false
     @State private var timelineSeekCommitTask: Task<Void, Never>?
     @State private var timelineSeekRepeatTask: Task<Void, Never>?
+#if os(tvOS)
+    @State private var timelineSeekRepeatedDuringPress = false
+#endif
     @State private var isRefreshingGrowingRecording = false
     @State private var videoAttachmentRevision = 0
     @FocusState private var wakeSurfaceFocused: Bool
@@ -559,10 +570,21 @@ struct PlaybackView: View {
         timelineSeekTargetsLiveEdge = targetsLiveEdge
         noteActivity()
 
+        scheduleTimelineSeekCommit()
+        return true
+    }
+
+    private func scheduleTimelineSeekCommit(
+        afterMilliseconds delay: Int = TimelineSeekCommitPolicy.coalescingDelayMilliseconds
+    ) {
         timelineSeekCommitTask?.cancel()
         timelineSeekCommitTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(250))
+            if delay > 0 {
+                try? await Task.sleep(for: .milliseconds(delay))
+            }
             guard !Task.isCancelled else { return }
+            guard let target = timelineSeekTargetDate else { return }
+            let targetsLiveEdge = timelineSeekTargetsLiveEdge
 
             engine.refreshPlaybackInformation()
             if targetsLiveEdge {
@@ -595,7 +617,6 @@ struct PlaybackView: View {
                 }
             }
         }
-        return true
     }
 
 #if os(tvOS)
@@ -606,10 +627,17 @@ struct PlaybackView: View {
         guard isPressed else {
             timelineSeekRepeatTask?.cancel()
             timelineSeekRepeatTask = nil
+            if let delay = TimelineSeekCommitPolicy.delayAfterRemoteRelease(
+                didRepeat: timelineSeekRepeatedDuringPress
+            ), timelineSeekTargetDate != nil {
+                scheduleTimelineSeekCommit(afterMilliseconds: delay)
+            }
+            timelineSeekRepeatedDuringPress = false
             noteActivity()
             return true
         }
         guard chromeMode != .panel, !presentation.isRecording else { return false }
+        timelineSeekRepeatedDuringPress = false
 
         let wasHidden = chromeMode == .hidden
         if wasHidden { showTimeline() }
@@ -623,6 +651,7 @@ struct PlaybackView: View {
             do {
                 try await Task.sleep(for: .milliseconds(450))
                 while !Task.isCancelled {
+                    timelineSeekRepeatedDuringPress = true
                     guard stageTimelineSeek(by: interval) else { return }
                     try await Task.sleep(for: .milliseconds(180))
                 }
