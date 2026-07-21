@@ -1578,6 +1578,74 @@ final class TimeshiftActionTests: XCTestCase {
         XCTAssertEqual(tracker.result, result)
     }
 
+    func testPostSeekBufferCanCoverFullVLCStartupCache() {
+        var tracker = HTSPPostSeekBufferTracker()
+        let result = HTSPNavigationResult(
+            landingTime: 45_000_000,
+            bufferStartTime: 0,
+            liveEdgeTime: 120_000_000
+        )
+        tracker.begin(
+            result,
+            hasVideo: false,
+            requiredDuration: 1_500_000
+        )
+
+        XCTAssertNil(tracker.observePacket(time: 45_000_000))
+        XCTAssertNil(tracker.observePacket(time: 45_500_000))
+        XCTAssertNil(tracker.observePacket(time: 46_499_000))
+        XCTAssertEqual(tracker.observePacket(time: 46_500_000), result)
+    }
+
+    func testPostSeekBufferReportsTrackAndFrameCoverage() {
+        var tracker = HTSPPostSeekBufferTracker()
+        let result = HTSPNavigationResult(
+            landingTime: 45_000_000,
+            bufferStartTime: 0,
+            liveEdgeTime: 120_000_000
+        )
+        tracker.begin(
+            result,
+            hasVideo: true,
+            requiredDuration: 1_500_000
+        )
+
+        XCTAssertTrue(tracker.shouldAcceptPacket(isVideo: true, frameType: 0x49))
+        XCTAssertNil(tracker.observePacket(
+            time: 45_000_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x49
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 45_020_000,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 45_040_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x50
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 45_080_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x42
+        ))
+        XCTAssertEqual(tracker.observePacket(
+            time: 46_500_000,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ), result)
+        XCTAssertTrue(tracker.completionDiagnostics?.contains("video=3(I1/P1/B1)") == true)
+        XCTAssertTrue(tracker.completionDiagnostics?.contains("audio=2") == true)
+        XCTAssertTrue(tracker.completionDiagnostics?.contains("firstAV=20ms") == true)
+    }
+
     func testPostSeekBufferIncludesPrerollThroughExactTarget() {
         var tracker = HTSPPostSeekBufferTracker()
         let result = HTSPNavigationResult(

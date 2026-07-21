@@ -35,6 +35,8 @@ enum PlaybackRecoveryReason: Equatable {
 private struct TimeshiftSeekPhaseTrace {
     let startedAt: TimeInterval
     var pipelineBaseline: PlaybackOutputCounters?
+    var didLogFirstAudioDecode = false
+    var didLogFirstVideoDecode = false
     var didLogFirstAudio = false
     var didLogFirstVideo = false
     var lastGatePhase: PostSeekPlaybackOutputGateDiagnostics.Phase?
@@ -112,6 +114,7 @@ protocol PlaybackEngine: AnyObject {
 
 @MainActor
 final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @preconcurrency VLCMediaPlayerDelegate {
+    private static let bufferedSeekVLCCacheMilliseconds = 500
     private let logger = Logger(subsystem: "de.beutner.TVPlayer", category: "Playback")
     @Published private(set) var state: PlaybackState = .idle
     @Published private(set) var elapsedSeconds: TimeInterval = 0
@@ -268,7 +271,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                     let stream = try await HTSPLiveInputStream.connect(
                         configuration: htsp.configuration,
                         channelID: htsp.channelID,
-                        profile: request.profile
+                        profile: request.profile,
+                        vlcCacheMilliseconds: request.networkCachingMilliseconds
                     )
                     guard activePreparationID == preparationID, !Task.isCancelled else {
                         stream.close()
@@ -799,7 +803,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                     )
 #endif
                     self.applyNavigationLanding(navigation)
-                    await self.replaceVLCPipelineAfterTimeshiftNavigation()
+                    await self.replaceVLCPipelineAfterTimeshiftNavigation(navigation)
                 case let .failure(error):
                     navigationSucceeded = false
                     self.isReplacingPipelineForTimeshiftSeek = false
@@ -1016,7 +1020,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                 let stream = try await HTSPLiveInputStream.connect(
                     configuration: htsp.configuration,
                     channelID: htsp.channelID,
-                    profile: request.profile
+                    profile: request.profile,
+                    vlcCacheMilliseconds: request.networkCachingMilliseconds
                 )
                 guard !Task.isCancelled, pipelineRecoveryID == recoveryID else {
                     stream.close()
@@ -1177,7 +1182,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         lastMetricsUpdate = Date()
     }
 
-    private func replaceVLCPipelineAfterTimeshiftNavigation() async {
+    private func replaceVLCPipelineAfterTimeshiftNavigation(
+        _ navigation: HTSPNavigationResult
+    ) async {
         guard let stream = nativeInputStream, let request = activeRequest else { return }
 #if DEBUG
         let replacementStartedAt = ProcessInfo.processInfo.systemUptime
@@ -1197,7 +1204,13 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         retainedNativeVLCReaders.append(reader)
         let media = Self.makeMedia(stream: reader)
         media.addOption(":demux=ts")
-        addCachingOptions(to: media, milliseconds: request.networkCachingMilliseconds)
+        let cachingMilliseconds = navigation.usesAcceleratedBackfill
+            ? min(
+                request.networkCachingMilliseconds,
+                Self.bufferedSeekVLCCacheMilliseconds
+            )
+            : request.networkCachingMilliseconds
+        addCachingOptions(to: media, milliseconds: cachingMilliseconds)
         mediaPlayer.media = media
         postSeekOutputGate.markPipelineRecreated()
 #if DEBUG
@@ -1206,9 +1219,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             timeshiftSeekPhaseTrace?.pipelineBaseline = playbackOutputCounters
             traceTimeshiftSeekPhase(
                 String(
-                    format: "pipeline-installed stop=%.1fms install=%.1fms",
+                    format: "pipeline-installed stop=%.1fms install=%.1fms cache=%dms",
                     (stoppedAt - replacementStartedAt) * 1_000,
-                    (installedAt - stoppedAt) * 1_000
+                    (installedAt - stoppedAt) * 1_000,
+                    cachingMilliseconds
                 )
             )
         }
@@ -1250,7 +1264,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             demuxDiscontinuities: count(statistics?.demuxDiscontinuity ?? 0),
             playbackTimeMilliseconds: mediaPlayer.time.intValue > 0
                 ? Int64(mediaPlayer.time.intValue)
-                : nil
+                : nil,
+            decodedVideo: count(statistics?.decodedVideo ?? 0),
+            decodedAudio: count(statistics?.decodedAudio ?? 0),
+            lostPictures: count(statistics?.lostPictures ?? 0)
         )
     }
 
@@ -1320,6 +1337,26 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     ) {
         guard var trace = timeshiftSeekPhaseTrace else { return }
         if let baseline = trace.pipelineBaseline {
+            if !trace.didLogFirstAudioDecode,
+               output.decodedAudio > baseline.decodedAudio {
+                trace.didLogFirstAudioDecode = true
+                timeshiftSeekPhaseTrace = trace
+                traceTimeshiftSeekPhase(
+                    "first-audio-decoded count=\(output.decodedAudio) "
+                        + "clock=\(output.playbackTimeMilliseconds.map(String.init) ?? "nil")ms"
+                )
+            }
+            if !trace.didLogFirstVideoDecode,
+               output.decodedVideo > baseline.decodedVideo {
+                trace.didLogFirstVideoDecode = true
+                timeshiftSeekPhaseTrace = trace
+                traceTimeshiftSeekPhase(
+                    "first-video-decoded count=\(output.decodedVideo) "
+                        + "displayed=\(output.displayedPictures) "
+                        + "lost=\(output.lostPictures) "
+                        + "clock=\(output.playbackTimeMilliseconds.map(String.init) ?? "nil")ms"
+                )
+            }
             if !trace.didLogFirstAudio,
                output.playedAudioBuffers > baseline.playedAudioBuffers {
                 trace.didLogFirstAudio = true

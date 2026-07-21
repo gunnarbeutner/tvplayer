@@ -156,17 +156,26 @@ struct PlaybackOutputCounters: Equatable {
     let playedAudioBuffers: Int
     let demuxDiscontinuities: Int
     let playbackTimeMilliseconds: Int64?
+    let decodedVideo: Int
+    let decodedAudio: Int
+    let lostPictures: Int
 
     init(
         displayedPictures: Int,
         playedAudioBuffers: Int,
         demuxDiscontinuities: Int = 0,
-        playbackTimeMilliseconds: Int64? = nil
+        playbackTimeMilliseconds: Int64? = nil,
+        decodedVideo: Int = 0,
+        decodedAudio: Int = 0,
+        lostPictures: Int = 0
     ) {
         self.displayedPictures = displayedPictures
         self.playedAudioBuffers = playedAudioBuffers
         self.demuxDiscontinuities = demuxDiscontinuities
         self.playbackTimeMilliseconds = playbackTimeMilliseconds
+        self.decodedVideo = decodedVideo
+        self.decodedAudio = decodedAudio
+        self.lostPictures = lostPictures
     }
 
     func hasAdvanced(since previous: PlaybackOutputCounters) -> Bool {
@@ -743,6 +752,8 @@ struct HTSPTimeshiftMetrics: Equatable {
 }
 
 struct HTSPNavigationResult: Equatable, Sendable {
+    static let acceleratedBackfillMinimumLiveDelay: TimeInterval = 10
+
     let landingTime: Int64
     let serverLandingTime: Int64
     let bufferStartTime: Int64?
@@ -767,6 +778,10 @@ struct HTSPNavigationResult: Equatable, Sendable {
     var liveDelay: TimeInterval {
         guard let liveEdgeTime else { return 0 }
         return max(0, TimeInterval(liveEdgeTime - landingTime) / 1_000_000)
+    }
+
+    var usesAcceleratedBackfill: Bool {
+        liveDelay >= Self.acceleratedBackfillMinimumLiveDelay
     }
 }
 
@@ -995,22 +1010,44 @@ enum HTSPNavigationRecoveryPolicy {
 }
 
 struct HTSPPostSeekBufferTracker {
-    static let requiredDuration: Int64 = 500_000
-
+    static let minimumRequiredDuration: Int64 = 500_000
     private(set) var result: HTSPNavigationResult?
+    private var requiredDuration = Self.minimumRequiredDuration
     private var waitsForVideoKeyframe = false
     private var firstTime: Int64?
     private var latestTime: Int64?
+    private var videoPacketCount = 0
+    private var audioPacketCount = 0
+    private var videoFrameCounts: [UInt8: Int] = [:]
+    private var firstVideoTime: Int64?
+    private var latestVideoTime: Int64?
+    private var firstAudioTime: Int64?
+    private var latestAudioTime: Int64?
+    private(set) var completionDiagnostics: String?
 
-    mutating func begin(_ result: HTSPNavigationResult, hasVideo: Bool) {
+    mutating func begin(
+        _ result: HTSPNavigationResult,
+        hasVideo: Bool,
+        requiredDuration: Int64 = Self.minimumRequiredDuration
+    ) {
         self.result = result
+        self.requiredDuration = max(Self.minimumRequiredDuration, requiredDuration)
         waitsForVideoKeyframe = hasVideo
         firstTime = nil
         latestTime = nil
+        videoPacketCount = 0
+        audioPacketCount = 0
+        videoFrameCounts.removeAll(keepingCapacity: true)
+        firstVideoTime = nil
+        latestVideoTime = nil
+        firstAudioTime = nil
+        latestAudioTime = nil
+        completionDiagnostics = nil
     }
 
     mutating func cancel() {
         result = nil
+        requiredDuration = Self.minimumRequiredDuration
         waitsForVideoKeyframe = false
         firstTime = nil
         latestTime = nil
@@ -1025,14 +1062,58 @@ struct HTSPPostSeekBufferTracker {
     }
 
     mutating func observePacket(time: Int64?) -> HTSPNavigationResult? {
+        observePacket(
+            time: time,
+            isVideo: false,
+            isAudio: false,
+            frameType: 0
+        )
+    }
+
+    mutating func observePacket(
+        time: Int64?,
+        isVideo: Bool,
+        isAudio: Bool,
+        frameType: UInt8
+    ) -> HTSPNavigationResult? {
         guard let result else { return nil }
         if let time {
             firstTime = firstTime ?? time
             latestTime = max(latestTime ?? time, time)
+            if isVideo {
+                firstVideoTime = firstVideoTime ?? time
+                latestVideoTime = max(latestVideoTime ?? time, time)
+            } else if isAudio {
+                firstAudioTime = firstAudioTime ?? time
+                latestAudioTime = max(latestAudioTime ?? time, time)
+            }
+        }
+        if isVideo {
+            videoPacketCount += 1
+            videoFrameCounts[frameType, default: 0] += 1
+        } else if isAudio {
+            audioPacketCount += 1
         }
         let bufferedDuration = max(0, (latestTime ?? 0) - (firstTime ?? 0))
         let reachedExactLanding = latestTime.map { $0 >= result.landingTime } ?? false
-        guard bufferedDuration >= Self.requiredDuration, reachedExactLanding else { return nil }
+        guard bufferedDuration >= requiredDuration,
+              reachedExactLanding
+        else { return nil }
+        let span: (Int64?, Int64?) -> String = { first, latest in
+            guard let first, let latest else { return "n/a" }
+            return String(format: "%.0fms", Double(max(0, latest - first)) / 1_000)
+        }
+        let iFrameCount = videoFrameCounts[0x49] ?? 0
+        let pFrameCount = videoFrameCounts[0x50] ?? 0
+        let bFrameCount = videoFrameCounts[0x42] ?? 0
+        let firstAVDelta = firstVideoTime.flatMap { video in
+            firstAudioTime.map { audio in Double(audio - video) / 1_000 }
+        }.map { String(format: "%.0fms", $0) } ?? "n/a"
+        completionDiagnostics = "video=\(videoPacketCount)"
+            + "(I\(iFrameCount)/P\(pFrameCount)/B\(bFrameCount))"
+            + " span=\(span(firstVideoTime, latestVideoTime))"
+            + " audio=\(audioPacketCount) span=\(span(firstAudioTime, latestAudioTime))"
+            + " firstAV=\(firstAVDelta) total=\(Double(bufferedDuration) / 1_000)ms"
         cancel()
         return result
     }

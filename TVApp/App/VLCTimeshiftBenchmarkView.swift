@@ -733,7 +733,10 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
             demuxDiscontinuities: count(statistics?.demuxDiscontinuity ?? 0),
             playbackTimeMilliseconds: engine.mediaPlayer.time.intValue > 0
                 ? Int64(engine.mediaPlayer.time.intValue)
-                : nil
+                : nil,
+            decodedVideo: count(statistics?.decodedVideo ?? 0),
+            decodedAudio: count(statistics?.decodedAudio ?? 0),
+            lostPictures: count(statistics?.lostPictures ?? 0)
         )
     }
 

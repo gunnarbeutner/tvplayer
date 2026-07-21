@@ -85,7 +85,7 @@ private enum HTSPStreamFailure: LocalizedError {
 final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unchecked Sendable {
     private static let maximumQueuedBytes = 8 * 1_024 * 1_024
     private static let controlResponseTimeout: TimeInterval = 5
-    private static let fastPrebufferDelay: TimeInterval = 10
+    private static let fastPrebufferSpeed: Int32 = 400
 
     private struct PendingControlRequest {
         let method: String
@@ -94,9 +94,18 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         let failed: @Sendable (Error) -> Void
     }
 
+    private struct BufferedNavigationCompletion {
+        let handler: @Sendable (
+            Result<HTSPNavigationResult, HTSPNavigationError>
+        ) -> Void
+        let result: HTSPNavigationResult
+        let diagnostics: String
+    }
+
     private let configuration: TVHeadendConfiguration
     private let channelID: UInt32
     private let profile: String
+    private let vlcCacheDuration: Int64
     private let connectionLock = NSLock()
     private var connection: any HTSPConnectionTransport
     private var connectionGeneration = 0
@@ -152,6 +161,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     private var navigationAcceptsLiveEdge = false
     private var navigationTargetsLiveEdge = false
     private var navigationGeneration = 0
+    private var bufferedNavigationCompletion: BufferedNavigationCompletion?
     let acceptedTimeshiftPeriod: TimeInterval
 
     private init(
@@ -161,7 +171,8 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         connection: any HTSPConnectionTransport,
         connectionFactory: @escaping HTSPConnectionFactory,
         streams: [HTSPStreamInfo],
-        acceptedTimeshiftPeriod: TimeInterval
+        acceptedTimeshiftPeriod: TimeInterval,
+        vlcCacheMilliseconds: Int
     ) throws {
         self.configuration = configuration
         self.channelID = channelID
@@ -170,6 +181,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         self.connectionFactory = connectionFactory
         muxer = try MPEGTransportStreamMuxer(streams: streams)
         self.acceptedTimeshiftPeriod = acceptedTimeshiftPeriod
+        vlcCacheDuration = Int64(max(0, vlcCacheMilliseconds)) * 1_000
         super.init(data: Data())
     }
 
@@ -177,6 +189,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         configuration: TVHeadendConfiguration,
         channelID: UInt32,
         profile: String,
+        vlcCacheMilliseconds: Int = 1_500,
         connectionFactory suppliedFactory: HTSPConnectionFactory? = nil
     ) async throws -> HTSPLiveInputStream {
         guard let host = configuration.baseURL?.host else { throw HTSPError.invalidHost }
@@ -228,7 +241,8 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             connection: connected.0,
             connectionFactory: connectionFactory,
             streams: connected.1.1,
-            acceptedTimeshiftPeriod: TimeInterval(connected.1.0)
+            acceptedTimeshiftPeriod: TimeInterval(connected.1.0),
+            vlcCacheMilliseconds: vlcCacheMilliseconds
         )
         return stream
     }
@@ -568,6 +582,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 return true
             }
             guard recoveryAcceptsPacket else { return }
+            let packetTime = packet.presentationTime ?? packet.decodeTime
             let acceptsPacket = condition.withLock {
                 postSeekBuffer.shouldAcceptPacket(
                     isVideo: trackKind.isVideo,
@@ -578,10 +593,18 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             let transportData = processLock.withLock { muxer.mux(packet) }
             if let completion = appendIfDeliveryIsOpen(
                 transportData,
-                packetTime: packet.presentationTime ?? packet.decodeTime
+                packetTime: packetTime,
+                isVideo: trackKind.isVideo,
+                isAudio: trackKind.isAudio,
+                frameType: packet.frameType
             ) {
-                enqueueSpeed(100)
-                completion.handler(.success(completion.result))
+                controlQueue.async { [weak self] in
+                    self?.finishPostSeekBuffering(
+                        handler: completion.handler,
+                        result: completion.result,
+                        diagnostics: completion.diagnostics
+                    )
+                }
             }
             finishRecoveryAfterFirstDecodablePacketIfNeeded()
 
@@ -642,6 +665,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 if let command = self.speedController.observeActual(Int32(clamping: speed)) {
                     self.sendSpeed(command)
                 }
+                self.completeBufferedNavigationAtNormalSpeedIfReady()
                 self.sendPendingNavigationIfPaused()
             }
 
@@ -656,10 +680,14 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
     private func appendIfDeliveryIsOpen(
         _ data: Data,
-        packetTime: Int64?
+        packetTime: Int64?,
+        isVideo: Bool,
+        isAudio: Bool,
+        frameType: UInt8
     ) -> (
         handler: @Sendable (Result<HTSPNavigationResult, HTSPNavigationError>) -> Void,
-        result: HTSPNavigationResult
+        result: HTSPNavigationResult,
+        diagnostics: String
     )? {
         guard !data.isEmpty else { return nil }
         condition.lock()
@@ -674,13 +702,22 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         }
         let completion: (
             handler: @Sendable (Result<HTSPNavigationResult, HTSPNavigationError>) -> Void,
-            result: HTSPNavigationResult
+            result: HTSPNavigationResult,
+            diagnostics: String
         )?
         if !stopped, currentError == nil, deliveryGate.shouldDeliverPackets {
             buffer.append(data)
-            if let result = postSeekBuffer.observePacket(time: packetTime),
-               let navigationCompletionHandler {
-                completion = (navigationCompletionHandler, result)
+            if let result = postSeekBuffer.observePacket(
+                time: packetTime,
+                isVideo: isVideo,
+                isAudio: isAudio,
+                frameType: frameType
+            ), let navigationCompletionHandler {
+                completion = (
+                    navigationCompletionHandler,
+                    result,
+                    postSeekBuffer.completionDiagnostics ?? "unavailable"
+                )
             } else {
                 completion = nil
             }
@@ -722,6 +759,10 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
     private func preparePostSeekBuffering(_ result: HTSPNavigationResult) {
         let generation = navigationGeneration
+        let acceleratesBackfill = result.usesAcceleratedBackfill
+        let requiredDuration = acceleratesBackfill
+            ? max(HTSPPostSeekBufferTracker.minimumRequiredDuration, vlcCacheDuration)
+            : HTSPPostSeekBufferTracker.minimumRequiredDuration
         let hasVideo = processLock.withLock {
             muxer.resetAfterDiscontinuity()
             return muxer.hasVideo
@@ -729,18 +770,57 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         condition.withLock {
             buffer.removeAll(keepingCapacity: true)
             readOffset = 0
-            postSeekBuffer.begin(result, hasVideo: hasVideo)
+            postSeekBuffer.begin(
+                result,
+                hasVideo: hasVideo,
+                requiredDuration: requiredDuration
+            )
             deliveryGate.completeNavigation()
             condition.broadcast()
         }
-        requestSpeed(result.liveDelay >= Self.fastPrebufferDelay ? 400 : 100)
+        benchmarkTrace(
+            "post-seek backfill duration=\(requiredDuration)us speed="
+                + "\(acceleratesBackfill ? Self.fastPrebufferSpeed : 100)"
+        )
+        requestSpeed(acceleratesBackfill ? Self.fastPrebufferSpeed : 100)
 
         controlQueue.asyncAfter(deadline: .now() + Self.controlResponseTimeout) { [weak self] in
             guard let self,
                   self.navigationGeneration == generation,
-                  self.condition.withLock({ self.postSeekBuffer.result != nil }) else { return }
+                  self.condition.withLock({ self.postSeekBuffer.result != nil })
+                    || self.bufferedNavigationCompletion != nil
+            else { return }
             self.failNavigation(.timedOut)
         }
+    }
+
+    private func finishPostSeekBuffering(
+        handler: @escaping @Sendable (
+            Result<HTSPNavigationResult, HTSPNavigationError>
+        ) -> Void,
+        result: HTSPNavigationResult,
+        diagnostics: String
+    ) {
+        bufferedNavigationCompletion = BufferedNavigationCompletion(
+            handler: handler,
+            result: result,
+            diagnostics: diagnostics
+        )
+        requestSpeed(100)
+        completeBufferedNavigationAtNormalSpeedIfReady()
+    }
+
+    private func completeBufferedNavigationAtNormalSpeedIfReady() {
+        guard speedController.actualSpeed == 100,
+              speedController.outstandingSpeed == nil,
+              let completion = bufferedNavigationCompletion
+        else { return }
+        bufferedNavigationCompletion = nil
+        benchmarkTrace(
+            "post-seek backfill handed to VLC at normal speed "
+                + completion.diagnostics
+        )
+        completion.handler(.success(completion.result))
     }
 
     private func enqueueSpeed(_ speed: Int32) {
@@ -771,6 +851,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                     // that was waiting for that acknowledgement.
                     self.sendPendingNavigationIfPaused()
                 }
+                self.completeBufferedNavigationAtNormalSpeedIfReady()
             },
             failed: { [weak self] error in
                 guard let self else { return }
@@ -781,7 +862,8 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 self.logger.error(
                     "TVHeadend speed \(speed, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
                 )
-                if self.isNavigatingTimeshift {
+                if self.isNavigatingTimeshift
+                    || self.bufferedNavigationCompletion != nil {
                     self.failNavigation(
                         .controlFailed(error.localizedDescription)
                     )
@@ -989,6 +1071,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         navigationCommandInFlight = false
         navigationAcceptsLiveEdge = false
         navigationTargetsLiveEdge = false
+        bufferedNavigationCompletion = nil
         seekCoordinator.fail()
         processLock.withLock { muxer.resetAfterDiscontinuity() }
 
@@ -1176,6 +1259,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         )? in
             let hadNavigation = navigationCommandInFlight
                 || activeSeekSequence != nil
+                || bufferedNavigationCompletion != nil
                 || condition.withLock { postSeekBuffer.result != nil }
             navigationGeneration += 1
             pendingControlRequests.removeAll()
@@ -1186,6 +1270,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             navigationCommandInFlight = false
             navigationAcceptsLiveEdge = false
             navigationTargetsLiveEdge = false
+            bufferedNavigationCompletion = nil
             seekCoordinator.fail()
             condition.withLock { postSeekBuffer.cancel() }
             return hadNavigation ? condition.withLock({ navigationCompletionHandler }) : nil
