@@ -180,12 +180,16 @@ struct PlaybackOutputCounters: Equatable {
 /// pictures and audio while paused; those samples must not become visible when
 /// playback is resumed after moving within the timeshift buffer.
 struct PostSeekPlaybackOutputGate {
+    private static let playbackClockToleranceMilliseconds: Int64 = 250
+
     private(set) var isArmed = false
     private(set) var isConcealing = false
     private var isEvaluatingFreshOutput = false
     private var baselineDiscontinuities = 0
     private var minimumPlaybackProgressMilliseconds: Int64 = 0
+    private var requiredPlaybackClockShiftMilliseconds: Int64?
     private var requiresDisplayedPicture = false
+    private var outputAtArm: PlaybackOutputCounters?
     private var outputAfterDiscontinuity: PlaybackOutputCounters?
 
     mutating func arm(from output: PlaybackOutputCounters) {
@@ -193,6 +197,7 @@ struct PostSeekPlaybackOutputGate {
         isConcealing = false
         isEvaluatingFreshOutput = false
         baselineDiscontinuities = output.demuxDiscontinuities
+        outputAtArm = output
         outputAfterDiscontinuity = nil
     }
 
@@ -204,6 +209,13 @@ struct PostSeekPlaybackOutputGate {
 
     mutating func requireDisplayedPicture() {
         requiresDisplayedPicture = true
+    }
+
+    mutating func requirePlaybackClockShift(_ duration: TimeInterval) {
+        let shift = Int64((duration * 1_000).rounded())
+        requiredPlaybackClockShiftMilliseconds = abs(shift) > Self.playbackClockToleranceMilliseconds
+            ? shift
+            : nil
     }
 
     @discardableResult
@@ -250,6 +262,7 @@ struct PostSeekPlaybackOutputGate {
             ? output.displayedPictures > outputAfterDiscontinuity.displayedPictures
             : output.hasAdvanced(since: outputAfterDiscontinuity)
         guard isConcealing,
+              hasReachedRequestedPlaybackClockEpoch(in: output),
               hasReachedMinimumPlaybackProgress(in: output),
               hasFreshOutput
         else { return false }
@@ -287,13 +300,30 @@ struct PostSeekPlaybackOutputGate {
         return abs(outputTime - baselineTime) >= minimumPlaybackProgressMilliseconds
     }
 
+    private func hasReachedRequestedPlaybackClockEpoch(
+        in output: PlaybackOutputCounters
+    ) -> Bool {
+        guard let requiredShift = requiredPlaybackClockShiftMilliseconds else { return true }
+        guard let baselineTime = outputAtArm?.playbackTimeMilliseconds,
+              let outputTime = output.playbackTimeMilliseconds
+        else { return false }
+
+        let actualShift = outputTime - baselineTime
+        if requiredShift < 0 {
+            return actualShift <= requiredShift + Self.playbackClockToleranceMilliseconds
+        }
+        return actualShift >= requiredShift - Self.playbackClockToleranceMilliseconds
+    }
+
     private mutating func reset() {
         isArmed = false
         isConcealing = false
         isEvaluatingFreshOutput = false
         baselineDiscontinuities = 0
         minimumPlaybackProgressMilliseconds = 0
+        requiredPlaybackClockShiftMilliseconds = nil
         requiresDisplayedPicture = false
+        outputAtArm = nil
         outputAfterDiscontinuity = nil
     }
 }
@@ -505,8 +535,17 @@ struct LivePlaybackPositionTracker {
             if let highestPlaybackTimeMilliseconds {
                 if playbackTime < highestPlaybackTimeMilliseconds - 1_000 {
                     // A seek can reset VLC's media clock. Establish the new
-                    // baseline without treating the reset as presented media.
+                    // baseline. If this is the first accepted output after a
+                    // resume, its advancing presentation counters prove that
+                    // playback reached the new epoch and can release the
+                    // timeline anchor immediately.
                     self.highestPlaybackTimeMilliseconds = playbackTime
+                    if awaitingPlaybackProgress,
+                       output.hasAdvanced(since: previous) {
+                        lastOutputObservationDate = date
+                        awaitingPlaybackProgress = false
+                        return true
+                    }
                     return false
                 }
                 outputAdvanced = playbackTime > highestPlaybackTimeMilliseconds

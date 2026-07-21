@@ -1032,8 +1032,12 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         at date: Date = Date()
     ) {
         postSeekOutputGate.requirePlaybackProgress(navigation.prerollDuration)
+        let previousPlaybackDate = livePlaybackDate(at: date)
         let liveEdge = date
         let landingDate = liveEdge.addingTimeInterval(-navigation.liveDelay)
+        postSeekOutputGate.requirePlaybackClockShift(
+            landingDate.timeIntervalSince(previousPlaybackDate)
+        )
         livePlaybackPosition.moveAnchor(
             to: landingDate,
             liveEdge: liveEdge,

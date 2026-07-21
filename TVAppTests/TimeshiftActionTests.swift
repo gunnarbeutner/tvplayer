@@ -682,6 +682,54 @@ final class TimeshiftActionTests: XCTestCase {
         XCTAssertTrue(tracker.hasAnchoredDate)
     }
 
+    func testBackwardSeekClockResetReleasesTimelineOnAcceptedTargetFrame() {
+        var tracker = LivePlaybackPositionTracker()
+        let seekTime = Date(timeIntervalSinceReferenceDate: 10_000)
+        tracker.pause(at: seekTime, liveDelay: 0, bufferStartedAt: nil)
+        tracker.moveAnchor(
+            by: -10,
+            at: seekTime,
+            bufferStartedAt: nil
+        )
+        tracker.requestResume(
+            from: PlaybackOutputCounters(
+                displayedPictures: 20,
+                playedAudioBuffers: 30,
+                playbackTimeMilliseconds: 20_000
+            )
+        )
+
+        XCTAssertTrue(
+            tracker.observePlaybackOutput(
+                PlaybackOutputCounters(
+                    displayedPictures: 21,
+                    playedAudioBuffers: 31,
+                    playbackTimeMilliseconds: 10_000
+                ),
+                at: seekTime
+            )
+        )
+        XCTAssertFalse(tracker.isAwaitingPlaybackProgress)
+        XCTAssertTrue(
+            tracker.observePlaybackOutput(
+                PlaybackOutputCounters(
+                    displayedPictures: 22,
+                    playedAudioBuffers: 32,
+                    playbackTimeMilliseconds: 10_500
+                ),
+                at: seekTime.addingTimeInterval(0.5)
+            )
+        )
+        XCTAssertEqual(
+            tracker.playbackDate(
+                at: seekTime.addingTimeInterval(0.5),
+                liveDelay: 10,
+                bufferStartedAt: nil
+            ),
+            seekTime.addingTimeInterval(-9.5)
+        )
+    }
+
     func testPausedForwardSeekMovesOnceThenWaitsForVisiblePlaybackProgress() {
         var tracker = LivePlaybackPositionTracker()
         let streamStart = Date(timeIntervalSinceReferenceDate: 10_000)
@@ -1144,6 +1192,51 @@ final class TimeshiftActionTests: XCTestCase {
                     playedAudioBuffers: 31,
                     demuxDiscontinuities: 5,
                     playbackTimeMilliseconds: 8_040
+                )
+            )
+        )
+    }
+
+    func testPostSeekOutputGateRejectsDecodedOldPicturesUntilPlaybackClockReachesSeekEpoch() {
+        var gate = PostSeekPlaybackOutputGate()
+        let beforeSeek = PlaybackOutputCounters(
+            displayedPictures: 20,
+            playedAudioBuffers: 30,
+            demuxDiscontinuities: 4,
+            playbackTimeMilliseconds: 20_000
+        )
+        gate.arm(from: beforeSeek)
+        gate.requirePlaybackClockShift(-10)
+        gate.requireDisplayedPicture()
+        XCTAssertTrue(gate.beginConcealing(from: beforeSeek))
+
+        XCTAssertFalse(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 21,
+                    playedAudioBuffers: 31,
+                    demuxDiscontinuities: 5,
+                    playbackTimeMilliseconds: 20_040
+                )
+            )
+        )
+        XCTAssertFalse(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 22,
+                    playedAudioBuffers: 32,
+                    demuxDiscontinuities: 5,
+                    playbackTimeMilliseconds: 20_080
+                )
+            )
+        )
+        XCTAssertTrue(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 23,
+                    playedAudioBuffers: 33,
+                    demuxDiscontinuities: 5,
+                    playbackTimeMilliseconds: 10_000
                 )
             )
         )
