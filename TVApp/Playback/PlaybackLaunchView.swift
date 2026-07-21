@@ -47,20 +47,16 @@ struct PlaybackLaunchView: View {
             )
             .ignoresSafeArea()
 
-            VStack(spacing: 24) {
-                ChannelBadge(channel: presentation.channel, diameter: 156)
-                    .scaleEffect(isFocused ? 1.02 : 1)
-                    .animation(
-                        .easeInOut(duration: 0.9).repeatForever(autoreverses: true),
-                        value: isFocused
-                    )
+            VStack(alignment: .leading, spacing: 14) {
+                ChannelBadge(channel: presentation.channel, diameter: 112)
 
                 Text(presentation.channel.name)
-                    .font(.title2.bold())
-                    .multilineTextAlignment(.center)
+                    .font(.headline.bold())
                     .lineLimit(1)
             }
-            .padding(48)
+            .padding(.horizontal, 72)
+            .padding(.vertical, 64)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
             Color.clear
                 .contentShape(Rectangle())
@@ -83,7 +79,7 @@ struct PlaybackLaunchView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Cancel Playback")
             .padding(20)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
 #endif
         }
         .onAppear { isFocused = true }

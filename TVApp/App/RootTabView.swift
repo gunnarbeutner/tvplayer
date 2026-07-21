@@ -144,9 +144,9 @@ struct RootTabView: View {
                             try? await Task.sleep(for: .milliseconds(50))
                         }
                         guard !Task.isCancelled else { return }
-                        let hasVideo = await playback.engine.waitForVideoOutput()
+                        let hasOutput = await playback.engine.waitForInitialPlaybackOutput()
                         guard !Task.isCancelled else { return }
-                        if hasVideo {
+                        if hasOutput {
                             playback.playbackDidStart(presentationID: launch.id)
                         } else if case .failed = playback.engine.state {
                             playback.playbackDidFail(presentationID: launch.id)

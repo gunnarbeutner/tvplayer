@@ -658,10 +658,23 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         return false
     }
 
-    func waitForVideoOutput() async -> Bool {
-        for _ in 0..<150 {
+    func waitForInitialPlaybackOutput() async -> Bool {
+        for attempt in 0..<200 {
             guard !Task.isCancelled else { return false }
-            if mediaPlayer.hasVideoOut { return true }
+            refreshPlaybackInformation()
+            let output = playbackOutputCounters
+            let expectsAudio = nativeInputStream?.healthSnapshot.expectsAudio == true
+            let hasExpectedAudio = !expectsAudio || output.playedAudioBuffers > 0
+            if mediaPlayer.hasVideoOut, hasExpectedAudio { return true }
+
+            if attempt == 30,
+               mediaPlayer.hasVideoOut,
+               expectsAudio,
+               output.playedAudioBuffers == 0 {
+                scheduleNativePipelineRecovery(
+                    detail: "Video started but the expected audio stream produced no output for 3 seconds."
+                )
+            }
             if case .failed = state { return false }
             try? await Task.sleep(for: .milliseconds(100))
         }
