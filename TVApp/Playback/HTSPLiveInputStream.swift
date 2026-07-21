@@ -125,6 +125,10 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         }
         let connected = try await Task.detached(priority: .userInitiated) {
             if let preconnected {
+#if DEBUG
+                print("HTSP_PRECONNECT using authenticated idle connection")
+                fflush(stdout)
+#endif
                 do {
                     let subscription = try preconnected.subscribe(
                         channelID: channelID,
@@ -134,6 +138,10 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 } catch {
                     // An idle socket may be closed by the server before Play.
                     // Fall through to the normal fresh connection path.
+#if DEBUG
+                    print("HTSP_PRECONNECT idle connection failed; opening a fresh connection")
+                    fflush(stdout)
+#endif
                     preconnected.close()
                 }
             }
