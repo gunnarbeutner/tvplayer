@@ -7,6 +7,8 @@ Plex or another licensed media-server client.
 
 The application bundle identifier is `de.beutner.TVPlayer`.
 
+![TV Player guide on Apple TV](Artwork/tvos-guide.png)
+
 ## Features
 
 - Channels, Guide, Recordings, and Settings navigation, with Guide selected by default
