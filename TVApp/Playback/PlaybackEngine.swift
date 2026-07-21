@@ -720,7 +720,6 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         let isPlaying = playerState == .playing
         let isStopped = playerState == .stopped || playerState == .stopping
         if isOpening {
-            configureVideoSizing()
             if pauseRequested {
                 setState(.paused)
             } else if let recoveryReason {
@@ -731,7 +730,6 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                 setState(hasStartedPlayback || mediaPlayer.hasVideoOut ? .playing : .preparing)
             }
         } else if isPlaying {
-            configureVideoSizing()
             hasStartedPlayback = true
             if pauseRequested {
                 setState(.paused)
@@ -820,10 +818,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 
     private func configureVideoSizing() {
-        // VLC 4 can retain an explicit 1:1 scale while replacing or rebinding
-        // its video output, leaving SD video at its decoded pixel dimensions.
-        // Zero restores drawable-relative scaling; the fit mode preserves the
-        // source aspect ratio while using the full available surface.
+        // Zero restores drawable-relative automatic scaling. Set VLC 4's fit
+        // mode once; repeatedly changing it while replacing a vout can apply
+        // the previous drawable's geometry to the next one.
         mediaPlayer.scaleFactor = 0
         mediaPlayer.videoFitMode = .smaller
     }
@@ -1564,16 +1561,30 @@ private final class VLCVideoContainerView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        guard isActive, bounds.width > 1, bounds.height > 1,
-              attachedBoundsSize != bounds.size
-        else { return }
+        guard isActive, bounds.width > 1, bounds.height > 1 else { return }
 
-        attachedBoundsSize = bounds.size
-        updateLeadingFadeMask()
-        // SwiftUI installs representable views before assigning their final
-        // frame. Rebind once that frame is known so VLC sizes and positions
-        // its video output for the guide preview rather than the old player.
-        attachIfVisible(force: true)
+        if attachedBoundsSize != bounds.size {
+            attachedBoundsSize = bounds.size
+            updateLeadingFadeMask()
+        }
+        resizeVideoSubviews()
+        attachIfVisible()
+    }
+
+    override func didAddSubview(_ subview: UIView) {
+        super.didAddSubview(subview)
+        // VLC 4 creates its renderer at the drawable's current size. Keep that
+        // one renderer attached and resize it as this persistent surface moves
+        // between the guide preview and full-screen playback. Reassigning the
+        // drawable here creates an additional renderer on every transition.
+        subview.frame = bounds
+        subview.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    }
+
+    private func resizeVideoSubviews() {
+        for subview in subviews where subview.frame != bounds {
+            subview.frame = bounds
+        }
     }
 
     func updateAttachment(
@@ -1636,12 +1647,8 @@ private final class VLCVideoContainerView: UIView {
         configureVideoSizing(mediaPlayer)
         if !force, let current = mediaPlayer.drawable as? UIView, current === self { return }
 
-        // VLC can retain the previous full-screen cover's UIView after that
-        // cover has disappeared. Clearing first forces the video output to
-        // bind to this newly visible surface instead of continuing headlessly.
-        // A retained player may already point at this UIView while its video
-        // output remains detached, so resumed sessions can explicitly force
-        // the nil/self transition through attachmentRevision.
+        // An explicit attachment revision is reserved for recovery/test
+        // surfaces. Normal layout changes keep the existing renderer alive.
         mediaPlayer.drawable = nil
         mediaPlayer.drawable = self
         configureVideoSizing(mediaPlayer)
@@ -1649,7 +1656,6 @@ private final class VLCVideoContainerView: UIView {
 
     private func configureVideoSizing(_ mediaPlayer: VLCMediaPlayer) {
         mediaPlayer.scaleFactor = 0
-        mediaPlayer.videoFitMode = .smaller
     }
 
     func detachIfOwned() {
@@ -1750,16 +1756,26 @@ private final class VLCVideoContainerView: NSView {
 
     override func layout() {
         super.layout()
-        guard attachedBoundsSize != bounds.size else { return }
-
-        attachedBoundsSize = bounds.size
-        updateLeadingFadeMask()
         guard isActive, bounds.width > 1, bounds.height > 1 else { return }
 
-        // SwiftUI can resize the persistent drawable from full-screen player
-        // dimensions to the guide preview without replacing its NSView. Force
-        // VLC to bind again once AppKit has assigned the new frame.
-        attachIfVisible(force: true)
+        if attachedBoundsSize != bounds.size {
+            attachedBoundsSize = bounds.size
+            updateLeadingFadeMask()
+        }
+        resizeVideoSubviews()
+        attachIfVisible()
+    }
+
+    override func didAddSubview(_ subview: NSView) {
+        super.didAddSubview(subview)
+        subview.frame = bounds
+        subview.autoresizingMask = [.width, .height]
+    }
+
+    private func resizeVideoSubviews() {
+        for subview in subviews where subview.frame != bounds {
+            subview.frame = bounds
+        }
     }
 
     func updateAttachment(
@@ -1828,7 +1844,6 @@ private final class VLCVideoContainerView: NSView {
 
     private func configureVideoSizing(_ mediaPlayer: VLCMediaPlayer) {
         mediaPlayer.scaleFactor = 0
-        mediaPlayer.videoFitMode = .smaller
     }
 
     func detachIfOwned() {

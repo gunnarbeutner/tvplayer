@@ -803,7 +803,6 @@ private struct PersistentPlaybackSurface: View {
     @ObservedObject var engine: VLCPlaybackEngine
     let isPresented: Bool
     let showsGuidePreview: Bool
-    @State private var attachmentRevision = 0
 
     private var guidePreviewHeight: CGFloat {
         GuideArtworkStyle.previewHeight
@@ -838,7 +837,6 @@ private struct PersistentPlaybackSurface: View {
                 } else {
                     VLCVideoSurface(
                         mediaPlayer: engine.mediaPlayer,
-                        attachmentRevision: attachmentRevision,
                         fadesLeadingEdge: showsGuidePreview,
                         leadingFadeInset: showsGuidePreview ? guideLeadingCrop : 0
                     )
@@ -846,7 +844,6 @@ private struct PersistentPlaybackSurface: View {
 #else
                 VLCVideoSurface(
                     mediaPlayer: engine.mediaPlayer,
-                    attachmentRevision: attachmentRevision,
                     fadesLeadingEdge: showsGuidePreview,
                     leadingFadeInset: showsGuidePreview ? guideLeadingCrop : 0
                 )
@@ -870,13 +867,5 @@ private struct PersistentPlaybackSurface: View {
         .ignoresSafeArea(.container, edges: ignoredSafeAreaEdges)
         .opacity(isPresented || showsGuidePreview ? 1 : 0)
         .allowsHitTesting(false)
-        .onChange(of: isPresented) { _, presented in
-            if presented { attachmentRevision &+= 1 }
-        }
-        .onChange(of: engine.state) { _, state in
-            if isPresented && (state == .preparing || state == .playing) {
-                attachmentRevision &+= 1
-            }
-        }
     }
 }
