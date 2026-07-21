@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 import sys
 import tempfile
@@ -15,8 +16,15 @@ sys.modules.setdefault(
     "zeroconf",
     SimpleNamespace(IPVersion=object, ServiceInfo=object, Zeroconf=object),
 )
+sys.modules.setdefault("ifaddr", SimpleNamespace(get_adapters=lambda: []))
 
-from announce import discovery_id
+from announce import (
+    addresses_served_by_guide,
+    discovery_id,
+    guide_advertised_addresses,
+    resolved_addresses,
+    service_target,
+)
 
 
 class AnnounceTests(unittest.TestCase):
@@ -51,6 +59,78 @@ class AnnounceTests(unittest.TestCase):
             self.assertEqual(second, first)
             self.assertEqual(path.read_text(encoding="utf-8").strip(), first)
             self.assertEqual(str(uuid.UUID(first)), first)
+
+    def test_ip_tvheadend_uses_a_stable_synthetic_srv_target(self) -> None:
+        self.assertEqual(
+            service_target("192.168.3.5", "550e8400-e29b-41d4-a716-446655440000"),
+            "tvheadend-550e8400.local.",
+        )
+
+    def test_hostname_tvheadend_uses_its_hostname_as_srv_target(self) -> None:
+        self.assertEqual(
+            service_target("tvheadend.local", "unused"),
+            "tvheadend.local.",
+        )
+        self.assertEqual(
+            service_target("tvheadend.example.com", "unused"),
+            "tvheadend.example.com.",
+        )
+
+    def test_explicit_guide_addresses_are_only_a_guide_endpoint_override(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"TVPLAYER_MDNS_ADDRESS": "192.168.3.9,fd00::9"},
+            clear=False,
+        ):
+            self.assertEqual(
+                [
+                    str(address)
+                    for address in guide_advertised_addresses(
+                        [ipaddress.ip_address("192.168.3.5")]
+                    )
+                ],
+                ["192.168.3.9", "fd00::9"],
+            )
+
+    def test_guide_advertises_ipv4_and_ipv6_on_selected_interface(self) -> None:
+        selected_adapter = SimpleNamespace(ips=[
+            SimpleNamespace(ip="192.168.3.5"),
+            SimpleNamespace(ip=("fe80::1234", 0, 2)),
+            SimpleNamespace(ip=("fd00::5", 0, 2)),
+        ])
+        unrelated_adapter = SimpleNamespace(ips=[SimpleNamespace(ip="10.0.0.1")])
+        with patch.dict(os.environ, {"TVPLAYER_MDNS_ADDRESS": ""}, clear=False), patch(
+            "announce.route_source_address",
+            return_value=ipaddress.ip_address("192.168.3.5"),
+        ), patch(
+            "announce.ifaddr.get_adapters",
+            return_value=[unrelated_adapter, selected_adapter],
+        ):
+            addresses = guide_advertised_addresses([
+                ipaddress.ip_address("192.168.3.5")
+            ])
+
+        self.assertEqual(
+            [str(address) for address in addresses],
+            ["192.168.3.5", "fd00::5", "fe80::1234"],
+        )
+
+    def test_ipv6_literal_is_a_resolved_endpoint(self) -> None:
+        self.assertEqual(
+            resolved_addresses("fd00::5"),
+            [ipaddress.ip_address("fd00::5")],
+        )
+
+    def test_ipv4_guide_bind_does_not_advertise_unserved_ipv6(self) -> None:
+        addresses = [
+            ipaddress.ip_address("192.168.3.5"),
+            ipaddress.ip_address("fd00::5"),
+        ]
+        self.assertEqual(
+            addresses_served_by_guide("0.0.0.0", addresses),
+            [ipaddress.ip_address("192.168.3.5")],
+        )
+        self.assertEqual(addresses_served_by_guide("::", addresses), addresses)
 
 
 if __name__ == "__main__":

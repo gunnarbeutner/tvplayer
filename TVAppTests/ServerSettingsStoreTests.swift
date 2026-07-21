@@ -174,9 +174,10 @@ final class ServerSettingsStoreTests: XCTestCase {
         username: String = "viewer"
     ) -> DiscoveredTVHeadendService {
         let fields = [
-            "version": Data("1".utf8),
+            "txtvers": Data("1".utf8),
             "id": Data(id.utf8),
-            "url": Data("http://\(host):9981".utf8),
+            "scheme": Data("http".utf8),
+            "path": Data("/".utf8),
             "username": Data(username.utf8),
             "password": Data(password.utf8),
             "profile": Data("pass".utf8),
@@ -185,7 +186,11 @@ final class ServerSettingsStoreTests: XCTestCase {
         return DiscoveredTVHeadendService(
             name: name,
             serviceIdentity: "local.|_tvplayer._tcp.|\(id)",
-            settings: DiscoveredTVHeadendSettings(fields: fields)!
+            settings: DiscoveredTVHeadendSettings(
+                fields: fields,
+                hostName: host,
+                port: 9981
+            )!
         )
     }
 }

@@ -1,10 +1,13 @@
 # TVPlayer mDNS discovery
 
-This container advertises one TVheadend configuration as a DNS-SD service of
-type `_tvplayer._tcp.local.`. It also retains programme metadata after
-TVheadend removes finished EPG events and serves the resulting native metadata
-through a compact JSON endpoint. TVPlayer uses the first valid service for
-initial configuration and keeps every advertised server in its server list.
+This container advertises a TVheadend endpoint as `_tvplayer._tcp.local.` and
+its rich guide endpoint as `_tvplayer-guide._tcp.local.`. Both DNS-SD records
+carry the same stable ID, allowing either endpoint to run on a different host
+while this daemon remains the sole mDNS publisher. It also retains programme
+metadata after TVheadend removes finished EPG events and serves the resulting
+native metadata through a compact JSON endpoint. TVPlayer uses the first valid
+TVheadend service for initial configuration and keeps every advertised server
+in its server list.
 Advertised settings continue to update automatically until a user edits that
 server; automatic updates can later be restored from Settings. Passwords are
 stored per server in the device Keychain.
@@ -30,7 +33,7 @@ file accepts:
 - `TVPLAYER_TVH_PROFILE` (default `pass`)
 - `TVPLAYER_TVH_HTSP_PORT` (default `9982`)
 - `TVPLAYER_GUIDE_PORT` (default `49382`)
-- `TVPLAYER_GUIDE_BIND` (default `0.0.0.0`)
+- `TVPLAYER_GUIDE_BIND` (default `::`, with dual-stack IPv4/IPv6 enabled)
 - `TVPLAYER_GUIDE_REFRESH_SECONDS` (default `60`, minimum `15`)
 - `TVPLAYER_GUIDE_RETENTION_HOURS` (default `24`)
 - `TVPLAYER_GUIDE_FUTURE_HOURS` (default `72`)
@@ -38,7 +41,32 @@ file accepts:
 - `TVPLAYER_MDNS_NAME` (default `TVPlayer TVHeadend`)
 - `TVPLAYER_MDNS_ID` (optional stable identity override; otherwise a UUID is
   generated and retained in the `guide-cache` volume)
-- `TVPLAYER_MDNS_ADDRESS` (optional IPv4 override; otherwise the URL host is resolved)
+- `TVPLAYER_MDNS_HOSTNAME` (optional hostname for the daemon and guide SRV target)
+- `TVPLAYER_MDNS_ADDRESS` (optional comma-separated address override; otherwise
+  the daemon advertises the IPv4 and IPv6 addresses on the LAN interface used
+  to reach TVheadend)
+
+## DNS-SD records
+
+The daemon publishes both records. TVheadend and the guide server do not need
+to run their own mDNS responders.
+
+```text
+<name>._tvplayer._tcp.local.
+  SRV -> <TVheadend host>:<TVheadend HTTP port>
+  TXT -> txtvers=1, id=<stable ID>, scheme=<http|https>, path=<HTTP root>,
+         username=..., password=..., profile=..., htsp_port=...
+
+<name>._tvplayer-guide._tcp.local.
+  SRV -> <discovery daemon host>:<guide port>
+  TXT -> txtvers=1, id=<same stable ID>, scheme=http, path=/guide.json,
+         format=tvplayer-json
+```
+
+When both endpoints resolve to the same host, they share the daemon's SRV
+hostname and A/AAAA records. For a split-host deployment, the TVheadend record
+targets the configured TVheadend hostname (or a stable synthetic `.local` name
+for an IP literal), while the guide record continues to target the daemon.
 
 The generated guide is available at:
 
@@ -63,8 +91,8 @@ compatible with the earlier XMLTV-oriented cache; remove the old volume when
 upgrading.
 
 Docker Desktop's host-network support and multicast behavior vary by platform.
-For reliable discovery, run this on the TVheadend host or another Linux machine
-on the Apple TV's local network.
+For reliable discovery, run this on a Linux machine on the Apple TV's local
+network. It may run on the TVheadend host or a separate host.
 
 ## Security
 

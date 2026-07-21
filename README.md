@@ -38,7 +38,7 @@ The application bundle identifier is `de.beutner.TVPlayer`.
 - In-progress recording playback starts at the beginning and exposes Watch Live as a separate action
 - TVheadend password storage in the platform Keychain
 - First-run TVheadend configuration discovery over `_tvplayer._tcp` Bonjour/mDNS
-- An optional always-on discovery container that preserves native EPG metadata and publishes its JSON guide URL over mDNS
+- An optional always-on discovery container that publishes paired TVheadend and `_tvplayer-guide._tcp` endpoints while preserving native EPG metadata
 - Connection and timeshift badges in Settings verify HTTP credentials and native HTSP availability
 
 ## Requirements
@@ -109,8 +109,10 @@ project files or user defaults. Server settings used during development can
 also be passed through process environment variables; they should not be added
 to tracked files.
 
-TVPlayer continuously browses for `_tvplayer._tcp`, adds discovered servers,
-and keeps their settings current until they are manually edited. The optional
+TVPlayer continuously browses for `_tvplayer._tcp` TVheadend endpoints and
+`_tvplayer-guide._tcp` guide endpoints, joins them by their stable discovery
+ID, adds discovered servers, and keeps their settings current until they are
+manually edited. The optional
 [Discovery container](Discovery/README.md) publishes a complete configuration
 from environment variables. It also polls TVheadend's EPG, retains expired
 events and native event metadata in a persistent volume, and advertises its

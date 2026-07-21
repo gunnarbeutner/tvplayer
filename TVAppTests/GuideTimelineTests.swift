@@ -26,53 +26,151 @@ final class GuideTimelineTests: XCTestCase {
 
     func testDiscoveredSettingsParseBonjourTXTRecord() throws {
         let fields = [
+            "txtvers": Data("1".utf8),
+            "id": Data("server-0123".utf8),
+            "scheme": Data("http".utf8),
+            "path": Data("/tvh".utf8),
+            "username": Data("viewer".utf8),
+            "password": Data("secret".utf8),
+            "profile": Data("pass".utf8),
+        ]
+        let guideURL = try XCTUnwrap(URL(string: "http://guide.example:49382/guide.json"))
+
+        let discovered = try XCTUnwrap(DiscoveredTVHeadendSettings(
+            fields: fields,
+            hostName: "tvheadend.local.",
+            port: 9981,
+            guideCacheURL: guideURL
+        ))
+
+        XCTAssertEqual(discovered.discoveryID, "server-0123")
+        XCTAssertEqual(discovered.baseURL.absoluteString, "http://tvheadend.local:9981/tvh")
+        XCTAssertEqual(discovered.username, "viewer")
+        XCTAssertEqual(discovered.password, "secret")
+        XCTAssertEqual(discovered.streamProfile, "pass")
+        XCTAssertEqual(discovered.guideCacheURL?.absoluteString, "http://guide.example:49382/guide.json")
+        XCTAssertNil(discovered.xmltvURL)
+    }
+
+    func testDiscoveredGuideCacheParsesItsResolvedEndpoint() throws {
+        let endpoint = try XCTUnwrap(DiscoveredGuideCacheEndpoint(
+            fields: [
+                "TXTVERS": Data("1".utf8),
+                "ID": Data("server-0123".utf8),
+                "SCHEME": Data("http".utf8),
+                "PATH": Data("/guide.json".utf8),
+                "FORMAT": Data("tvplayer-json".utf8),
+            ],
+            hostName: "guide-cache.local.",
+            port: 49_382
+        ))
+
+        XCTAssertEqual(endpoint.discoveryID, "server-0123")
+        XCTAssertEqual(endpoint.url.absoluteString, "http://guide-cache.local:49382/guide.json")
+        XCTAssertNil(DiscoveredGuideCacheEndpoint(
+            fields: [
+                "txtvers": Data("1".utf8),
+                "id": Data("server-0123".utf8),
+                "scheme": Data("http".utf8),
+                "path": Data("/guide.json".utf8),
+            ],
+            hostName: "guide-cache.local.",
+            port: 49_382
+        ))
+    }
+
+    func testDiscoveryRegistryJoinsAndDetachesGuideByStableID() throws {
+        let fields = [
+            "txtvers": Data("1".utf8),
+            "id": Data("server-0123".utf8),
+            "scheme": Data("http".utf8),
+            "path": Data("/".utf8),
+            "username": Data("viewer".utf8),
+            "password": Data("secret".utf8),
+        ]
+        let primaryIdentity = "local.|_tvplayer._tcp.|server"
+        let guideIdentity = "local.|_tvplayer-guide._tcp.|server"
+        var registry = TVHeadendDiscoveryRegistry()
+
+        var events = registry.upsert(ResolvedTVHeadendDiscoveryRecord(
+            name: "TVHeadend",
+            serviceIdentity: primaryIdentity,
+            fields: fields,
+            hostName: "tvheadend.local.",
+            port: 9_981,
+            discoveryID: "server-0123"
+        ))
+        guard case let .upsert(initialService) = try XCTUnwrap(events.first) else {
+            return XCTFail("Expected the primary service to be inserted")
+        }
+        XCTAssertNil(initialService.settings.guideCacheURL)
+
+        let endpoint = try XCTUnwrap(DiscoveredGuideCacheEndpoint(
+            fields: [
+                "txtvers": Data("1".utf8),
+                "id": Data("server-0123".utf8),
+                "scheme": Data("http".utf8),
+                "path": Data("/guide.json".utf8),
+                "format": Data("tvplayer-json".utf8),
+            ],
+            hostName: "guide.local.",
+            port: 49_382
+        ))
+        events = registry.upsert(ResolvedGuideDiscoveryRecord(
+            serviceIdentity: guideIdentity,
+            endpoint: endpoint
+        ))
+        guard case let .upsert(joinedService) = try XCTUnwrap(events.first) else {
+            return XCTFail("Expected the guide service to update the primary service")
+        }
+        XCTAssertEqual(
+            joinedService.settings.guideCacheURL?.absoluteString,
+            "http://guide.local:49382/guide.json"
+        )
+
+        events = registry.remove(serviceIdentity: guideIdentity)
+        guard case let .upsert(detachedService) = try XCTUnwrap(events.first) else {
+            return XCTFail("Expected guide removal to update the primary service")
+        }
+        XCTAssertNil(detachedService.settings.guideCacheURL)
+        XCTAssertEqual(
+            registry.remove(serviceIdentity: primaryIdentity),
+            [.removed(serviceIdentity: primaryIdentity)]
+        )
+    }
+
+    func testDiscoveredSettingsRejectLegacyRecord() {
+        XCTAssertNil(DiscoveredTVHeadendSettings(fields: [
             "version": Data("1".utf8),
             "id": Data("server-0123".utf8),
             "url": Data("http://tvheadend.local:9981".utf8),
             "username": Data("viewer".utf8),
             "password": Data("secret".utf8),
-            "profile": Data("pass".utf8),
-            "guide": Data("http://guide.example:49382/guide.json".utf8),
-            "xmltv": Data("https://guide.example/guide.xml".utf8),
-        ]
-
-        let discovered = try XCTUnwrap(DiscoveredTVHeadendSettings(fields: fields))
-
-        XCTAssertEqual(discovered.discoveryID, "server-0123")
-        XCTAssertEqual(discovered.baseURL.absoluteString, "http://tvheadend.local:9981")
-        XCTAssertEqual(discovered.username, "viewer")
-        XCTAssertEqual(discovered.password, "secret")
-        XCTAssertEqual(discovered.streamProfile, "pass")
-        XCTAssertEqual(discovered.guideCacheURL?.absoluteString, "http://guide.example:49382/guide.json")
-        XCTAssertEqual(discovered.xmltvURL?.absoluteString, "https://guide.example/guide.xml")
-    }
-
-    func testDiscoveredSettingsAcceptLegacyRecordWithoutStableID() throws {
-        let discovered = try XCTUnwrap(DiscoveredTVHeadendSettings(fields: [
-            "url": Data("http://tvheadend.local:9981".utf8),
-            "username": Data("viewer".utf8),
-            "password": Data("secret".utf8),
-        ]))
-
-        XCTAssertNil(discovered.discoveryID)
+        ], hostName: "tvheadend.local.", port: 9981))
     }
 
     func testDiscoveredSettingsRejectInvalidOrIncompleteRecords() {
         XCTAssertNil(DiscoveredTVHeadendSettings(fields: [
-            "url": Data("ftp://tvheadend.local".utf8),
+            "txtvers": Data("1".utf8),
+            "id": Data("server-0123".utf8),
+            "scheme": Data("ftp".utf8),
             "username": Data("viewer".utf8),
             "password": Data("secret".utf8),
-        ]))
+        ], hostName: "tvheadend.local.", port: 9981))
         XCTAssertNil(DiscoveredTVHeadendSettings(fields: [
-            "url": Data("http://tvheadend.local:9981".utf8),
+            "txtvers": Data("1".utf8),
+            "id": Data("server-0123".utf8),
+            "scheme": Data("http".utf8),
             "username": Data("viewer".utf8),
-        ]))
+        ], hostName: "tvheadend.local.", port: 9981))
         XCTAssertNil(DiscoveredTVHeadendSettings(fields: [
-            "url": Data("http://tvheadend.local:9981".utf8),
+            "txtvers": Data("1".utf8),
+            "id": Data("server-0123".utf8),
+            "scheme": Data("http".utf8),
+            "path": Data("relative".utf8),
             "username": Data("viewer".utf8),
             "password": Data("secret".utf8),
-            "guide": Data("ftp://guide.example/guide.json".utf8),
-        ]))
+        ], hostName: "tvheadend.local.", port: 9981))
     }
 
     func testOneHourUsesExpectedWidth() {

@@ -151,7 +151,10 @@ final class HTSPTimeshiftTests: XCTestCase {
 
     func testDiscoveryUsesAdvertisedHTSPPortAndDefaultsTo9982() throws {
         let requiredFields = [
-            "url": Data("http://tvheadend.local:9981".utf8),
+            "txtvers": Data("1".utf8),
+            "id": Data("server-0123".utf8),
+            "scheme": Data("http".utf8),
+            "path": Data("/".utf8),
             "username": Data("viewer".utf8),
             "password": Data("secret".utf8),
         ]
@@ -159,17 +162,29 @@ final class HTSPTimeshiftTests: XCTestCase {
         advertisedFields["htsp_port"] = Data("19982".utf8)
 
         XCTAssertEqual(
-            try XCTUnwrap(DiscoveredTVHeadendSettings(fields: requiredFields)).htspPort,
+            try XCTUnwrap(DiscoveredTVHeadendSettings(
+                fields: requiredFields,
+                hostName: "tvheadend.local.",
+                port: 9981
+            )).htspPort,
             9982
         )
         XCTAssertEqual(
-            try XCTUnwrap(DiscoveredTVHeadendSettings(fields: advertisedFields)).htspPort,
+            try XCTUnwrap(DiscoveredTVHeadendSettings(
+                fields: advertisedFields,
+                hostName: "tvheadend.local.",
+                port: 9981
+            )).htspPort,
             19_982
         )
 
         var invalidFields = requiredFields
         invalidFields["htsp_port"] = Data("70000".utf8)
-        XCTAssertNil(DiscoveredTVHeadendSettings(fields: invalidFields))
+        XCTAssertNil(DiscoveredTVHeadendSettings(
+            fields: invalidFields,
+            hostName: "tvheadend.local.",
+            port: 9981
+        ))
     }
 
     func testDroppedSubscriptionReconnectsWithoutClosingTheInputStream() async throws {

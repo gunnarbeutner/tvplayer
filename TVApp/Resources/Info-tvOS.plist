@@ -39,6 +39,7 @@
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_tvplayer._tcp</string>
+		<string>_tvplayer-guide._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>TV Player discovers and connects to your TVHeadend server on the local network.</string>
