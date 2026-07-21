@@ -1155,6 +1155,43 @@ final class TimeshiftActionTests: XCTestCase {
         )
     }
 
+    func testPostSeekOutputGateAcceptsFreshPipelineWithoutDemuxDiscontinuity() {
+        var gate = PostSeekPlaybackOutputGate()
+        let oldPipeline = PlaybackOutputCounters(
+            displayedPictures: 400,
+            playedAudioBuffers: 500,
+            demuxDiscontinuities: 8
+        )
+        gate.arm(from: oldPipeline)
+        gate.requireDisplayedPictures(2)
+        gate.markPipelineRecreated()
+
+        let freshPipeline = PlaybackOutputCounters(
+            displayedPictures: 0,
+            playedAudioBuffers: 0,
+            demuxDiscontinuities: 0
+        )
+        XCTAssertTrue(gate.beginConcealing(from: freshPipeline))
+        XCTAssertFalse(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 1,
+                    playedAudioBuffers: 1,
+                    demuxDiscontinuities: 0
+                )
+            )
+        )
+        XCTAssertTrue(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 2,
+                    playedAudioBuffers: 2,
+                    demuxDiscontinuities: 0
+                )
+            )
+        )
+    }
+
     func testPostSeekOutputGatePrimesFreshPictureAfterImmediatePausedConcealment() {
         var gate = PostSeekPlaybackOutputGate()
         let beforeSeek = PlaybackOutputCounters(
@@ -1366,13 +1403,23 @@ final class TimeshiftActionTests: XCTestCase {
                 )
             )
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             gate.observe(
                 PlaybackOutputCounters(
                     displayedPictures: 121,
                     playedAudioBuffers: 221,
                     demuxDiscontinuities: 6,
                     playbackTimeMilliseconds: 9_200
+                )
+            )
+        )
+        XCTAssertTrue(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 122,
+                    playedAudioBuffers: 222,
+                    demuxDiscontinuities: 6,
+                    playbackTimeMilliseconds: 9_240
                 )
             )
         )

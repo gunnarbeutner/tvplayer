@@ -7,11 +7,60 @@ enum HTSPStreamLifecycleEvent: Equatable, Sendable {
     case terminalFailure(String)
 }
 
+/// A single-use view of the long-lived HTSP byte source. VLC owns and closes
+/// this object; the underlying subscription is owned by `HTSPLiveInputStream`.
+private final class HTSPLiveReaderInputStream: InputStream, @unchecked Sendable {
+    private weak var source: HTSPLiveInputStream?
+    private let generation: Int
+    private let lock = NSLock()
+    private var status: Stream.Status = .notOpen
+
+    init(source: HTSPLiveInputStream, generation: Int) {
+        self.source = source
+        self.generation = generation
+        super.init(data: Data())
+    }
+
+    override var streamStatus: Stream.Status { lock.withLock { status } }
+    override var streamError: Error? { source?.streamError }
+    override var hasBytesAvailable: Bool { source?.hasBytesAvailable ?? false }
+
+    override func open() {
+        lock.withLock {
+            guard status == .notOpen else { return }
+            status = .open
+        }
+        source?.open()
+    }
+
+    override func close() {
+        let shouldClose = lock.withLock {
+            guard status != .closed else { return false }
+            status = .closed
+            return true
+        }
+        if shouldClose { source?.closeVLCReader(generation: generation) }
+    }
+
+    override func read(_ buffer: UnsafeMutablePointer<UInt8>, maxLength len: Int) -> Int {
+        guard lock.withLock({ status == .open }) else { return 0 }
+        return source?.readForVLC(buffer, maxLength: len, generation: generation) ?? 0
+    }
+
+    override func getBuffer(
+        _ buffer: UnsafeMutablePointer<UnsafeMutablePointer<UInt8>?>,
+        length len: UnsafeMutablePointer<Int>
+    ) -> Bool {
+        false
+    }
+}
+
 struct HTSPStreamHealthSnapshot: Equatable, Sendable {
     let isRecovering: Bool
     let isNavigating: Bool
     let desiredSpeed: Int32
     let lastMuxPacketAt: Date?
+    let expectsVideo: Bool
     let expectsAudio: Bool
     let videoPacketCount: Int64
     let videoPayloadBytes: Int64
@@ -66,6 +115,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     private var currentStatus: Stream.Status = .notOpen
     private var currentError: Error?
     private var stopped = false
+    private var vlcReaderGeneration = 0
     private var receiverThread: Thread?
     private var currentLiveDelay: TimeInterval = 0
     private var currentWindow: TimeInterval = 0
@@ -219,6 +269,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         let navigating = !deliveryGate.shouldDeliverPackets
         let streamInfo = processLock.withLock {
             (
+                expectsVideo: muxer.hasVideo,
                 expectsAudio: muxer.hasAudio,
                 audioStreamTypes: muxer.audioStreamTypes,
                 transportStartup: muxer.startupSnapshot
@@ -230,6 +281,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 isNavigating: navigating || postSeekBuffer.result != nil,
                 desiredSpeed: desiredPlaybackSpeed,
                 lastMuxPacketAt: lastMuxPacketAt,
+                expectsVideo: streamInfo.expectsVideo,
                 expectsAudio: streamInfo.expectsAudio,
                 videoPacketCount: videoPacketCount,
                 videoPayloadBytes: videoPayloadBytes,
@@ -243,6 +295,18 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 transportStartup: streamInfo.transportStartup
             )
         }
+    }
+
+    /// Creates a disposable VLC-facing reader without transferring ownership
+    /// of the HTSP subscription. Replacing this reader flushes VLC's private
+    /// demux/decoder queues while the server-side timeshift session survives.
+    func makeVLCReader() -> InputStream {
+        let generation = condition.withLock {
+            vlcReaderGeneration += 1
+            condition.broadcast()
+            return vlcReaderGeneration
+        }
+        return HTSPLiveReaderInputStream(source: self, generation: generation)
     }
 
     func setLifecycleHandler(
@@ -375,6 +439,49 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         condition.broadcast()
         condition.unlock()
         return count
+    }
+
+    fileprivate func readForVLC(
+        _ output: UnsafeMutablePointer<UInt8>,
+        maxLength length: Int,
+        generation: Int
+    ) -> Int {
+        guard length > 0 else { return 0 }
+        condition.lock()
+        while !stopped,
+              currentError == nil,
+              generation == vlcReaderGeneration,
+              readOffset >= buffer.count {
+            condition.wait()
+        }
+        guard !stopped, generation == vlcReaderGeneration else {
+            condition.unlock()
+            return 0
+        }
+        if currentError != nil {
+            condition.unlock()
+            return -1
+        }
+
+        let count = min(length, buffer.count - readOffset)
+        buffer.copyBytes(to: output, from: readOffset..<(readOffset + count))
+        readOffset += count
+        if readOffset >= 1 * 1_024 * 1_024 {
+            buffer.removeSubrange(0..<readOffset)
+            readOffset = 0
+        }
+        condition.broadcast()
+        condition.unlock()
+        return count
+    }
+
+    fileprivate func closeVLCReader(generation: Int) {
+        condition.withLock {
+            if vlcReaderGeneration == generation {
+                vlcReaderGeneration += 1
+            }
+            condition.broadcast()
+        }
     }
 
     override func getBuffer(
@@ -601,6 +708,10 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     private func beginNavigation() {
         processLock.withLock { muxer.resetAfterDiscontinuity() }
         condition.withLock {
+            // End the current VLC input epoch before any destination bytes can
+            // enter its demux queue. The engine installs a fresh reader once
+            // post-seek keyframe buffering has completed.
+            vlcReaderGeneration += 1
             deliveryGate.beginNavigation()
             postSeekBuffer.cancel()
             buffer.removeAll(keepingCapacity: true)

@@ -100,14 +100,6 @@ struct PlaybackView: View {
 #endif
     }
 
-    private func platformImage(_ image: PlatformImage) -> Image {
-#if canImport(UIKit)
-        Image(uiImage: image)
-#else
-        Image(nsImage: image)
-#endif
-    }
-
     var body: some View {
         ZStack {
             if showsVideoSurface {
@@ -115,34 +107,13 @@ struct PlaybackView: View {
 
                 VLCVideoSurface(
                     mediaPlayer: engine.mediaPlayer,
-                    attachmentRevision: videoAttachmentRevision
+                    attachmentRevision: videoAttachmentRevision,
+                    isOutputConcealed: engine.isPlaybackOutputConcealed,
+                    concealmentImage: engine.pausedFrame
                 )
                     .ignoresSafeArea()
             } else {
                 Color.clear.ignoresSafeArea()
-            }
-
-            if engine.isPlaybackOutputConcealed {
-                Group {
-                    if let pausedFrame = engine.pausedFrame {
-                        GeometryReader { geometry in
-                            platformImage(pausedFrame)
-                                .resizable()
-                                .scaledToFill()
-                                .frame(
-                                    width: geometry.size.width,
-                                    height: geometry.size.height
-                                )
-                                .clipped()
-                        }
-                        .background(Color.black)
-                    } else {
-                        Color.black
-                    }
-                }
-                .ignoresSafeArea()
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
             }
 
             if chromeMode == .hidden {

@@ -102,9 +102,6 @@ protocol PlaybackEngine: AnyObject {
 
 @MainActor
 final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @preconcurrency VLCMediaPlayerDelegate {
-    // Match TVHeadend's 400% post-seek prebuffer rate. Faster local draining
-    // can outrun the replacement stream and destabilize VLC.
-    private static let postSeekDrainRate: Float = 4
     private let logger = Logger(subsystem: "de.beutner.TVPlayer", category: "Playback")
     @Published private(set) var state: PlaybackState = .idle
     @Published private(set) var elapsedSeconds: TimeInterval = 0
@@ -141,6 +138,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     let mediaPlayer: VLCMediaPlayer
 
     private var nativeInputStream: HTSPLiveInputStream?
+    // VLCKit's custom-stream bridge does not retain the InputStream passed to
+    // VLCMedia(stream:), and closes it asynchronously. Keep each disposable
+    // reader alive for the engine lifetime to make that callback safe.
+    private var retainedNativeVLCReaders: [InputStream] = []
     private var nativeTimeshiftActions: NativeTimeshiftActionController?
     private var nativeTimeshiftSessionID: UUID?
     private var pipelineRecoveryTask: Task<Void, Never>?
@@ -153,6 +154,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private var isPrimingPausedSeekFrame = false
     private var concealsSeekAfterPausedFrameCapture = false
     private var navigationShouldResume = true
+    private var isReplacingPipelineForTimeshiftSeek = false
     private var pauseRequested = false
     private var livePlaybackPosition = LivePlaybackPositionTracker()
     private var lastMetricsUpdate = Date()
@@ -259,7 +261,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                         stream.close()
                         throw CancellationError()
                     }
-                    media = Self.makeMedia(stream: stream)
+                    let reader = stream.makeVLCReader()
+                    retainedNativeVLCReaders.append(reader)
+                    media = Self.makeMedia(stream: reader)
                     media.addOption(":demux=ts")
                     nativeInputStream = stream
                     nativeTimeshiftActions = NativeTimeshiftActionController(sink: stream)
@@ -431,16 +435,6 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         guard state == .paused, pendingSnapshotURL == nil else { return }
         pausedFrame = nil
 
-#if canImport(UIKit)
-        if let drawable = mediaPlayer.drawable as? UIView,
-           let image = captureRenderedVideoSurface(drawable) {
-            let shouldConcealSeek = concealsSeekAfterPausedFrameCapture
-            concealsSeekAfterPausedFrameCapture = false
-            installPausedFrame(image, shouldConcealSeek: shouldConcealSeek)
-            return
-        }
-#endif
-
         let snapshotURL = FileManager.default.temporaryDirectory
             .appending(path: "tvplayer-paused-frame-\(UUID().uuidString)")
             .appendingPathExtension("png")
@@ -451,23 +445,6 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             andHeight: 0
         )
     }
-
-#if canImport(UIKit)
-    private func captureRenderedVideoSurface(_ view: UIView) -> UIImage? {
-        guard view.bounds.width > 0, view.bounds.height > 0, view.window != nil else { return nil }
-
-        let format = UIGraphicsImageRendererFormat.preferred()
-        format.opaque = true
-        format.scale = view.traitCollection.displayScale
-        format.preferredRange = .extended
-        let renderer = UIGraphicsImageRenderer(bounds: view.bounds, format: format)
-        var captured = false
-        let image = renderer.image { _ in
-            captured = view.drawHierarchy(in: view.bounds, afterScreenUpdates: false)
-        }
-        return captured ? image : nil
-    }
-#endif
 
     private func installPausedFrame(
         _ image: PlatformImage,
@@ -724,6 +701,16 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         let isOpening = playerState == .opening
         let isPlaying = playerState == .playing
         let isStopped = playerState == .stopped || playerState == .stopping
+        if isReplacingPipelineForTimeshiftSeek {
+            if isOpening || isPlaying {
+                isReplacingPipelineForTimeshiftSeek = false
+            } else if isStopped || playerState == .error {
+                // The obsolete reader is expected to end when a seek begins.
+                // Its terminal callback must not reset the long-lived session.
+                refreshPlaybackInformation()
+                return
+            }
+        }
         if isOpening {
             if pauseRequested {
                 setState(.paused)
@@ -791,8 +778,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                     navigationSucceeded = true
                     self.timeshiftNavigationDebugState = "server navigation completed"
                     self.applyNavigationLanding(navigation)
+                    await self.replaceVLCPipelineAfterTimeshiftNavigation()
                 case let .failure(error):
                     navigationSucceeded = false
+                    self.isReplacingPipelineForTimeshiftSeek = false
                     self.timeshiftNavigationDebugState = "server navigation failed: \(error.localizedDescription)"
                     self.cancelPostSeekOutputGate()
                     self.logger.error(
@@ -1013,7 +1002,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                     return
                 }
 
-                let media = Self.makeMedia(stream: stream)
+                let reader = stream.makeVLCReader()
+                retainedNativeVLCReaders.append(reader)
+                let media = Self.makeMedia(stream: reader)
                 media.addOption(":demux=ts")
                 addCachingOptions(to: media, milliseconds: request.networkCachingMilliseconds)
                 nativeInputStream = stream
@@ -1144,24 +1135,44 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         let waitsForPlaybackProgress = livePlaybackPosition.requestResume(
             from: playbackOutputCounters
         )
-        // VLC may still have many seconds of pre-seek transport data queued
-        // ahead of the discontinuity marker. Drain it quickly while output is
-        // hidden and muted, then restore normal rate when the new epoch is
-        // ready to reveal.
-        let drainsQueuedOutput = postSeekOutputGate.isArmed
-        if drainsQueuedOutput, mediaPlayer.hasVideoOut {
-            // A few pictures can already be decoded behind VLC's demux
-            // discontinuity. Drain that bounded vout queue while the frozen
-            // seek frame remains visible. Paused seeks use a separate path
-            // which stops on the first verified target picture.
-            postSeekOutputGate.requireDisplayedPictures(6)
+        if postSeekOutputGate.isArmed,
+           nativeInputStream?.healthSnapshot.expectsVideo == true {
+            // Decode a bounded run of destination pictures behind the held
+            // pre-seek frame. VLC 4 drains the discontinuity reliably at 1×;
+            // accelerating here leaks fast audio and can starve video after
+            // the output gate opens.
+            postSeekOutputGate.requireDisplayedPictures(12)
         }
         playbackRate = 1
         beginPostSeekOutputConcealmentIfNeeded()
         mediaPlayer.play()
-        mediaPlayer.rate = drainsQueuedOutput ? Self.postSeekDrainRate : 1
+        mediaPlayer.rate = 1
         setState(waitsForPlaybackProgress ? .preparing : (hasStartedPlayback ? .playing : .preparing))
         lastMetricsUpdate = Date()
+    }
+
+    private func replaceVLCPipelineAfterTimeshiftNavigation() async {
+        guard let stream = nativeInputStream, let request = activeRequest else { return }
+        mediaPlayer.stop()
+        // LibVLC 4 stops asynchronously. Installing and playing the fresh
+        // media before the Stopped callback lets the old input teardown race
+        // the replacement decoder, producing a long video-only stall.
+        for _ in 0..<200 where mediaPlayer.state != .stopped {
+            guard !Task.isCancelled else { return }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        let reader = stream.makeVLCReader()
+        retainedNativeVLCReaders.append(reader)
+        let media = Self.makeMedia(stream: reader)
+        media.addOption(":demux=ts")
+        addCachingOptions(to: media, milliseconds: request.networkCachingMilliseconds)
+        mediaPlayer.media = media
+        postSeekOutputGate.markPipelineRecreated()
+        outputHealthMonitor.restartGracePeriod(
+            output: PlaybackOutputCounters(displayedPictures: 0, playedAudioBuffers: 0),
+            at: Date()
+        )
+        logger.info("Recreated VLC pipeline at the selected timeshift position")
     }
 
     var nativeTimeshiftHealthSnapshot: HTSPStreamHealthSnapshot? {
@@ -1185,10 +1196,13 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 
     private var playbackOutputCounters: PlaybackOutputCounters {
         let statistics = mediaPlayer.media?.statistics
+        func count(_ value: UInt64) -> Int {
+            value <= UInt64(Int.max) ? Int(value) : 0
+        }
         return PlaybackOutputCounters(
-            displayedPictures: Int(statistics?.displayedPictures ?? 0),
-            playedAudioBuffers: Int(statistics?.playedAudioBuffers ?? 0),
-            demuxDiscontinuities: Int(statistics?.demuxDiscontinuity ?? 0),
+            displayedPictures: count(statistics?.displayedPictures ?? 0),
+            playedAudioBuffers: count(statistics?.playedAudioBuffers ?? 0),
+            demuxDiscontinuities: count(statistics?.demuxDiscontinuity ?? 0),
             playbackTimeMilliseconds: mediaPlayer.time.intValue > 0
                 ? Int64(mediaPlayer.time.intValue)
                 : nil
@@ -1227,7 +1241,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         } else {
             revealPostSeekPlaybackOutput()
         }
-        logger.info("Revealed VLC output after the post-seek discontinuity")
+        logger.info("Revealed stable VLC output after the post-seek discontinuity")
     }
 
     private func suspendPostSeekOutputConcealment() {
@@ -1237,6 +1251,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 
     private func cancelPostSeekOutputGate() {
+        isReplacingPipelineForTimeshiftSeek = false
         isPrimingPausedSeekFrame = false
         concealsSeekAfterPausedFrameCapture = false
         postSeekOutputGate.cancel()
@@ -1249,13 +1264,13 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         concealsSeekAfterPausedFrameCapture = false
         pauseRequested = true
         nativeInputStream?.pause()
-        if mediaPlayer.hasVideoOut {
+        if nativeInputStream?.healthSnapshot.expectsVideo == true {
             postSeekOutputGate.requireDisplayedPicture()
         }
         playbackRate = 1
         beginPostSeekOutputConcealmentIfNeeded()
         mediaPlayer.play()
-        mediaPlayer.rate = postSeekOutputGate.isArmed ? Self.postSeekDrainRate : 1
+        mediaPlayer.rate = 1
         setState(.paused)
         lastMetricsUpdate = Date()
     }
@@ -1324,6 +1339,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                 clearPausedFrame()
             }
             postSeekOutputGate.arm(from: playbackOutputCounters)
+            isReplacingPipelineForTimeshiftSeek = true
             let hasCurrentPausedFrame = preservesCurrentPausedFrame && pausedFrame != nil
             if hasCurrentPausedFrame, postSeekOutputGate.concealImmediately() {
                 concealPlaybackOutput()
@@ -1483,19 +1499,25 @@ struct VLCVideoSurface: UIViewRepresentable {
     let isActive: Bool
     let fadesLeadingEdge: Bool
     let leadingFadeInset: CGFloat
+    let isOutputConcealed: Bool
+    let concealmentImage: PlatformImage?
 
     init(
         mediaPlayer: VLCMediaPlayer,
         attachmentRevision: Int = 0,
         isActive: Bool = true,
         fadesLeadingEdge: Bool = false,
-        leadingFadeInset: CGFloat = 0
+        leadingFadeInset: CGFloat = 0,
+        isOutputConcealed: Bool = false,
+        concealmentImage: PlatformImage? = nil
     ) {
         self.mediaPlayer = mediaPlayer
         self.attachmentRevision = attachmentRevision
         self.isActive = isActive
         self.fadesLeadingEdge = fadesLeadingEdge
         self.leadingFadeInset = leadingFadeInset
+        self.isOutputConcealed = isOutputConcealed
+        self.concealmentImage = concealmentImage
     }
 
     func makeUIView(context: Context) -> UIView {
@@ -1504,7 +1526,9 @@ struct VLCVideoSurface: UIViewRepresentable {
             attachmentRevision: attachmentRevision,
             isActive: isActive,
             fadesLeadingEdge: fadesLeadingEdge,
-            leadingFadeInset: leadingFadeInset
+            leadingFadeInset: leadingFadeInset,
+            isOutputConcealed: isOutputConcealed,
+            concealmentImage: concealmentImage
         )
     }
 
@@ -1513,7 +1537,9 @@ struct VLCVideoSurface: UIViewRepresentable {
             revision: attachmentRevision,
             isActive: isActive,
             fadesLeadingEdge: fadesLeadingEdge,
-            leadingFadeInset: leadingFadeInset
+            leadingFadeInset: leadingFadeInset,
+            isOutputConcealed: isOutputConcealed,
+            concealmentImage: concealmentImage
         )
     }
 
@@ -1530,13 +1556,16 @@ private final class VLCVideoContainerView: UIView {
     private var leadingFadeInset: CGFloat
     private var attachedBoundsSize = CGSize.zero
     private let leadingFadeMask = CAGradientLayer()
+    private let concealmentView = UIImageView()
 
     init(
         mediaPlayer: VLCMediaPlayer,
         attachmentRevision: Int,
         isActive: Bool,
         fadesLeadingEdge: Bool,
-        leadingFadeInset: CGFloat
+        leadingFadeInset: CGFloat,
+        isOutputConcealed: Bool,
+        concealmentImage: PlatformImage?
     ) {
         self.mediaPlayer = mediaPlayer
         self.attachmentRevision = attachmentRevision
@@ -1547,6 +1576,13 @@ private final class VLCVideoContainerView: UIView {
         backgroundColor = .black
         clipsToBounds = true
         layer.masksToBounds = true
+        concealmentView.backgroundColor = .black
+        concealmentView.contentMode = .scaleAspectFill
+        concealmentView.clipsToBounds = true
+        concealmentView.isUserInteractionEnabled = false
+        concealmentView.image = concealmentImage
+        concealmentView.isHidden = !isOutputConcealed
+        addSubview(concealmentView)
         updateLeadingFadeMask()
     }
 
@@ -1573,6 +1609,8 @@ private final class VLCVideoContainerView: UIView {
             updateLeadingFadeMask()
         }
         resizeVideoSubviews()
+        concealmentView.frame = bounds
+        bringSubviewToFront(concealmentView)
         attachIfVisible()
     }
 
@@ -1584,10 +1622,11 @@ private final class VLCVideoContainerView: UIView {
         // drawable here creates an additional renderer on every transition.
         subview.frame = bounds
         subview.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        if subview !== concealmentView { bringSubviewToFront(concealmentView) }
     }
 
     private func resizeVideoSubviews() {
-        for subview in subviews where subview.frame != bounds {
+        for subview in subviews where subview !== concealmentView && subview.frame != bounds {
             subview.frame = bounds
         }
     }
@@ -1596,7 +1635,9 @@ private final class VLCVideoContainerView: UIView {
         revision: Int,
         isActive: Bool,
         fadesLeadingEdge: Bool,
-        leadingFadeInset: CGFloat
+        leadingFadeInset: CGFloat,
+        isOutputConcealed: Bool,
+        concealmentImage: PlatformImage?
     ) {
         let mustReattach = revision != attachmentRevision
         attachmentRevision = revision
@@ -1606,6 +1647,9 @@ private final class VLCVideoContainerView: UIView {
             self.leadingFadeInset = leadingFadeInset
             updateLeadingFadeMask()
         }
+        concealmentView.image = concealmentImage
+        concealmentView.isHidden = !isOutputConcealed
+        if isOutputConcealed { bringSubviewToFront(concealmentView) }
         guard isActive else {
             detachIfOwned()
             return
@@ -1678,19 +1722,25 @@ struct VLCVideoSurface: NSViewRepresentable {
     let isActive: Bool
     let fadesLeadingEdge: Bool
     let leadingFadeInset: CGFloat
+    let isOutputConcealed: Bool
+    let concealmentImage: PlatformImage?
 
     init(
         mediaPlayer: VLCMediaPlayer,
         attachmentRevision: Int = 0,
         isActive: Bool = true,
         fadesLeadingEdge: Bool = false,
-        leadingFadeInset: CGFloat = 0
+        leadingFadeInset: CGFloat = 0,
+        isOutputConcealed: Bool = false,
+        concealmentImage: PlatformImage? = nil
     ) {
         self.mediaPlayer = mediaPlayer
         self.attachmentRevision = attachmentRevision
         self.isActive = isActive
         self.fadesLeadingEdge = fadesLeadingEdge
         self.leadingFadeInset = leadingFadeInset
+        self.isOutputConcealed = isOutputConcealed
+        self.concealmentImage = concealmentImage
     }
 
     func makeNSView(context: Context) -> NSView {
@@ -1699,7 +1749,9 @@ struct VLCVideoSurface: NSViewRepresentable {
             attachmentRevision: attachmentRevision,
             isActive: isActive,
             fadesLeadingEdge: fadesLeadingEdge,
-            leadingFadeInset: leadingFadeInset
+            leadingFadeInset: leadingFadeInset,
+            isOutputConcealed: isOutputConcealed,
+            concealmentImage: concealmentImage
         )
     }
 
@@ -1708,7 +1760,9 @@ struct VLCVideoSurface: NSViewRepresentable {
             revision: attachmentRevision,
             isActive: isActive,
             fadesLeadingEdge: fadesLeadingEdge,
-            leadingFadeInset: leadingFadeInset
+            leadingFadeInset: leadingFadeInset,
+            isOutputConcealed: isOutputConcealed,
+            concealmentImage: concealmentImage
         )
     }
 
@@ -1725,13 +1779,16 @@ private final class VLCVideoContainerView: NSView {
     private var leadingFadeInset: CGFloat
     private var attachedBoundsSize = CGSize.zero
     private let leadingFadeMask = CAGradientLayer()
+    private let concealmentView = NSImageView()
 
     init(
         mediaPlayer: VLCMediaPlayer,
         attachmentRevision: Int,
         isActive: Bool,
         fadesLeadingEdge: Bool,
-        leadingFadeInset: CGFloat
+        leadingFadeInset: CGFloat,
+        isOutputConcealed: Bool,
+        concealmentImage: PlatformImage?
     ) {
         self.mediaPlayer = mediaPlayer
         self.attachmentRevision = attachmentRevision
@@ -1742,6 +1799,13 @@ private final class VLCVideoContainerView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
         layer?.masksToBounds = true
+        concealmentView.wantsLayer = true
+        concealmentView.layer?.backgroundColor = NSColor.black.cgColor
+        concealmentView.layer?.contentsGravity = .resizeAspectFill
+        concealmentView.imageScaling = .scaleProportionallyUpOrDown
+        concealmentView.image = concealmentImage
+        concealmentView.isHidden = !isOutputConcealed
+        addSubview(concealmentView)
         updateLeadingFadeMask()
     }
 
@@ -1768,6 +1832,10 @@ private final class VLCVideoContainerView: NSView {
             updateLeadingFadeMask()
         }
         resizeVideoSubviews()
+        concealmentView.frame = bounds
+        if concealmentView.superview === self {
+            addSubview(concealmentView, positioned: .above, relativeTo: nil)
+        }
         attachIfVisible()
     }
 
@@ -1775,10 +1843,13 @@ private final class VLCVideoContainerView: NSView {
         super.didAddSubview(subview)
         subview.frame = bounds
         subview.autoresizingMask = [.width, .height]
+        if subview !== concealmentView {
+            addSubview(concealmentView, positioned: .above, relativeTo: subview)
+        }
     }
 
     private func resizeVideoSubviews() {
-        for subview in subviews where subview.frame != bounds {
+        for subview in subviews where subview !== concealmentView && subview.frame != bounds {
             subview.frame = bounds
         }
     }
@@ -1787,7 +1858,9 @@ private final class VLCVideoContainerView: NSView {
         revision: Int,
         isActive: Bool,
         fadesLeadingEdge: Bool,
-        leadingFadeInset: CGFloat
+        leadingFadeInset: CGFloat,
+        isOutputConcealed: Bool,
+        concealmentImage: PlatformImage?
     ) {
         let mustReattach = revision != attachmentRevision
         attachmentRevision = revision
@@ -1796,6 +1869,11 @@ private final class VLCVideoContainerView: NSView {
             self.fadesLeadingEdge = fadesLeadingEdge
             self.leadingFadeInset = leadingFadeInset
             updateLeadingFadeMask()
+        }
+        concealmentView.image = concealmentImage
+        concealmentView.isHidden = !isOutputConcealed
+        if isOutputConcealed {
+            addSubview(concealmentView, positioned: .above, relativeTo: nil)
         }
         guard isActive else {
             detachIfOwned()

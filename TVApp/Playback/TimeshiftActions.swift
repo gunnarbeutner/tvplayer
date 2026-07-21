@@ -187,6 +187,8 @@ struct PostSeekPlaybackOutputGate {
     private var minimumPlaybackProgressMilliseconds: Int64 = 0
     private var minimumDisplayedPictureAdvance = 0
     private var outputAfterDiscontinuity: PlaybackOutputCounters?
+    private var outputAfterMinimumPlaybackProgress: PlaybackOutputCounters?
+    private var startsWithFreshPipeline = false
 
     mutating func arm(from output: PlaybackOutputCounters) {
         isArmed = true
@@ -194,6 +196,8 @@ struct PostSeekPlaybackOutputGate {
         isEvaluatingFreshOutput = false
         baselineDiscontinuities = output.demuxDiscontinuities
         outputAfterDiscontinuity = nil
+        outputAfterMinimumPlaybackProgress = nil
+        startsWithFreshPipeline = false
     }
 
     mutating func requirePlaybackProgress(_ duration: TimeInterval) {
@@ -208,6 +212,17 @@ struct PostSeekPlaybackOutputGate {
 
     mutating func requireDisplayedPictures(_ count: Int) {
         minimumDisplayedPictureAdvance = max(minimumDisplayedPictureAdvance, max(0, count))
+    }
+
+    /// A newly-created VLC media pipeline cannot contain samples from the old
+    /// position. Treat its first output as post-discontinuity output even when
+    /// the fresh MPEG-TS starts cleanly and VLC reports no discontinuity.
+    mutating func markPipelineRecreated() {
+        guard isArmed else { return }
+        startsWithFreshPipeline = true
+        baselineDiscontinuities = 0
+        outputAfterDiscontinuity = nil
+        outputAfterMinimumPlaybackProgress = nil
     }
 
     @discardableResult
@@ -250,14 +265,22 @@ struct PostSeekPlaybackOutputGate {
             self.outputAfterDiscontinuity = output
             return false
         }
+        guard isConcealing, hasReachedMinimumPlaybackProgress(in: output) else { return false }
+        let freshnessBaseline: PlaybackOutputCounters
+        if minimumPlaybackProgressMilliseconds > 0 {
+            guard let outputAfterMinimumPlaybackProgress else {
+                self.outputAfterMinimumPlaybackProgress = output
+                return false
+            }
+            freshnessBaseline = outputAfterMinimumPlaybackProgress
+        } else {
+            freshnessBaseline = outputAfterDiscontinuity
+        }
         let hasFreshOutput = minimumDisplayedPictureAdvance > 0
-            ? output.displayedPictures - outputAfterDiscontinuity.displayedPictures
+            ? output.displayedPictures - freshnessBaseline.displayedPictures
                 >= minimumDisplayedPictureAdvance
-            : output.hasAdvanced(since: outputAfterDiscontinuity)
-        guard isConcealing,
-              hasReachedMinimumPlaybackProgress(in: output),
-              hasFreshOutput
-        else { return false }
+            : output.hasAdvanced(since: freshnessBaseline)
+        guard hasFreshOutput else { return false }
 
         reset()
         return true
@@ -268,6 +291,8 @@ struct PostSeekPlaybackOutputGate {
         let wasConcealing = isConcealing
         isConcealing = false
         outputAfterDiscontinuity = nil
+        outputAfterMinimumPlaybackProgress = nil
+        outputAfterMinimumPlaybackProgress = nil
         return wasConcealing
     }
 
@@ -279,7 +304,7 @@ struct PostSeekPlaybackOutputGate {
     }
 
     private func hasObservedDiscontinuity(in output: PlaybackOutputCounters) -> Bool {
-        output.demuxDiscontinuities > baselineDiscontinuities
+        startsWithFreshPipeline || output.demuxDiscontinuities > baselineDiscontinuities
     }
 
     private func hasReachedMinimumPlaybackProgress(
@@ -300,6 +325,7 @@ struct PostSeekPlaybackOutputGate {
         minimumPlaybackProgressMilliseconds = 0
         minimumDisplayedPictureAdvance = 0
         outputAfterDiscontinuity = nil
+        startsWithFreshPipeline = false
     }
 }
 

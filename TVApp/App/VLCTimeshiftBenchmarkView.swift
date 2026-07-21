@@ -76,15 +76,11 @@ private struct BenchmarkVideoPane: View {
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             Color.black
-            VLCVideoSurface(mediaPlayer: engine.mediaPlayer)
-
-            if engine.isPlaybackOutputConcealed {
-                Color.black
-                    .overlay {
-                        ProgressView("Waiting for post-seek VLC output…")
-                            .controlSize(.large)
-                    }
-            }
+            VLCVideoSurface(
+                mediaPlayer: engine.mediaPlayer,
+                isOutputConcealed: engine.isPlaybackOutputConcealed,
+                concealmentImage: engine.pausedFrame
+            )
 
             HStack(spacing: 14) {
                 metric("Window", String(format: "%.1fs", engine.timeshiftWindowSeconds))
@@ -258,10 +254,17 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
         // surface owns VLC attachment for the entire fill and seek run.
         presentation = makePresentation(channel: channel, request: request)
         await Task.yield()
-        guard await engine.waitForPlaybackStart() else { throw BenchmarkError.playbackDidNotStart }
+        try await engine.prepare(request)
         guard engine.activeLivePlaybackMode == .tvHeadend else {
-            throw BenchmarkError.nativeTimeshiftUnavailable
+            let reason: String? = if case let .liveOnly(reason) = engine.activeLivePlaybackMode {
+                reason
+            } else {
+                nil
+            }
+            throw BenchmarkError.nativeTimeshiftUnavailable(reason)
         }
+        engine.play()
+        guard await engine.waitForPlaybackStart() else { throw BenchmarkError.playbackDidNotStart }
         try validateSessionContinuity()
         append(.success, "VLC playback started", "Video output is attached to the left pane.")
 
@@ -352,13 +355,13 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
                     number: index + 1
                 )
             )
-            phase = "Playing for 3 seconds after seek \(index + 1)…"
-            append(.information, "Post-seek playback dwell", "Allowing VLC to run for 3 seconds.")
-            for _ in 0..<30 {
-                try await Task.sleep(for: .milliseconds(100))
-                engine.refreshPlaybackInformation()
-                try validateSessionContinuity()
-            }
+            phase = "Playing for 10 seconds after seek \(index + 1)…"
+            append(
+                .information,
+                "Post-seek playback dwell",
+                "Monitoring normal-rate audio and uninterrupted video for 10 seconds."
+            )
+            try await validatePostSeekDwell(seekNumber: index + 1)
             append(.success, "Post-seek dwell complete", debugState)
             progress = Double(automaticBufferFillSeconds + index + 1)
                 / Double(automaticBufferFillSeconds + seekCount)
@@ -432,6 +435,7 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
     ) async throws -> SeekSample {
         engine.refreshPlaybackInformation()
         var baseline = counters
+        var mediaIdentity = engine.mediaPlayer.media.map(ObjectIdentifier.init)
         let initialNavigationState = engine.timeshiftNavigationDebugState
         var navigationStarted = false
         let started = ProcessInfo.processInfo.systemUptime
@@ -456,12 +460,15 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
         var audioAt: Double?
         var atDiscontinuity: PlaybackOutputCounters?
         var loggedConcealment = false
+        var validatedHeldFrame = false
         while ProcessInfo.processInfo.systemUptime - started < 10 {
             try await Task.sleep(for: .milliseconds(10))
             engine.refreshPlaybackInformation()
             try validateSessionContinuity()
+            try validateNormalPlaybackRate(context: "seek \(number)")
             let now = ProcessInfo.processInfo.systemUptime
             let current = counters
+            let currentMediaIdentity = engine.mediaPlayer.media.map(ObjectIdentifier.init)
             let health = engine.nativeTimeshiftHealthSnapshot
             if !navigationStarted,
                engine.state == .paused
@@ -470,6 +477,14 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
                 || engine.timeshiftNavigationDebugState != initialNavigationState {
                 navigationStarted = true
                 baseline = current
+            }
+            if navigationStarted, currentMediaIdentity != mediaIdentity {
+                mediaIdentity = currentMediaIdentity
+                discontinuityAt = now
+                atDiscontinuity = current
+                videoAt = nil
+                audioAt = nil
+                append(.information, "VLC pipeline replaced at destination", elapsedDetail(since: started))
             }
             if navigationStarted,
                discontinuityAt == nil,
@@ -481,6 +496,27 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
             if engine.isPlaybackOutputConcealed, !loggedConcealment {
                 loggedConcealment = true
                 append(.information, "Output gate concealed stale frames", elapsedDetail(since: started))
+            }
+            if engine.isPlaybackOutputConcealed {
+                if engine.mediaPlayer.audio?.isMuted == false {
+                    throw BenchmarkError.outputInvariant(
+                        "Seek \(number) exposed audio while post-seek output was concealed."
+                    )
+                }
+                if !validatedHeldFrame {
+                    guard let heldFrame = engine.pausedFrame else {
+                        throw BenchmarkError.outputInvariant(
+                            "Seek \(number) concealed output without a held pre-seek frame."
+                        )
+                    }
+                    guard heldFrameMaximumLuminance(heldFrame) >= 0.025 else {
+                        throw BenchmarkError.outputInvariant(
+                            "Seek \(number) held an effectively black pre-seek frame."
+                        )
+                    }
+                    validatedHeldFrame = true
+                    append(.success, "Held pre-seek frame verified", elapsedDetail(since: started))
+                }
             }
             if navigationStarted, let atDiscontinuity {
                 if videoAt == nil, current.displayedPictures > atDiscontinuity.displayedPictures {
@@ -512,6 +548,79 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
             }
         }
         throw BenchmarkError.seekTimedOut(number, debugState)
+    }
+
+    private func validatePostSeekDwell(seekNumber: Int) async throws {
+        var previous = counters
+        var lastVideoAdvance = ProcessInfo.processInfo.systemUptime
+        var maximumVideoGap: TimeInterval = 0
+
+        for _ in 0..<100 {
+            try await Task.sleep(for: .milliseconds(100))
+            engine.refreshPlaybackInformation()
+            try validateSessionContinuity()
+            try validateNormalPlaybackRate(context: "seek \(seekNumber) dwell")
+
+            let now = ProcessInfo.processInfo.systemUptime
+            let current = counters
+            if current.displayedPictures > previous.displayedPictures {
+                maximumVideoGap = max(maximumVideoGap, now - lastVideoAdvance)
+                lastVideoAdvance = now
+            } else if current.playedAudioBuffers > previous.playedAudioBuffers,
+                      now - lastVideoAdvance >= 0.5 {
+                throw BenchmarkError.outputInvariant(
+                    String(
+                        format: "Seek %d audio advanced while video stalled for %.0fms after reveal.",
+                        seekNumber,
+                        (now - lastVideoAdvance) * 1_000
+                    )
+                )
+            }
+            previous = current
+        }
+
+        append(
+            .success,
+            "Post-seek video remained continuous",
+            String(format: "Longest observed frame interval %.1fms.", maximumVideoGap * 1_000)
+        )
+    }
+
+    private func validateNormalPlaybackRate(context: String) throws {
+        let rate = engine.mediaPlayer.rate
+        guard rate <= 1.01 else {
+            throw BenchmarkError.outputInvariant(
+                String(format: "%@ used accelerated VLC playback at %.2f×.", context, rate)
+            )
+        }
+    }
+
+    private func heldFrameMaximumLuminance(_ image: NSImage) -> Double {
+        guard let source = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return 0 }
+        let width = 32
+        let height = 18
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        var pixels = [UInt8](repeating: 0, count: height * bytesPerRow)
+        guard let context = CGContext(
+            data: &pixels,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return 0 }
+        context.draw(source, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        var maximum = 0.0
+        for offset in stride(from: 0, to: pixels.count, by: bytesPerPixel) {
+            let red = Double(pixels[offset]) / 255
+            let green = Double(pixels[offset + 1]) / 255
+            let blue = Double(pixels[offset + 2]) / 255
+            maximum = max(maximum, red * 0.2126 + green * 0.7152 + blue * 0.0722)
+        }
+        return maximum
     }
 
     private func sendPlayerSeek(delta: TimeInterval) async throws {
@@ -615,10 +724,13 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
 
     private var counters: PlaybackOutputCounters {
         let statistics = engine.mediaPlayer.media?.statistics
+        func count(_ value: UInt64) -> Int {
+            value <= UInt64(Int.max) ? Int(value) : 0
+        }
         return PlaybackOutputCounters(
-            displayedPictures: Int(statistics?.displayedPictures ?? 0),
-            playedAudioBuffers: Int(statistics?.playedAudioBuffers ?? 0),
-            demuxDiscontinuities: Int(statistics?.demuxDiscontinuity ?? 0),
+            displayedPictures: count(statistics?.displayedPictures ?? 0),
+            playedAudioBuffers: count(statistics?.playedAudioBuffers ?? 0),
+            demuxDiscontinuities: count(statistics?.demuxDiscontinuity ?? 0),
             playbackTimeMilliseconds: engine.mediaPlayer.time.intValue > 0
                 ? Int64(engine.mediaPlayer.time.intValue)
                 : nil
@@ -727,21 +839,24 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
 
     private enum BenchmarkError: LocalizedError {
         case invalidPlaylist
-        case nativeTimeshiftUnavailable
+        case nativeTimeshiftUnavailable(String?)
         case playbackDidNotStart
         case seekTimedOut(Int, String)
         case resetTimedOut(String)
         case cyclesFailed(String)
+        case outputInvariant(String)
 
         var errorDescription: String? {
             switch self {
             case .invalidPlaylist: "TVHeadend did not return a usable channel playlist."
-            case .nativeTimeshiftUnavailable: "The player fell back instead of opening native timeshift."
+            case let .nativeTimeshiftUnavailable(reason):
+                "The player fell back instead of opening native timeshift. \(reason ?? "No reason reported.")"
             case .playbackDidNotStart: "VLC did not begin playback within 10 seconds."
             case let .seekTimedOut(number, state):
                 "Seek \(number) produced no post-discontinuity VLC video within 10 seconds. \(state)"
             case let .resetTimedOut(state): "Returning to live timed out. \(state)"
             case let .cyclesFailed(detail): detail
+            case let .outputInvariant(detail): detail
             }
         }
     }

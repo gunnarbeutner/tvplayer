@@ -389,10 +389,13 @@ final class VLCTuningBenchmarkModel: ObservableObject {
 
     private var counters: PlaybackOutputCounters {
         let statistics = engine.mediaPlayer.media?.statistics
+        func count(_ value: UInt64) -> Int {
+            value <= UInt64(Int.max) ? Int(value) : 0
+        }
         return PlaybackOutputCounters(
-            displayedPictures: Int(statistics?.displayedPictures ?? 0),
-            playedAudioBuffers: Int(statistics?.playedAudioBuffers ?? 0),
-            demuxDiscontinuities: Int(statistics?.demuxDiscontinuity ?? 0),
+            displayedPictures: count(statistics?.displayedPictures ?? 0),
+            playedAudioBuffers: count(statistics?.playedAudioBuffers ?? 0),
+            demuxDiscontinuities: count(statistics?.demuxDiscontinuity ?? 0),
             playbackTimeMilliseconds: engine.mediaPlayer.time.intValue > 0
                 ? Int64(engine.mediaPlayer.time.intValue)
                 : nil
