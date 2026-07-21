@@ -48,7 +48,11 @@ struct RecordingsView: View {
             }
         }
         .platformDetailPresentation(item: $selectedRecording) { recording in
-            RecordingDetailView(recordingID: recording.id)
+            RecordingDetailView(
+                recordingID: recording.id,
+                onPlayRecording: playFromDetails,
+                onWatchLive: watchLiveFromDetails
+            )
         }
         .confirmationDialog(
             "Stop recording all future showings?",
@@ -91,6 +95,30 @@ struct RecordingsView: View {
             pageRecordings(direction)
         }
 #endif
+    }
+
+    private func playFromDetails(_ recording: TVRecording, _ channel: GuideChannel?) {
+        selectedRecording = nil
+        Task { @MainActor in
+            await Task.yield()
+            playback.start(
+                recording: recording,
+                channel: channel,
+                configuration: settings.configuration
+            )
+        }
+    }
+
+    private func watchLiveFromDetails(_ channel: GuideChannel, _ program: GuideProgram?) {
+        selectedRecording = nil
+        Task { @MainActor in
+            await Task.yield()
+            playback.start(
+                channel: channel,
+                program: program,
+                configuration: settings.configuration
+            )
+        }
     }
 
     @ViewBuilder
@@ -362,10 +390,11 @@ private struct RecordingDetailView: View {
     @EnvironmentObject private var store: RecordingStore
     @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var guide: GuideViewModel
-    @EnvironmentObject private var playback: PlaybackCoordinator
     @State private var confirmAction: ConfirmAction?
 
     let recordingID: TVRecording.ID
+    let onPlayRecording: (TVRecording, GuideChannel?) -> Void
+    let onWatchLive: (GuideChannel, GuideProgram?) -> Void
 
     private enum ConfirmAction: String, Identifiable {
         case cancel = "Cancel Recording"
@@ -555,10 +584,9 @@ private struct RecordingDetailView: View {
 
             if recording.state == .recording, let channel {
                 Button {
-                    playback.start(
-                        channel: channel,
-                        program: channel.programs.first { $0.isAiring(at: Date()) },
-                        configuration: settings.configuration
+                    onWatchLive(
+                        channel,
+                        channel.programs.first { $0.isAiring(at: Date()) }
                     )
                 } label: {
                     recordingActionLabel(
@@ -606,10 +634,6 @@ private struct RecordingDetailView: View {
     }
 
     private func play(_ recording: TVRecording) {
-        playback.start(
-            recording: recording,
-            channel: channel,
-            configuration: settings.configuration
-        )
+        onPlayRecording(recording, channel)
     }
 }

@@ -17,6 +17,8 @@ struct ProgrammeDetailView: View {
     @State private var confirmRecordingAction: RecordingConfirmation?
 
     let presentation: ProgrammeDetailPresentation
+    let onWatchLive: (GuideChannel, GuideProgram?) -> Void
+    let onPlayFromBeginning: (TVRecording, GuideChannel) -> Void
 
     private var program: GuideProgram? { presentation.program }
     private var channel: GuideChannel { presentation.channel }
@@ -370,21 +372,11 @@ struct ProgrammeDetailView: View {
 
     private func watchLive() {
         guard canWatchLive else { return }
-        playback.start(
-            channel: channel,
-            program: program,
-            configuration: settings.configuration
-        )
-        dismiss()
+        onWatchLive(channel, program)
     }
 
     private func playFromBeginning(_ recording: TVRecording) {
-        playback.start(
-            recording: recording,
-            channel: channel,
-            configuration: settings.configuration
-        )
-        dismiss()
+        onPlayFromBeginning(recording, channel)
     }
 
     private func metadataBadge(_ label: String) -> some View {

@@ -5,13 +5,34 @@ import AVFAudio
 #endif
 
 struct PlaybackPresentation: Identifiable {
-    let id = UUID()
+    let id: UUID
     let channel: GuideChannel
     let program: GuideProgram?
     let recording: TVRecording?
     let request: LiveStreamRequest
 
     var isRecording: Bool { recording != nil }
+
+    init(
+        id: UUID = UUID(),
+        channel: GuideChannel,
+        program: GuideProgram?,
+        recording: TVRecording?,
+        request: LiveStreamRequest
+    ) {
+        self.id = id
+        self.channel = channel
+        self.program = program
+        self.recording = recording
+        self.request = request
+    }
+}
+
+struct PlaybackLaunchPresentation: Identifiable {
+    let id: UUID
+    let channel: GuideChannel
+    let program: GuideProgram?
+    let recording: TVRecording?
 }
 
 struct PlaybackNavigationSelection: Equatable, Sendable {
@@ -60,6 +81,7 @@ final class PlaybackStartIntentTracker {
 final class PlaybackCoordinator: ObservableObject {
     private let logger = Logger(subsystem: "de.beutner.TVPlayer", category: "PlaybackCoordinator")
     @Published var presentation: PlaybackPresentation?
+    @Published private(set) var launchPresentation: PlaybackLaunchPresentation?
     @Published var isPlayerPresented = false
     @Published var errorMessage: String?
     @Published private(set) var navigationSelection: PlaybackNavigationSelection?
@@ -72,6 +94,7 @@ final class PlaybackCoordinator: ObservableObject {
     private var prewarmTask: Task<Void, Never>?
     private var prewarmedChannelID: String?
     private let playbackStartIntents = PlaybackStartIntentTracker()
+    private var launchShouldRestoreAudio = false
     private var playbackClient: TVHeadendClient?
     private var playbackClientConfiguration: TVHeadendConfiguration?
 #if os(tvOS)
@@ -94,7 +117,9 @@ final class PlaybackCoordinator: ObservableObject {
     }
 
     var isUserInitiatedLivePlayback: Bool {
-        isUserInitiatedPlayback && presentation?.isRecording == false
+        guard isUserInitiatedPlayback else { return false }
+        if let launchPresentation { return launchPresentation.recording == nil }
+        return presentation?.isRecording == false
     }
 
     func start(
@@ -103,6 +128,7 @@ final class PlaybackCoordinator: ObservableObject {
         configuration: TVHeadendConfiguration
     ) {
         cancelPlaybackStartIntent()
+        clearLaunch(dismissPlayer: false)
         let sessionCanResume: Bool
         switch engine.state {
         case .idle, .failed:
@@ -115,6 +141,8 @@ final class PlaybackCoordinator: ObservableObject {
            existingPresentation.recording == nil,
            existingPresentation.channel.id == channel.id,
            sessionCanResume {
+            let presentationID = UUID()
+            let needsLaunch = !engine.mediaPlayer.hasVideoOut
             if prewarmedChannelID == channel.id {
                 engine.finishPrewarmingAtLiveEdge()
             }
@@ -122,11 +150,20 @@ final class PlaybackCoordinator: ObservableObject {
             prewarmTask = nil
             prewarmedChannelID = nil
             presentation = PlaybackPresentation(
+                id: presentationID,
                 channel: channel,
                 program: program,
                 recording: nil,
                 request: existingPresentation.request
             )
+            if needsLaunch {
+                beginLaunch(PlaybackLaunchPresentation(
+                    id: presentationID,
+                    channel: channel,
+                    program: program,
+                    recording: nil
+                ))
+            }
             navigationSelection = PlaybackNavigationSelection(
                 channelID: channel.id,
                 programID: program?.id
@@ -141,6 +178,19 @@ final class PlaybackCoordinator: ObservableObject {
         prewarmTask = nil
         prewarmedChannelID = nil
         let intentID = playbackStartIntents.begin()
+        beginLaunch(PlaybackLaunchPresentation(
+            id: intentID,
+            channel: channel,
+            program: program,
+            recording: nil
+        ))
+        navigationSelection = PlaybackNavigationSelection(
+            channelID: channel.id,
+            programID: program?.id
+        )
+        isUserInitiatedPlayback = true
+        isPlayerPresented = true
+        errorMessage = nil
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
@@ -151,24 +201,19 @@ final class PlaybackCoordinator: ObservableObject {
                 guard playbackStartIntents.isCurrent(intentID) else { return }
                 engine.stop()
                 presentation = PlaybackPresentation(
+                    id: intentID,
                     channel: channel,
                     program: program,
                     recording: nil,
                     request: request
                 )
-                navigationSelection = PlaybackNavigationSelection(
-                    channelID: channel.id,
-                    programID: program?.id
-                )
-                isUserInitiatedPlayback = true
-                isPlayerPresented = true
-                errorMessage = nil
                 finishPlaybackStartIntent(intentID)
             } catch is CancellationError {
                 finishPlaybackStartIntent(intentID)
             } catch {
                 guard playbackStartIntents.isCurrent(intentID) else { return }
                 errorMessage = error.localizedDescription
+                finishLaunch(intentID, dismissPlayer: true)
                 finishPlaybackStartIntent(intentID)
             }
         }
@@ -196,6 +241,7 @@ final class PlaybackCoordinator: ObservableObject {
         let program = target.programs.first { $0.isAiring(at: date) }
 
         cancelPlaybackStartIntent()
+        clearLaunch(dismissPlayer: false)
         let intentID = playbackStartIntents.begin()
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -234,6 +280,14 @@ final class PlaybackCoordinator: ObservableObject {
 
     func leavePlayer() {
         cancelPlaybackStartIntent()
+        if let launchPresentation {
+            if presentation?.id == launchPresentation.id {
+                engine.stop()
+                presentation = nil
+            }
+            finishLaunch(launchPresentation.id, dismissPlayer: true)
+            return
+        }
         // Live television keeps running when it collapses into the guide's
         // artwork area. Recorded media retains the previous pause-on-exit
         // behavior because it has no corresponding live channel preview.
@@ -252,6 +306,14 @@ final class PlaybackCoordinator: ObservableObject {
     func playerDidDismiss() {
         guard navigationSelection != nil else { return }
         focusReturnRevision &+= 1
+    }
+
+    func playbackDidStart(presentationID: UUID) {
+        finishLaunch(presentationID, dismissPlayer: false)
+    }
+
+    func playbackDidFail(presentationID: UUID) {
+        finishLaunch(presentationID, dismissPlayer: false)
     }
 
 #if os(tvOS)
@@ -399,6 +461,7 @@ final class PlaybackCoordinator: ObservableObject {
         configuration: TVHeadendConfiguration
     ) {
         cancelPlaybackStartIntent()
+        clearLaunch(dismissPlayer: false)
         let sessionCanResume: Bool
         switch engine.state {
         case .idle, .failed: sessionCanResume = false
@@ -406,6 +469,14 @@ final class PlaybackCoordinator: ObservableObject {
         }
 
         if presentation?.recording?.id == recording.id, sessionCanResume {
+            if !engine.mediaPlayer.hasVideoOut, let presentation {
+                beginLaunch(PlaybackLaunchPresentation(
+                    id: presentation.id,
+                    channel: presentation.channel,
+                    program: nil,
+                    recording: recording
+                ))
+            }
             if let channelID = channel?.id ?? presentation?.channel.id {
                 navigationSelection = PlaybackNavigationSelection(
                     channelID: channelID,
@@ -422,6 +493,20 @@ final class PlaybackCoordinator: ObservableObject {
         prewarmTask = nil
         prewarmedChannelID = nil
         let intentID = playbackStartIntents.begin()
+        let playbackChannel = channel ?? Self.placeholderChannel(for: recording)
+        beginLaunch(PlaybackLaunchPresentation(
+            id: intentID,
+            channel: playbackChannel,
+            program: nil,
+            recording: recording
+        ))
+        navigationSelection = PlaybackNavigationSelection(
+            channelID: playbackChannel.id,
+            programID: nil
+        )
+        isUserInitiatedPlayback = true
+        isPlayerPresented = true
+        errorMessage = nil
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
@@ -430,9 +515,9 @@ final class PlaybackCoordinator: ObservableObject {
                     .recordingStreamURL(recordingID: recording.id)
                 try Task.checkCancellation()
                 guard playbackStartIntents.isCurrent(intentID) else { return }
-                let playbackChannel = channel ?? Self.placeholderChannel(for: recording)
                 engine.stop()
                 presentation = PlaybackPresentation(
+                    id: intentID,
                     channel: playbackChannel,
                     program: nil,
                     recording: recording,
@@ -444,19 +529,13 @@ final class PlaybackCoordinator: ObservableObject {
                         expectedDurationSeconds: recording.duration
                     )
                 )
-                navigationSelection = PlaybackNavigationSelection(
-                    channelID: playbackChannel.id,
-                    programID: nil
-                )
-                isUserInitiatedPlayback = true
-                isPlayerPresented = true
-                errorMessage = nil
                 finishPlaybackStartIntent(intentID)
             } catch is CancellationError {
                 finishPlaybackStartIntent(intentID)
             } catch {
                 guard playbackStartIntents.isCurrent(intentID) else { return }
                 errorMessage = error.localizedDescription
+                finishLaunch(intentID, dismissPlayer: true)
                 finishPlaybackStartIntent(intentID)
             }
         }
@@ -506,6 +585,28 @@ final class PlaybackCoordinator: ObservableObject {
 
     private func finishPlaybackStartIntent(_ intentID: UUID) {
         playbackStartIntents.finish(intentID)
+    }
+
+    private func finishLaunch(_ id: UUID, dismissPlayer: Bool) {
+        guard launchPresentation?.id == id else { return }
+        clearLaunch(dismissPlayer: dismissPlayer)
+    }
+
+    private func beginLaunch(_ presentation: PlaybackLaunchPresentation) {
+        launchPresentation = presentation
+        if let audio = engine.mediaPlayer.audio, !audio.isMuted {
+            audio.isMuted = true
+            launchShouldRestoreAudio = true
+        }
+    }
+
+    private func clearLaunch(dismissPlayer: Bool) {
+        launchPresentation = nil
+        if launchShouldRestoreAudio {
+            engine.mediaPlayer.audio?.isMuted = false
+            launchShouldRestoreAudio = false
+        }
+        if dismissPlayer { isPlayerPresented = false }
     }
 
     private static func placeholderChannel(for recording: TVRecording) -> GuideChannel {

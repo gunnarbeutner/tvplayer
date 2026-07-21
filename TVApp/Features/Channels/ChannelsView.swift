@@ -110,7 +110,11 @@ struct ChannelsView: View {
             }
         }
         .platformDetailPresentation(item: $detail) { presentation in
-            ProgrammeDetailView(presentation: presentation)
+            ProgrammeDetailView(
+                presentation: presentation,
+                onWatchLive: playFromDetails,
+                onPlayFromBeginning: playRecordingFromDetails
+            )
         }
         .televisionPlayPauseCommand {
             guard let channel = focusedChannel else { return }
@@ -161,6 +165,30 @@ struct ChannelsView: View {
 
     private func currentProgram(for channel: GuideChannel) -> GuideProgram? {
         channel.programs.first { $0.isAiring(at: model.now) }
+    }
+
+    private func playFromDetails(_ channel: GuideChannel, _ program: GuideProgram?) {
+        detail = nil
+        Task { @MainActor in
+            await Task.yield()
+            playback.start(
+                channel: channel,
+                program: program,
+                configuration: settings.configuration
+            )
+        }
+    }
+
+    private func playRecordingFromDetails(_ recording: TVRecording, _ channel: GuideChannel) {
+        detail = nil
+        Task { @MainActor in
+            await Task.yield()
+            playback.start(
+                recording: recording,
+                channel: channel,
+                configuration: settings.configuration
+            )
+        }
     }
 
     private func restorePlaybackFocusIfAvailable() {

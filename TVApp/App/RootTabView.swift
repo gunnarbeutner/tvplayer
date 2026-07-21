@@ -120,7 +120,10 @@ struct RootTabView: View {
             .zIndex(3)
 #endif
 
-            if playback.isPlayerPresented, let presentation = playback.presentation {
+            if playback.isPlayerPresented,
+               let presentation = playback.presentation,
+               playback.launchPresentation == nil
+                    || playback.launchPresentation?.id == presentation.id {
                 PlaybackView(
                     engine: playback.engine,
                     presentation: presentation,
@@ -130,7 +133,32 @@ struct RootTabView: View {
                 .environmentObject(settings)
                 .zIndex(11)
             }
+
+            if playback.isPlayerPresented, let launch = playback.launchPresentation {
+                PlaybackLaunchView(presentation: launch)
+                    .environmentObject(playback)
+                    .transition(.opacity)
+                    .zIndex(12)
+                    .task(id: launch.id) {
+                        while !Task.isCancelled, playback.presentation?.id != launch.id {
+                            try? await Task.sleep(for: .milliseconds(50))
+                        }
+                        guard !Task.isCancelled else { return }
+                        let hasVideo = await playback.engine.waitForVideoOutput()
+                        guard !Task.isCancelled else { return }
+                        if hasVideo {
+                            playback.playbackDidStart(presentationID: launch.id)
+                        } else if case .failed = playback.engine.state {
+                            playback.playbackDidFail(presentationID: launch.id)
+                        } else {
+                            // Do not leave an audio-only or malformed stream
+                            // trapped behind the launch surface indefinitely.
+                            playback.playbackDidStart(presentationID: launch.id)
+                        }
+                    }
+            }
         }
+        .animation(.easeOut(duration: 0.18), value: playback.launchPresentation?.id)
         .tint(AppTheme.accent)
 #if os(macOS)
         .toolbarVisibility(

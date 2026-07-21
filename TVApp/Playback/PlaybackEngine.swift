@@ -658,6 +658,16 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         return false
     }
 
+    func waitForVideoOutput() async -> Bool {
+        for _ in 0..<150 {
+            guard !Task.isCancelled else { return false }
+            if mediaPlayer.hasVideoOut { return true }
+            if case .failed = state { return false }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return false
+    }
+
     nonisolated func mediaPlayerStateChanged(_ notification: Notification) {
         guard let player = notification.object as? VLCMediaPlayer else { return }
         let rawState = player.state.rawValue

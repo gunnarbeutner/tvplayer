@@ -168,7 +168,11 @@ struct GuideView: View {
         // guide can still use the full horizontal and bottom television area.
         .televisionGuideEdges()
         .platformDetailPresentation(item: $detail) { presentation in
-            ProgrammeDetailView(presentation: presentation)
+            ProgrammeDetailView(
+                presentation: presentation,
+                onWatchLive: playFromDetails,
+                onPlayFromBeginning: playRecordingFromDetails
+            )
         }
         .onChange(of: scenePhase) { _, newPhase in
             guard newPhase == .active else { return }
@@ -280,6 +284,30 @@ struct GuideView: View {
             program: program,
             configuration: settings.configuration
         )
+    }
+
+    private func playFromDetails(_ channel: GuideChannel, _ program: GuideProgram?) {
+        detail = nil
+        Task { @MainActor in
+            await Task.yield()
+            playback.start(
+                channel: channel,
+                program: program,
+                configuration: settings.configuration
+            )
+        }
+    }
+
+    private func playRecordingFromDetails(_ recording: TVRecording, _ channel: GuideChannel) {
+        detail = nil
+        Task { @MainActor in
+            await Task.yield()
+            playback.start(
+                recording: recording,
+                channel: channel,
+                configuration: settings.configuration
+            )
+        }
     }
 
     private func applyInitialFocusIfAvailable() {
