@@ -1205,16 +1205,16 @@ private struct PlayerTabbedOverlay: View {
 
     @ViewBuilder
     private var detailHeading: some View {
-        VStack(alignment: .leading, spacing: usesCompactLayout ? 5 : 12) {
+        VStack(alignment: .leading, spacing: usesCompactLayout ? 5 : 8) {
             Text(presentation.recording?.title ?? currentProgram?.title ?? presentation.channel.name)
-                .font(usesCompactLayout ? .title2.bold() : .largeTitle.bold())
+                .font(.title2.bold())
                 .foregroundStyle(.white)
                 .lineLimit(usesCompactLayout ? 3 : nil)
                 .fixedSize(horizontal: false, vertical: true)
             if let subtitle = presentation.recording?.subtitle ?? currentProgram?.subtitle,
                !subtitle.isEmpty {
                 Text(subtitle)
-                    .font(usesCompactLayout ? .subheadline.weight(.semibold) : .title3.weight(.semibold))
+                    .font(usesCompactLayout ? .subheadline.weight(.semibold) : .headline.weight(.semibold))
                     .foregroundStyle(AppTheme.secondaryText)
                     .lineLimit(usesCompactLayout ? 2 : nil)
             }
@@ -1226,12 +1226,12 @@ private struct PlayerTabbedOverlay: View {
     private var detailMetadata: some View {
         if let recording = presentation.recording {
             Text("\(recording.start.formatted(date: .abbreviated, time: .shortened))–\(recording.end.formatted(date: .omitted, time: .shortened)) · \(recording.channelName)")
-                .font(usesCompactLayout ? .subheadline.monospacedDigit() : .headline.monospacedDigit())
+                .font(.subheadline.monospacedDigit())
                 .foregroundStyle(AppTheme.secondaryText)
             programmeOverview(recording.overview)
         } else if let program = currentProgram {
             Text("\(program.start.formatted(date: .abbreviated, time: .shortened))–\(program.end.formatted(date: .omitted, time: .shortened)) · \(presentation.channel.name)")
-                .font(usesCompactLayout ? .subheadline.monospacedDigit() : .headline.monospacedDigit())
+                .font(.subheadline.monospacedDigit())
                 .foregroundStyle(AppTheme.secondaryText)
             programmeOverview(program.overview)
         }
@@ -1239,7 +1239,7 @@ private struct PlayerTabbedOverlay: View {
 
     private func programmeOverview(_ overview: String) -> some View {
         Text(overview.isEmpty ? "No description available." : overview)
-            .font(usesCompactLayout ? .body : .title3)
+            .font(.body)
             .foregroundStyle(.white.opacity(overview.isEmpty ? 0.62 : 0.9))
             .fixedSize(horizontal: false, vertical: true)
     }
