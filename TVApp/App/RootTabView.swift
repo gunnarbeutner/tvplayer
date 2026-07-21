@@ -172,6 +172,15 @@ struct RootTabView: View {
         .environmentObject(recordings)
         .environmentObject(playback)
         .onChange(of: playback.isPlayerPresented) { wasPresented, isPresented in
+#if os(tvOS)
+            if isPresented, selection == .guide {
+                // Keep the header and its focus bridge out of the focus race
+                // when the player later reveals the guide. GuideView enables
+                // them again only after a programme card actually has focus.
+                navigationFocusRequest = nil
+                allowsSectionNavigatorFocus = false
+            }
+#endif
             if wasPresented && !isPresented { playback.playerDidDismiss() }
         }
 #if os(tvOS)
