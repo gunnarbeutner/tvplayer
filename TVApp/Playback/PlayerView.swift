@@ -1335,6 +1335,12 @@ private struct PlayerTabbedOverlay: View {
             Text("\(program.start.formatted(date: .abbreviated, time: .shortened))–\(program.end.formatted(date: .omitted, time: .shortened)) · \(presentation.channel.name)")
                 .font(.subheadline.monospacedDigit())
                 .foregroundStyle(AppTheme.secondaryText)
+            if let metadataDescription = program.metadata.displayDescription {
+                Text(metadataDescription)
+                    .font(.subheadline)
+                    .foregroundStyle(AppTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             programmeOverview(program.overview)
         }
     }

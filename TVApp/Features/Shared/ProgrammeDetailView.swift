@@ -35,25 +35,7 @@ struct ProgrammeDetailView: View {
         program.map { "series:\($0.id)" }
     }
     private var metadataLabels: [String] {
-        guard let metadata = program?.metadata else { return [] }
-        var labels: [String] = []
-
-        if let season = metadata.seasonNumber, let episode = metadata.episodeNumber {
-            labels.append("Season \(season) · Episode \(episode)")
-        } else if let episode = metadata.episodeNumber {
-            labels.append("Episode \(episode)")
-        }
-        if let part = metadata.partNumber { labels.append("Part \(part)") }
-        labels.append(contentsOf: metadata.categories.prefix(2))
-        if metadata.isNew { labels.append("New") }
-        if metadata.isHD { labels.append("HD") }
-        if metadata.isWidescreen { labels.append("Widescreen") }
-        if metadata.isSubtitled { labels.append("Subtitles") }
-        if let rating = metadata.ratingLabel ?? metadata.ageRating {
-            labels.append(rating)
-        }
-        if let stars = metadata.starRating { labels.append("★ \(stars)") }
-        return labels
+        program?.metadata.displayLabels ?? []
     }
 
     private var detailLayout: AnyLayout {

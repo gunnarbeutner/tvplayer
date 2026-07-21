@@ -69,6 +69,33 @@ struct GuideProgramMetadata: Hashable, Codable, Sendable {
     }
 
     static let empty = GuideProgramMetadata()
+
+    var displayLabels: [String] {
+        var labels: [String] = []
+
+        if let season = seasonNumber, let episode = episodeNumber {
+            labels.append("Season \(season) · Episode \(episode)")
+        } else if let season = seasonNumber {
+            labels.append("Season \(season)")
+        } else if let episode = episodeNumber {
+            labels.append("Episode \(episode)")
+        }
+        if let part = partNumber { labels.append("Part \(part)") }
+        labels.append(contentsOf: categories.prefix(2))
+        if isNew { labels.append("New") }
+        if isHD { labels.append("HD") }
+        if isWidescreen { labels.append("Widescreen") }
+        if isSubtitled { labels.append("Subtitles") }
+        if let rating = ratingLabel ?? ageRating { labels.append(rating) }
+        if let starRating { labels.append("★ \(starRating)") }
+
+        return labels
+    }
+
+    var displayDescription: String? {
+        let labels = displayLabels
+        return labels.isEmpty ? nil : labels.joined(separator: "  •  ")
+    }
 }
 
 struct GuideProgram: Identifiable, Hashable, Codable, Sendable {
