@@ -175,6 +175,7 @@ final class PlaybackCoordinator: ObservableObject {
             if engine.state == .preparing || engine.state == .paused {
                 engine.play()
             }
+            preconnectStandby(for: existingPresentation.request)
             presentation = PlaybackPresentation(
                 id: presentationID,
                 channel: channel,
@@ -709,12 +710,22 @@ final class PlaybackCoordinator: ObservableObject {
             logLaunchStage("prepared", id: intentID)
             engine.play()
             engineStartIntentID = nil
+            preconnectStandby(for: request)
         } catch {
             if engineStartIntentID == intentID {
                 engineStartIntentID = nil
                 engine.stop()
             }
             throw error
+        }
+    }
+
+    private func preconnectStandby(for request: LiveStreamRequest) {
+        guard case let .live(.nativeTimeshift(htsp)) = request.kind else { return }
+        Task {
+            await HTSPConnectionPrewarmer.shared.preconnect(
+                configuration: htsp.configuration
+            )
         }
     }
 
