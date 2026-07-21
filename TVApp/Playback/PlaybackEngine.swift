@@ -126,6 +126,12 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     @Published private(set) var livePlaybackMarkerDate: Date?
     @Published private(set) var isPlaybackOutputConcealed = false
     @Published private(set) var pausedFrame: PlatformImage?
+#if os(tvOS)
+    @Published private(set) var isPictureInPictureReady = false
+    @Published private(set) var usesSampleBufferRendering = false
+    let sampleBufferBridge: TVPlayerSampleBufferBridge
+    private var sampleBufferFallbackTask: Task<Void, Never>?
+#endif
 
     let mediaPlayer: VLCMediaPlayer
 
@@ -150,9 +156,61 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 
     override init() {
         mediaPlayer = VLCMediaPlayer()
+#if os(tvOS)
+        sampleBufferBridge = TVPlayerSampleBufferBridge(mediaPlayer: mediaPlayer)
+#endif
         super.init()
         mediaPlayer.delegate = self
+#if os(tvOS)
+        sampleBufferBridge.readinessChanged = { [weak self] ready in
+            self?.isPictureInPictureReady = ready
+            if ready {
+                self?.sampleBufferFallbackTask?.cancel()
+                self?.sampleBufferFallbackTask = nil
+            }
+        }
+#endif
     }
+
+#if os(tvOS)
+    func prepareForPictureInPicture() async -> Bool {
+        if usesSampleBufferRendering {
+            return await waitForSampleBufferRendering()
+        }
+        guard let request = activeRequest else { return false }
+
+        let resumeAt = elapsedSeconds
+        let wasPaused = state == .paused
+        mediaPlayer.stop()
+        guard sampleBufferBridge.installVideoCallbacks() else { return false }
+        usesSampleBufferRendering = true
+
+        do {
+            try await prepare(request)
+            play()
+            guard await waitForSampleBufferRendering() else { return false }
+
+            if request.kind.isLive == false, resumeAt > 0 {
+                seek(to: resumeAt)
+            }
+            if wasPaused { pause() }
+            return true
+        } catch {
+            reportFailure(error.localizedDescription)
+            return false
+        }
+    }
+
+    private func waitForSampleBufferRendering() async -> Bool {
+        for _ in 0..<80 {
+            guard !Task.isCancelled else { return false }
+            if sampleBufferBridge.isReady { return true }
+            if !usesSampleBufferRendering { return false }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return sampleBufferBridge.isReady
+    }
+#endif
 
     func prepare(_ request: LiveStreamRequest) async throws {
         cancelPostSeekOutputGate()
@@ -257,6 +315,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         beginPostSeekOutputConcealmentIfNeeded()
         _ = nativeTimeshiftActions?.perform(.play)
         mediaPlayer.play()
+#if os(tvOS)
+        armSampleBufferFallbackIfNeeded()
+#endif
         if let recoveryReason {
             setState(.recovering(recoveryReason, attempt: recoveryAttempt))
         } else {
@@ -304,6 +365,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         recoveryAttempt = 0
         mediaPlayer.stop()
         mediaPlayer.drawable = nil
+#if os(tvOS)
+        sampleBufferFallbackTask?.cancel()
+        sampleBufferFallbackTask = nil
+        sampleBufferBridge.flush()
+#endif
         nativeInputStream?.close()
         nativeInputStream = nil
         nativeTimeshiftActions = nil
@@ -853,7 +919,52 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         media.addOption(":network-caching=\(milliseconds)")
         media.addOption(":live-caching=\(milliseconds)")
         media.addOption(":file-caching=\(milliseconds)")
+#if os(tvOS)
+        if usesSampleBufferRendering {
+            // LibVLC's custom-memory video callbacks require CPU-accessible
+            // frames. VideoToolbox surfaces cannot be handed to the RV32
+            // callback and otherwise leave audio playing with no video.
+            media.addOption(":avcodec-hw=none")
+            media.addOption(":no-avcodec-dr")
+        }
+#endif
     }
+
+#if os(tvOS)
+    private func armSampleBufferFallbackIfNeeded() {
+        guard usesSampleBufferRendering, !sampleBufferBridge.isReady,
+              sampleBufferFallbackTask == nil
+        else { return }
+
+        sampleBufferFallbackTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(8))
+            guard !Task.isCancelled,
+                  let self,
+                  self.usesSampleBufferRendering,
+                  !self.sampleBufferBridge.isReady,
+                  let request = self.activeRequest
+            else { return }
+
+            self.sampleBufferFallbackTask = nil
+            self.logger.error(
+                "No sample-buffer video frame arrived; reverting to VLC's native video output"
+            )
+            self.mediaPlayer.stop()
+            self.sampleBufferBridge.removeVideoCallbacks()
+            self.sampleBufferBridge.flush()
+            self.usesSampleBufferRendering = false
+            self.isPictureInPictureReady = false
+
+            do {
+                try await self.prepare(request)
+                guard !Task.isCancelled else { return }
+                self.play()
+            } catch {
+                self.setState(.failed(error.localizedDescription))
+            }
+        }
+    }
+#endif
 
     private func resumeLocalPlaybackAfterTimeshiftNavigation() {
         pauseRequested = false

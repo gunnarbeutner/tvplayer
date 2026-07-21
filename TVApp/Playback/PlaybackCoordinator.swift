@@ -25,9 +25,22 @@ final class PlaybackCoordinator: ObservableObject {
     @Published private(set) var navigationSelection: PlaybackNavigationSelection?
     @Published private(set) var focusReturnRevision = 0
     @Published private(set) var isUserInitiatedPlayback = false
-    let engine = VLCPlaybackEngine()
+    let engine: VLCPlaybackEngine
+#if os(tvOS)
+    let pictureInPicture: PictureInPictureCoordinator
+#endif
     private var prewarmTask: Task<Void, Never>?
     private var prewarmedChannelID: String?
+    private var channelSwitchTask: Task<Void, Never>?
+
+    init() {
+        let engine = VLCPlaybackEngine()
+        self.engine = engine
+#if os(tvOS)
+        pictureInPicture = PictureInPictureCoordinator(engine: engine)
+        pictureInPicture.connect(to: self)
+#endif
+    }
 
     var isUserInitiatedLivePlayback: Bool {
         isUserInitiatedPlayback && presentation?.isRecording == false
@@ -100,6 +113,57 @@ final class PlaybackCoordinator: ObservableObject {
         }
     }
 
+#if os(tvOS)
+    @discardableResult
+    func switchLiveChannel(
+        direction: TVPageDirection,
+        channels: [GuideChannel],
+        at date: Date,
+        configuration: TVHeadendConfiguration
+    ) -> Bool {
+        guard isPlayerPresented,
+              let current = presentation,
+              current.recording == nil,
+              channels.count > 1,
+              let currentIndex = channels.firstIndex(where: { $0.id == current.channel.id })
+        else { return false }
+
+        let offset = direction == .up ? 1 : -1
+        let targetIndex = (currentIndex + offset + channels.count) % channels.count
+        let target = channels[targetIndex]
+        let program = target.programs.first { $0.isAiring(at: date) }
+
+        channelSwitchTask?.cancel()
+        channelSwitchTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let request = try await TVHeadendClient(configuration: configuration)
+                    .livePlaybackRequest(channelID: target.id)
+                try Task.checkCancellation()
+
+                engine.stop()
+                presentation = PlaybackPresentation(
+                    channel: target,
+                    program: program,
+                    recording: nil,
+                    request: request
+                )
+                navigationSelection = PlaybackNavigationSelection(
+                    channelID: target.id,
+                    programID: program?.id
+                )
+                isUserInitiatedPlayback = true
+                errorMessage = nil
+            } catch is CancellationError {
+                return
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+        return true
+    }
+#endif
+
     func leavePlayer() {
         // Live television keeps running when it collapses into the guide's
         // artwork area. Recorded media retains the previous pause-on-exit
@@ -114,6 +178,13 @@ final class PlaybackCoordinator: ObservableObject {
         guard navigationSelection != nil else { return }
         focusReturnRevision &+= 1
     }
+
+#if os(tvOS)
+    func restorePlayerFromPictureInPicture() {
+        guard presentation != nil else { return }
+        isPlayerPresented = true
+    }
+#endif
 
     func prewarm(
         channel: GuideChannel,

@@ -83,6 +83,14 @@ struct RecordingsView: View {
             guard request != nil else { return }
             focusFirstRecordingElement()
         }
+#if os(tvOS)
+        .onReceive(NotificationCenter.default.publisher(for: .tvRecordingsPageCommand)) { note in
+            guard let raw = note.userInfo?["direction"] as? Int,
+                  let direction = TVPageDirection(rawValue: raw)
+            else { return }
+            pageRecordings(direction)
+        }
+#endif
     }
 
     @ViewBuilder
@@ -231,6 +239,20 @@ struct RecordingsView: View {
             focusedRecordingID = target
         }
     }
+
+#if os(tvOS)
+    private func pageRecordings(_ direction: TVPageDirection) {
+        let identifiers = store.recordingNow.map(\.id)
+            + store.upcoming.map(\.id)
+            + store.completed.map(\.id)
+            + store.failed.map(\.id)
+            + store.rules.map { "rule:\($0.id)" }
+        guard !identifiers.isEmpty else { return }
+        let current = focusedRecordingID.flatMap { identifiers.firstIndex(of: $0) } ?? 0
+        let target = min(max(0, current + direction.rawValue * 4), identifiers.count - 1)
+        focusedRecordingID = identifiers[target]
+    }
+#endif
 }
 
 private struct RecordingCard: View {

@@ -46,22 +46,45 @@ final class ServerSettingsStore: ObservableObject {
 
     private let defaults: UserDefaults
     private let keychain: KeychainPasswordStore
+    private let sharedConfiguration: SharedTVHeadendConfigurationStore
     private var discovery: TVHeadendDiscovery?
 
-    init(defaults: UserDefaults = .standard, keychain: KeychainPasswordStore = KeychainPasswordStore()) {
+    init(
+        defaults: UserDefaults = .standard,
+        keychain: KeychainPasswordStore = KeychainPasswordStore(),
+        sharedConfiguration: SharedTVHeadendConfigurationStore = SharedTVHeadendConfigurationStore()
+    ) {
         self.defaults = defaults
         self.keychain = keychain
+        self.sharedConfiguration = sharedConfiguration
 
         let environment = ProcessInfo.processInfo.environment
-        baseURLText = environment["TVPLAYER_TVH_URL"] ?? defaults.string(forKey: Key.baseURL) ?? ""
-        username = environment["TVPLAYER_TVH_USERNAME"] ?? defaults.string(forKey: Key.username) ?? ""
-        password = environment["TVPLAYER_TVH_PASSWORD"] ?? keychain.read()
-        streamProfile = environment["TVPLAYER_TVH_PROFILE"] ?? defaults.string(forKey: Key.streamProfile) ?? "pass"
+        let shared = sharedConfiguration.read()
+        baseURLText = environment["TVPLAYER_TVH_URL"]
+            ?? shared?.baseURL?.absoluteString
+            ?? defaults.string(forKey: Key.baseURL)
+            ?? ""
+        username = environment["TVPLAYER_TVH_USERNAME"]
+            ?? shared?.username
+            ?? defaults.string(forKey: Key.username)
+            ?? ""
+        password = environment["TVPLAYER_TVH_PASSWORD"] ?? shared?.password ?? keychain.read()
+        streamProfile = environment["TVPLAYER_TVH_PROFILE"]
+            ?? shared?.streamProfile
+            ?? defaults.string(forKey: Key.streamProfile)
+            ?? "pass"
         htspPortText = environment["TVPLAYER_TVH_HTSP_PORT"]
+            ?? shared.map { String($0.htspPort) }
             ?? defaults.string(forKey: Key.htspPort)
             ?? "9982"
-        guideCacheURLText = environment["TVPLAYER_GUIDE_URL"] ?? defaults.string(forKey: Key.guideCacheURL) ?? ""
-        xmltvURLText = environment["TVPLAYER_XMLTV_URL"] ?? defaults.string(forKey: Key.xmltvURL) ?? ""
+        guideCacheURLText = environment["TVPLAYER_GUIDE_URL"]
+            ?? shared?.guideCacheURL?.absoluteString
+            ?? defaults.string(forKey: Key.guideCacheURL)
+            ?? ""
+        xmltvURLText = environment["TVPLAYER_XMLTV_URL"]
+            ?? shared?.xmltvURL?.absoluteString
+            ?? defaults.string(forKey: Key.xmltvURL)
+            ?? ""
 
         // Device deployments can provide configuration at launch without putting
         // credentials in the project. Persist that bootstrap just as Settings does,
@@ -91,6 +114,14 @@ final class ServerSettingsStore: ObservableObject {
         if let environmentPassword = environment["TVPLAYER_TVH_PASSWORD"] {
             try? keychain.write(environmentPassword)
         }
+
+#if os(tvOS)
+        // Migrate the pre-multiuser split settings/password once. The legacy
+        // values remain in place unless the independent-keychain write works.
+        if shared == nil, configuration.baseURL != nil {
+            try? sharedConfiguration.write(configuration)
+        }
+#endif
 
         let persistedURL = defaults.string(forKey: Key.baseURL) ?? ""
         let hasGuidePreference = environment["TVPLAYER_GUIDE_URL"] != nil
@@ -163,6 +194,9 @@ final class ServerSettingsStore: ObservableObject {
         }
 
         try keychain.write(configuration.password)
+#if os(tvOS)
+        try sharedConfiguration.write(configuration)
+#endif
         streamProfile = configuration.streamProfile
         htspPortText = String(configuration.htspPort)
         revision += 1
@@ -228,7 +262,12 @@ final class ServerSettingsStore: ObservableObject {
 
             discovery?.stop()
             discovery = nil
-            if changed { revision += 1 }
+            if changed {
+#if os(tvOS)
+                try? sharedConfiguration.write(configuration)
+#endif
+                revision += 1
+            }
             return
         }
 
@@ -255,6 +294,10 @@ final class ServerSettingsStore: ObservableObject {
             } else {
                 defaults.set(xmltvURLText, forKey: Key.xmltvURL)
             }
+
+#if os(tvOS)
+            try? sharedConfiguration.write(configuration)
+#endif
 
             discovery?.stop()
             discovery = nil

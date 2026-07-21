@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(tvOS)
+import TVServices
+#endif
 
 enum AppTab: Hashable, CaseIterable {
     case channels
@@ -26,6 +29,7 @@ enum AppTab: Hashable, CaseIterable {
 }
 
 struct RootTabView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selection: AppTab = .guide
     @StateObject private var settings: ServerSettingsStore
     @StateObject private var guide: GuideViewModel
@@ -34,6 +38,7 @@ struct RootTabView: View {
     @StateObject private var playback = PlaybackCoordinator()
     @State private var playbackAlertMessage: String?
     @State private var recordingAlertMessage: String?
+    @State private var pendingRoute: AppRoute?
 #if os(tvOS)
     @State private var navigationFocusRequest: AppTab?
     @State private var isSectionNavigatorFocused = false
@@ -127,6 +132,16 @@ struct RootTabView: View {
         .onChange(of: playback.isPlayerPresented) { wasPresented, isPresented in
             if wasPresented && !isPresented { playback.playerDidDismiss() }
         }
+#if os(tvOS)
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .background, !playback.pictureInPicture.isActive else { return }
+            if playback.presentation?.isRecording == true {
+                playback.engine.pause()
+            } else {
+                playback.engine.stop()
+            }
+        }
+#endif
         .alert(
             "Playback unavailable",
             isPresented: Binding(
@@ -163,6 +178,30 @@ struct RootTabView: View {
             guard message == nil, recordings.errorMessage != nil else { return }
             recordings.errorMessage = nil
         }
+        .onOpenURL { url in
+            guard let route = AppRoute(url: url) else { return }
+            pendingRoute = route
+        }
+#if os(tvOS)
+        .onContinueUserActivity(TVUserActivityTypeBrowsingChannelGuide) { _ in
+            pendingRoute = .guide
+        }
+#endif
+        .task(id: pendingRoute) {
+            guard let route = pendingRoute else { return }
+            await handle(route)
+            if pendingRoute == route { pendingRoute = nil }
+        }
+#if os(tvOS)
+        .onAppear {
+            TVRemoteCommandCenter.pageHandler = handlePageCommand
+            NowPlayingCoordinator.shared.connect(to: playback)
+        }
+        .onDisappear {
+            TVRemoteCommandCenter.pageHandler = nil
+            NowPlayingCoordinator.shared.disconnect()
+        }
+#endif
         .onChange(of: selection) { _, tab in
             guard tab == .recordings else { return }
             Task { await recordings.load(configuration: settings.configuration, force: true) }
@@ -194,7 +233,109 @@ struct RootTabView: View {
                 _ = await (refreshedGuide, refreshedRecordings)
             }
         }
+#if os(tvOS)
+        .task(id: topShelfRevision) {
+            // Coalesce guide, recording, and favourite updates that commonly
+            // arrive together during launch.
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            await TopShelfSnapshotPublisher.shared.publish(
+                channels: channelPreferences.displayedChannels(from: guide.channels),
+                favoriteChannelIDs: channelPreferences.favoriteChannelIDs,
+                recordings: recordings.recordings,
+                configuration: settings.configuration,
+                now: guide.now
+            )
+        }
+#endif
     }
+
+#if os(tvOS)
+    private var topShelfRevision: TopShelfPublishRevision {
+        TopShelfPublishRevision(
+            guide: guide.guideRevision,
+            recordings: recordings.guideRevision,
+            favorites: channelPreferences.revision,
+            settings: settings.revision
+        )
+    }
+#endif
+
+    @MainActor
+    private func handle(_ route: AppRoute) async {
+        switch route {
+        case .guide:
+            if playback.isPlayerPresented { playback.leavePlayer() }
+            selection = .guide
+#if os(tvOS)
+            guideFocusRequest = UUID()
+#endif
+
+        case let .playChannel(channelID):
+            var channel = guide.channels.first { $0.id == channelID }
+            if channel == nil {
+                await guide.load(configuration: settings.configuration, force: true)
+                channel = guide.channels.first { $0.id == channelID }
+            }
+            guard let channel else {
+                playbackAlertMessage = "That channel is no longer available."
+                selection = .guide
+                return
+            }
+            playback.start(
+                channel: channel,
+                program: channel.programs.first { $0.isAiring(at: guide.now) },
+                configuration: settings.configuration
+            )
+
+        case let .playRecording(recordingID):
+            var recording = recordings.recordings.first { $0.id == recordingID && $0.isPlayable }
+            if recording == nil {
+                await recordings.load(configuration: settings.configuration, force: true)
+                recording = recordings.recordings.first { $0.id == recordingID && $0.isPlayable }
+            }
+            guard let recording else {
+                playbackAlertMessage = "That recording is no longer available."
+                selection = .recordings
+                return
+            }
+            playback.start(
+                recording: recording,
+                channel: recording.channelID.flatMap { channelID in
+                    guide.channels.first { $0.id == channelID }
+                },
+                configuration: settings.configuration
+            )
+        }
+    }
+
+#if os(tvOS)
+    @MainActor
+    private func handlePageCommand(_ direction: TVPageDirection) -> Bool {
+        if playback.isPlayerPresented {
+            return playback.switchLiveChannel(
+                direction: direction,
+                channels: channelPreferences.displayedChannels(from: guide.channels),
+                at: guide.now,
+                configuration: settings.configuration
+            )
+        }
+
+        let name: Notification.Name
+        switch selection {
+        case .guide: name = .tvGuidePageCommand
+        case .channels: name = .tvChannelsPageCommand
+        case .recordings: name = .tvRecordingsPageCommand
+        case .settings: return false
+        }
+        NotificationCenter.default.post(
+            name: name,
+            object: nil,
+            userInfo: ["direction": direction.rawValue]
+        )
+        return true
+    }
+#endif
 
     @ViewBuilder
     private var navigableTabs: some View {
@@ -222,6 +363,10 @@ struct RootTabView: View {
         tabs
 #endif
     }
+
+#if !os(tvOS)
+    private var showsGuideLivePreview: Bool { false }
+#endif
 
 #if os(tvOS)
     private var sectionNavigator: some View {
@@ -400,6 +545,15 @@ struct RootTabView: View {
     }
 #endif
 }
+
+#if os(tvOS)
+private struct TopShelfPublishRevision: Hashable {
+    let guide: Int
+    let recordings: Int
+    let favorites: Int
+    let settings: Int
+}
+#endif
 
 #if os(tvOS)
 private struct SectionFocusBridge: View {
@@ -593,12 +747,31 @@ private struct PersistentPlaybackSurface: View {
 
     var body: some View {
         GeometryReader { proxy in
-            VLCVideoSurface(
-                mediaPlayer: engine.mediaPlayer,
-                attachmentRevision: attachmentRevision,
-                fadesLeadingEdge: showsGuidePreview,
-                leadingFadeInset: showsGuidePreview ? guideLeadingCrop : 0
-            )
+            Group {
+#if os(tvOS)
+                if engine.usesSampleBufferRendering {
+                    VLCSampleBufferVideoSurface(
+                        displayLayer: engine.sampleBufferBridge.displayLayer,
+                        fadesLeadingEdge: showsGuidePreview,
+                        leadingFadeInset: showsGuidePreview ? guideLeadingCrop : 0
+                    )
+                } else {
+                    VLCVideoSurface(
+                        mediaPlayer: engine.mediaPlayer,
+                        attachmentRevision: attachmentRevision,
+                        fadesLeadingEdge: showsGuidePreview,
+                        leadingFadeInset: showsGuidePreview ? guideLeadingCrop : 0
+                    )
+                }
+#else
+                VLCVideoSurface(
+                    mediaPlayer: engine.mediaPlayer,
+                    attachmentRevision: attachmentRevision,
+                    fadesLeadingEdge: showsGuidePreview,
+                    leadingFadeInset: showsGuidePreview ? guideLeadingCrop : 0
+                )
+#endif
+            }
             .frame(
                 width: isPresented ? proxy.size.width : guideVideoWidth,
                 height: isPresented ? proxy.size.height : guidePreviewHeight

@@ -50,6 +50,10 @@ targets:
     dependencies:
       - framework: .build/VLCKit/TVVLCKit.xcframework
         embed: true
+      - target: TVAppTopShelf
+        embed: true
+    sources:
+      - path: TVAppTVOSPlayback
     info:
       path: TVApp/Resources/Info-tvOS.plist
       properties:
@@ -61,13 +65,44 @@ targets:
           NSAllowsLocalNetworking: true
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
+        NSPrincipalClass: TVPlayerApplication
+        CFBundleURLTypes:
+          - CFBundleURLName: de.beutner.TVPlayer.playback
+            CFBundleURLSchemes:
+              - tvplayer
+        NSUserActivityTypes:
+          - com.apple.tv.useractivity.channel-guide
+        UIBackgroundModes:
+          - audio
         UILaunchScreen: {}
     settings:
       base:
         CODE_SIGN_ENTITLEMENTS: TVApp/Resources/TVApp.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: TVAppTVOSPlayback/TVApp-Bridging-Header.h
+        HEADER_SEARCH_PATHS: "$(inherited) $(BUILT_PRODUCTS_DIR)/TVVLCKit.framework/Headers"
     scheme:
       testTargets:
         - TVAppTests
+
+  TVAppTopShelf:
+    type: app-extension
+    platform: tvOS
+    sources:
+      - path: TVAppTopShelf
+      - path: TVApp/TopShelf/TopShelfSnapshot.swift
+    info:
+      path: TVAppTopShelf/Info.plist
+      properties:
+        CFBundleDisplayName: TV Player Top Shelf
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.tv-top-shelf
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).TopShelfProvider
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer.TopShelf
+        CODE_SIGN_ENTITLEMENTS: TVApp/Resources/TVAppTopShelf.entitlements
+        SKIP_INSTALL: true
+        SWIFT_VERSION: "6.0"
 
   TVApp-iOS:
     templates:

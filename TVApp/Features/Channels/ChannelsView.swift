@@ -154,6 +154,15 @@ struct ChannelsView: View {
             else { return }
             self.focusedChannelID = displayedChannels.first?.id
         }
+#if os(tvOS)
+        .onReceive(NotificationCenter.default.publisher(for: .tvChannelsPageCommand)) { note in
+            guard isSelected,
+                  let raw = note.userInfo?["direction"] as? Int,
+                  let direction = TVPageDirection(rawValue: raw)
+            else { return }
+            pageChannels(direction)
+        }
+#endif
     }
 
     private var focusedChannel: GuideChannel? {
@@ -191,6 +200,17 @@ struct ChannelsView: View {
             focusedChannelID = channelID
         }
     }
+
+#if os(tvOS)
+    private func pageChannels(_ direction: TVPageDirection) {
+        guard !displayedChannels.isEmpty else { return }
+        let current = focusedChannelID.flatMap { id in
+            displayedChannels.firstIndex { $0.id == id }
+        } ?? 0
+        let target = min(max(0, current + direction.rawValue * 6), displayedChannels.count - 1)
+        focusedChannelID = displayedChannels[target].id
+    }
+#endif
 }
 
 private struct ChannelCard: View {

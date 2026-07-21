@@ -1,0 +1,227 @@
+#if os(tvOS)
+import AVFAudio
+import Combine
+import MediaPlayer
+import UIKit
+
+// MediaPlayer invokes an artwork request handler on its own callout queue.
+// Keep that callback free of MainActor isolation even though the coordinator
+// itself is main-actor bound.
+private final class NowPlayingArtworkProvider: @unchecked Sendable {
+    private let image: UIImage
+
+    init(image: UIImage) {
+        self.image = image
+    }
+
+    func image(for _: CGSize) -> UIImage {
+        image
+    }
+}
+
+@MainActor
+final class NowPlayingCoordinator {
+    static let shared = NowPlayingCoordinator()
+
+    private weak var playback: PlaybackCoordinator?
+    private var cancellables: Set<AnyCancellable> = []
+    private var commandTargets: [(MPRemoteCommand, Any)] = []
+    private var artworkTask: Task<Void, Never>?
+    private var artworkURL: URL?
+
+    private init() {}
+
+    func connect(to playback: PlaybackCoordinator) {
+        guard self.playback !== playback else { return }
+        disconnect()
+        self.playback = playback
+
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        try? AVAudioSession.sharedInstance().setActive(true)
+
+        playback.objectWillChange
+            .merge(with: playback.engine.objectWillChange)
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    await Task.yield()
+                    self?.refresh()
+                }
+            }
+            .store(in: &cancellables)
+
+        installCommands()
+        refresh()
+    }
+
+    func disconnect() {
+        cancellables.removeAll()
+        artworkTask?.cancel()
+        artworkTask = nil
+        for (command, token) in commandTargets { command.removeTarget(token) }
+        commandTargets.removeAll()
+        playback = nil
+        refreshCommandAvailability(for: nil)
+    }
+
+    private func installCommands() {
+        let center = MPRemoteCommandCenter.shared()
+        add(center.playCommand) { [weak self] _ in
+            guard let playback = self?.playback,
+                  self?.ownsTransportCommands(playback) == true
+            else { return .noActionableNowPlayingItem }
+            let engine = playback.engine
+            engine.play()
+            return .success
+        }
+        add(center.pauseCommand) { [weak self] _ in
+            guard let playback = self?.playback,
+                  self?.ownsTransportCommands(playback) == true,
+                  playback.engine.canPause
+            else {
+                return .commandFailed
+            }
+            playback.engine.pause()
+            return .success
+        }
+        add(center.togglePlayPauseCommand) { [weak self] _ in
+            guard let playback = self?.playback,
+                  self?.ownsTransportCommands(playback) == true
+            else { return .noActionableNowPlayingItem }
+            playback.engine.togglePlayPause()
+            return .success
+        }
+
+        center.skipForwardCommand.preferredIntervals = [15]
+        add(center.skipForwardCommand) { [weak self] event in
+            guard let engine = self?.playback?.engine, engine.isSeekable else { return .commandFailed }
+            let interval = (event as? MPSkipIntervalCommandEvent)?.interval ?? 15
+            _ = engine.skipForward(by: interval)
+            return .success
+        }
+        center.skipBackwardCommand.preferredIntervals = [15]
+        add(center.skipBackwardCommand) { [weak self] event in
+            guard let engine = self?.playback?.engine, engine.isSeekable else { return .commandFailed }
+            let interval = (event as? MPSkipIntervalCommandEvent)?.interval ?? 15
+            engine.skipBackward(by: interval)
+            return .success
+        }
+
+        center.nextTrackCommand.isEnabled = false
+        center.previousTrackCommand.isEnabled = false
+    }
+
+    private func ownsTransportCommands(_ playback: PlaybackCoordinator) -> Bool {
+        playback.isPlayerPresented || playback.pictureInPicture.isActive
+    }
+
+    private func refreshCommandAvailability(for playback: PlaybackCoordinator?) {
+        let center = MPRemoteCommandCenter.shared()
+        guard let playback, ownsTransportCommands(playback) else {
+            center.playCommand.isEnabled = false
+            center.pauseCommand.isEnabled = false
+            center.togglePlayPauseCommand.isEnabled = false
+            center.skipForwardCommand.isEnabled = false
+            center.skipBackwardCommand.isEnabled = false
+            return
+        }
+
+        center.playCommand.isEnabled = true
+        center.pauseCommand.isEnabled = playback.engine.canPause
+        center.togglePlayPauseCommand.isEnabled = true
+        center.skipForwardCommand.isEnabled = playback.engine.isSeekable
+        center.skipBackwardCommand.isEnabled = playback.engine.isSeekable
+    }
+
+    private func add(
+        _ command: MPRemoteCommand,
+        handler: @escaping @MainActor (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus
+    ) {
+        let token = command.addTarget { event in
+            if Thread.isMainThread {
+                return MainActor.assumeIsolated { handler(event) }
+            }
+            return DispatchQueue.main.sync {
+                MainActor.assumeIsolated { handler(event) }
+            }
+        }
+        commandTargets.append((command, token))
+    }
+
+    private func refresh() {
+        refreshCommandAvailability(for: playback)
+
+        guard let playback,
+              let presentation = playback.presentation,
+              playback.engine.state != .idle
+        else {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            MPNowPlayingInfoCenter.default().playbackState = .stopped
+            return
+        }
+
+        let engine = playback.engine
+        let isPlaying = engine.state == .playing || {
+            if case .recovering = engine.state { return true }
+            return false
+        }()
+        var info: [String: Any] = [
+            MPMediaItemPropertyMediaType: MPMediaType.anyVideo.rawValue,
+            MPMediaItemPropertyArtist: presentation.channel.name,
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
+            MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
+        ]
+
+        let imageURL: URL?
+        if let recording = presentation.recording {
+            info[MPMediaItemPropertyTitle] = recording.title
+            if let subtitle = recording.subtitle, !subtitle.isEmpty {
+                info[MPMediaItemPropertyAlbumTitle] = subtitle
+            }
+            info[MPMediaItemPropertyPlaybackDuration] = engine.durationSeconds ?? recording.duration
+            info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = engine.elapsedSeconds
+            imageURL = nil
+        } else {
+            let playbackDate = engine.livePlaybackDate()
+            let program = presentation.channel.programs.first { $0.isAiring(at: playbackDate) }
+                ?? presentation.program
+            info[MPMediaItemPropertyTitle] = program?.title ?? presentation.channel.name
+            if let subtitle = program?.subtitle, !subtitle.isEmpty {
+                info[MPMediaItemPropertyAlbumTitle] = subtitle
+            }
+            info[MPNowPlayingInfoPropertyIsLiveStream] = true
+            imageURL = program?.metadata.imageURL.flatMap(URL.init(string:))
+        }
+
+        if imageURL == artworkURL,
+           let artwork = MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyArtwork] {
+            info[MPMediaItemPropertyArtwork] = artwork
+        } else {
+            loadArtwork(from: imageURL)
+        }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        MPNowPlayingInfoCenter.default().playbackState = isPlaying ? .playing : .paused
+    }
+
+    private func loadArtwork(from url: URL?) {
+        artworkURL = url
+        artworkTask?.cancel()
+        guard let url else { return }
+        artworkTask = Task { [weak self] in
+            guard let (data, _) = try? await URLSession.shared.data(from: url),
+                  !Task.isCancelled,
+                  let image = UIImage(data: data)
+            else { return }
+            await MainActor.run {
+                guard let self, self.artworkURL == url else { return }
+                var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+                let provider = NowPlayingArtworkProvider(image: image)
+                info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(
+                    boundsSize: image.size,
+                    requestHandler: provider.image(for:)
+                )
+                MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+            }
+        }
+    }
+}
+#endif

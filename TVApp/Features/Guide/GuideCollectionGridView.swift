@@ -639,6 +639,9 @@ private final class GuideCollectionView: UICollectionView,
     private var channelIDAwaitingSnapshotFocus: GuideChannel.ID?
     private var channelReturnProgramIDAwaitingSnapshotFocus: GuideProgram.ID?
     private var navigationSignpostID: OSSignpostID?
+#if os(tvOS)
+    private var pageCommandObserver: NSObjectProtocol?
+#endif
     private var currentNow = Date()
     private var currentConfiguration: TVHeadendConfiguration?
     private var isGuideEnabled = true
@@ -700,6 +703,19 @@ private final class GuideCollectionView: UICollectionView,
             forSupplementaryViewOfKind: GuideCollectionElementKind.nowIndicator,
             withReuseIdentifier: Self.nowReuseID
         )
+
+#if os(tvOS)
+        pageCommandObserver = NotificationCenter.default.addObserver(
+            forName: .tvGuidePageCommand,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let raw = notification.userInfo?["direction"] as? Int,
+                  let direction = TVPageDirection(rawValue: raw)
+            else { return }
+            Task { @MainActor in self?.page(direction) }
+        }
+#endif
     }
 
     @available(*, unavailable)
@@ -821,7 +837,49 @@ private final class GuideCollectionView: UICollectionView,
         snapshotBuildTask?.cancel()
         focusRetryTask?.cancel()
         channelFocusRetryTask?.cancel()
+#if os(tvOS)
+        if let pageCommandObserver {
+            NotificationCenter.default.removeObserver(pageCommandObserver)
+            self.pageCommandObserver = nil
+        }
+#endif
     }
+
+#if os(tvOS)
+    private func page(_ direction: TVPageDirection) {
+        guard isGuideEnabled, let snapshot = guideSnapshot else { return }
+        let originID = currentlyFocusedProgramID
+            ?? requestedFocusedProgramID
+            ?? preferredProgramID
+        guard let originID,
+              let origin = snapshot.locationByProgramID[originID]
+        else { return }
+
+        let visibleRows = max(
+            1,
+            Int((bounds.height - GuideGridMetrics.headerHeight) / GuideGridMetrics.rowHeight)
+        )
+        let targetRow = min(
+            max(0, origin.row + direction.rawValue * visibleRows),
+            snapshot.rows.count - 1
+        )
+        let originProgram = snapshot.rows[origin.row][origin.item].program
+        let reference = originProgram.isAiring(at: currentNow)
+            ? currentNow
+            : originProgram.start.addingTimeInterval(originProgram.duration / 2)
+        guard let target = snapshot.rows[targetRow].min(by: {
+            Self.distance(from: reference, to: $0.program)
+                < Self.distance(from: reference, to: $1.program)
+        }) else { return }
+        requestFocus(on: target.id, animated: true, retriesRemaining: 6, directly: true)
+    }
+
+    private static func distance(from date: Date, to program: GuideProgram) -> TimeInterval {
+        if date < program.start { return program.start.timeIntervalSince(date) }
+        if date >= program.end { return date.timeIntervalSince(program.end) }
+        return 0
+    }
+#endif
 
     private func buildSnapshot(
         channels: [GuideChannel],

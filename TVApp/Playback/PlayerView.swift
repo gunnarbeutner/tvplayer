@@ -186,6 +186,27 @@ struct PlaybackView: View {
             }
 #endif
 
+#if os(tvOS)
+            if chromeMode != .hidden, playback.pictureInPicture.isSupported {
+                Button {
+                    playback.pictureInPicture.start()
+                    noteActivity()
+                } label: {
+                    Image(systemName: "pip.enter")
+                        .font(.title2.bold())
+                        .foregroundStyle(.white)
+                        .frame(width: 64, height: 54)
+                        .background(.black.opacity(0.62), in: RoundedRectangle(cornerRadius: 13))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Start Picture in Picture")
+                .padding(.horizontal, 34)
+                .padding(.vertical, 26)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                .zIndex(3)
+            }
+#endif
+
             if case let .recovering(reason, attempt) = engine.state {
                 HStack(spacing: 14) {
                     ProgressView()
@@ -1077,16 +1098,9 @@ private struct PlayerTabbedOverlay: View {
                     }
                 }
 
-                if usesCompactLayout && !usesCompactHeight {
-                    VStack(alignment: .leading, spacing: 18) {
-                        audioSettingsCard
-                        subtitleSettingsCard
-                    }
-                } else {
-                    HStack(alignment: .top, spacing: 18) {
-                        audioSettingsCard
-                        subtitleSettingsCard
-                    }
+                VStack(alignment: .leading, spacing: 18) {
+                    audioSettingsCard
+                    subtitleSettingsCard
                 }
             }
             .padding(.bottom, 8)
@@ -1099,33 +1113,15 @@ private struct PlayerTabbedOverlay: View {
             title: "Audio",
             systemImage: "speaker.wave.2.fill"
         ) {
-            VStack(alignment: .leading, spacing: 16) {
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 210, maximum: 340), spacing: 12)],
-                    alignment: .leading,
-                    spacing: 12
-                ) {
-                    ForEach(engine.audioTracks) { track in
-                        choiceButton(
-                            title: track.name,
-                            subtitle: nil,
-                            selected: engine.selectedAudioTrackID == track.id
-                        ) { engine.selectAudioTrack(track.id); noteActivity() }
-                    }
-                    if engine.audioTracks.isEmpty {
-                        unavailable("No audio streams reported yet")
-                    }
-                }
-
-                Divider().overlay(.white.opacity(0.12))
-                compactDelayControl(
-                    title: "Synchronization",
-                    value: engine.audioDelayMilliseconds,
-                    change: engine.adjustAudioDelay
-                )
-            }
+            trackAndDelayLayout(
+                tracks: engine.audioTracks,
+                selectedTrackID: engine.selectedAudioTrackID,
+                emptyMessage: "No audio streams reported yet",
+                selectTrack: engine.selectAudioTrack,
+                delayValue: engine.audioDelayMilliseconds,
+                adjustDelay: engine.adjustAudioDelay
+            )
         }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     private var subtitleSettingsCard: some View {
@@ -1133,33 +1129,96 @@ private struct PlayerTabbedOverlay: View {
             title: "Subtitles",
             systemImage: "captions.bubble.fill"
         ) {
-            VStack(alignment: .leading, spacing: 16) {
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 210, maximum: 340), spacing: 12)],
-                    alignment: .leading,
-                    spacing: 12
-                ) {
-                    ForEach(engine.subtitleTracks) { track in
-                        choiceButton(
-                            title: track.name,
-                            subtitle: nil,
-                            selected: engine.selectedSubtitleTrackID == track.id
-                        ) { engine.selectSubtitleTrack(track.id); noteActivity() }
-                    }
-                    if engine.subtitleTracks.isEmpty {
-                        unavailable("No subtitle streams")
-                    }
-                }
+            trackAndDelayLayout(
+                tracks: engine.subtitleTracks,
+                selectedTrackID: engine.selectedSubtitleTrackID,
+                emptyMessage: "No subtitle streams",
+                selectTrack: engine.selectSubtitleTrack,
+                delayValue: engine.subtitleDelayMilliseconds,
+                adjustDelay: engine.adjustSubtitleDelay
+            )
+        }
+    }
 
+    @ViewBuilder
+    private func trackAndDelayLayout(
+        tracks: [PlaybackTrack],
+        selectedTrackID: Int?,
+        emptyMessage: String,
+        selectTrack: @escaping (Int) -> Void,
+        delayValue: Int,
+        adjustDelay: @escaping (Int) -> Void
+    ) -> some View {
+        if usesCompactLayout {
+            VStack(alignment: .leading, spacing: 16) {
+                trackChoices(
+                    tracks: tracks,
+                    selectedTrackID: selectedTrackID,
+                    emptyMessage: emptyMessage,
+                    selectTrack: selectTrack
+                )
                 Divider().overlay(.white.opacity(0.12))
                 compactDelayControl(
                     title: "Synchronization",
-                    value: engine.subtitleDelayMilliseconds,
-                    change: engine.adjustSubtitleDelay
+                    value: delayValue,
+                    change: adjustDelay
                 )
             }
+        } else {
+            HStack(alignment: .bottom, spacing: 22) {
+                trackChoices(
+                    tracks: tracks,
+                    selectedTrackID: selectedTrackID,
+                    emptyMessage: emptyMessage,
+                    selectTrack: selectTrack
+                )
+                Divider()
+                    .overlay(.white.opacity(0.12))
+                    .frame(height: 68)
+                compactDelayControl(
+                    title: "Synchronization",
+                    value: delayValue,
+                    change: adjustDelay
+                )
+                .fixedSize(horizontal: true, vertical: false)
+            }
         }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func trackChoices(
+        tracks: [PlaybackTrack],
+        selectedTrackID: Int?,
+        emptyMessage: String,
+        selectTrack: @escaping (Int) -> Void
+    ) -> some View {
+        LazyVGrid(
+            columns: [
+                GridItem(
+                    .adaptive(
+                        minimum: usesCompactLayout ? 210 : 340,
+                        maximum: usesCompactLayout ? 340 : 560
+                    ),
+                    spacing: 12
+                )
+            ],
+            alignment: .leading,
+            spacing: 12
+        ) {
+            ForEach(tracks) { track in
+                choiceButton(
+                    title: track.name,
+                    subtitle: nil,
+                    selected: selectedTrackID == track.id
+                ) {
+                    selectTrack(track.id)
+                    noteActivity()
+                }
+            }
+            if tracks.isEmpty {
+                unavailable(emptyMessage)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var technicalDetails: some View {
@@ -1306,7 +1365,8 @@ private struct PlayerChoiceButton: View {
             HStack {
                 Text(title)
                     .font(.headline)
-                    .lineLimit(1)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 12)
                 if selected { Image(systemName: "checkmark.circle.fill") }
             }
@@ -1339,25 +1399,24 @@ private struct PlayerStepButton: View {
     @FocusState private var isFocused: Bool
 
     var body: some View {
-        Image(systemName: systemImage)
-            .font(.headline.bold())
-            .foregroundStyle(.white)
-            .frame(width: 48, height: 38)
-            .background(
-                isFocused ? AppTheme.focused : Color.white.opacity(0.1),
-                in: RoundedRectangle(cornerRadius: 9)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 9)
-                    .strokeBorder(isFocused ? AppTheme.focusBorder : Color.clear, lineWidth: 2)
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 9))
-            .focusable()
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.headline.bold())
+                .foregroundStyle(.white)
+                .frame(width: 48, height: 38)
+                .background(
+                    isFocused ? AppTheme.focused : Color.white.opacity(0.1),
+                    in: RoundedRectangle(cornerRadius: 9)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9)
+                        .strokeBorder(isFocused ? AppTheme.focusBorder : Color.clear, lineWidth: 2)
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 9))
+        }
+            .buttonStyle(.plain)
             .focused($isFocused)
             .focusEffectDisabled()
-            .onTapGesture(perform: action)
-            .accessibilityAddTraits(.isButton)
             .accessibilityLabel(systemImage == "minus" ? "Decrease delay" : "Increase delay")
-            .accessibilityAction { action() }
     }
 }
