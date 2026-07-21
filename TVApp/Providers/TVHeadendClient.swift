@@ -646,6 +646,7 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
             end: Date(timeIntervalSince1970: TimeInterval(entry.stop)),
             state: state,
             statusText: entry.status?.nonEmpty,
+            warningText: Self.recordingWarning(for: entry, state: state),
             fileSize: entry.fileSize,
             errorCount: entry.errors,
             dataErrorCount: entry.dataErrors,
@@ -657,11 +658,21 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
     static func recordingState(for entry: TVHeadendDVREntry, at now: Date) -> TVRecordingState {
         let scheduleStatus = entry.scheduleStatus?.lowercased() ?? ""
         let status = entry.status?.lowercased() ?? ""
+        let hasRecordingFile = entry.fileSize > 0 || entry.url?.nonEmpty != nil
 
         if scheduleStatus.contains("removed") {
             return .removed
         }
         if scheduleStatus.contains("completed") {
+            // completedError can describe a usable recording with a quality
+            // warning (for example, TVHeadend's "Weak stream"). Likewise,
+            // completedRerecord is the retained first copy after TVHeadend
+            // requested another attempt. A real recording file is therefore
+            // authoritative; these states must not make that file unplayable.
+            if hasRecordingFile {
+                return .completed
+            }
+
             let failedCompletion = scheduleStatus.contains("error")
                 || scheduleStatus.contains("rerecord")
                 || status.contains("missing")
@@ -683,8 +694,23 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
             return .failed
         }
 
-        let hasRecordingFile = entry.fileSize > 0 || entry.url?.nonEmpty != nil
         return hasRecordingFile ? .completed : .failed
+    }
+
+    static func recordingWarning(
+        for entry: TVHeadendDVREntry,
+        state: TVRecordingState
+    ) -> String? {
+        guard state == .completed else { return nil }
+
+        let scheduleStatus = entry.scheduleStatus?.lowercased() ?? ""
+        if scheduleStatus.contains("rerecord") {
+            return "TVheadend requested a re-record because quality issues were detected."
+        }
+        if scheduleStatus.contains("error") {
+            return entry.status?.nonEmpty ?? "TVheadend completed this recording with a warning."
+        }
+        return nil
     }
 
     private static func recordingStateOrder(_ state: TVRecordingState) -> Int {

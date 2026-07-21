@@ -201,6 +201,7 @@ struct TVRecording: Identifiable, Hashable, Sendable {
     let end: Date
     let state: TVRecordingState
     let statusText: String?
+    let warningText: String?
     let fileSize: Int64
     let errorCount: Int
     let dataErrorCount: Int

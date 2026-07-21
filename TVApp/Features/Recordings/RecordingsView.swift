@@ -457,13 +457,20 @@ private struct RecordingDetailView: View {
                             .foregroundStyle(.white.opacity(0.9))
                             .lineLimit(7)
 
+                        if let warning = recording.warningText {
+                            Label(warning, systemImage: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                        }
+
                         if recording.errorCount + recording.dataErrorCount > 0 {
                             Label(
                                 "\(recording.errorCount) recording errors · \(recording.dataErrorCount) data errors",
                                 systemImage: "exclamationmark.triangle.fill"
                             )
                             .foregroundStyle(.orange)
-                        } else if let status = recording.statusText, !status.isEmpty {
+                        } else if recording.warningText == nil,
+                                  let status = recording.statusText,
+                                  !status.isEmpty {
                             Text(status).foregroundStyle(AppTheme.secondaryText)
                         }
 

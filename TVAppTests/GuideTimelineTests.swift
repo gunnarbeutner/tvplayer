@@ -335,7 +335,7 @@ final class GuideTimelineTests: XCTestCase {
         XCTAssertEqual(entry.autorecUUID, "rule-uuid")
     }
 
-    func testDVRCompletedErrorsRemainVisibleAsFailedRecordings() throws {
+    func testDVRCompletedErrorWithoutAFileRemainsFailed() throws {
         let entry = try dvrEntry(
             scheduleStatus: "completedError",
             status: "File missing",
@@ -349,17 +349,43 @@ final class GuideTimelineTests: XCTestCase {
         )
     }
 
-    func testDVRCompletedRerecordRemainsVisibleAsFailedRecording() throws {
+    func testDVRCompletedErrorWithAFileIsPlayableWithWarning() throws {
         let entry = try dvrEntry(
-            scheduleStatus: "completedRerecord",
-            status: "Time missed",
+            scheduleStatus: "completedError",
+            status: "Weak stream",
             start: 1_000,
-            stop: 2_000
+            stop: 2_000,
+            fileSize: 2_901_346_472
         )
 
+        let state = TVHeadendClient.recordingState(
+            for: entry,
+            at: Date(timeIntervalSince1970: 2_500)
+        )
+        XCTAssertEqual(state, .completed)
         XCTAssertEqual(
-            TVHeadendClient.recordingState(for: entry, at: Date(timeIntervalSince1970: 2_500)),
-            .failed
+            TVHeadendClient.recordingWarning(for: entry, state: state),
+            "Weak stream"
+        )
+    }
+
+    func testDVRCompletedRerecordWithAFileIsPlayableWithWarning() throws {
+        let entry = try dvrEntry(
+            scheduleStatus: "completedRerecord",
+            status: "Completed OK",
+            start: 1_000,
+            stop: 2_000,
+            fileSize: 3_549_510_500
+        )
+
+        let state = TVHeadendClient.recordingState(
+            for: entry,
+            at: Date(timeIntervalSince1970: 2_500)
+        )
+        XCTAssertEqual(state, .completed)
+        XCTAssertEqual(
+            TVHeadendClient.recordingWarning(for: entry, state: state),
+            "TVheadend requested a re-record because quality issues were detected."
         )
     }
 
@@ -479,7 +505,8 @@ final class GuideTimelineTests: XCTestCase {
         scheduleStatus: String,
         status: String,
         start: Int64,
-        stop: Int64
+        stop: Int64,
+        fileSize: Int64 = 0
     ) throws -> TVHeadendDVREntry {
         let json = """
         {
@@ -491,7 +518,7 @@ final class GuideTimelineTests: XCTestCase {
           "stop": \(stop),
           "sched_status": "\(scheduleStatus)",
           "status": "\(status)",
-          "filesize": 0,
+          "filesize": \(fileSize),
           "errors": 0,
           "data_errors": 0
         }
