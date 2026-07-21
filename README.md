@@ -84,6 +84,12 @@ HTSP. Optional guide-cache and XMLTV URLs can also be supplied.
 Settings shows connection and time-shift status so configuration problems are
 visible before playback starts.
 
+## License
+
+TV Player's own source code is available under the [MIT License](LICENSE).
+VLCKit, libVLC, and other bundled dependencies retain their respective
+licenses; see [Third-party notices](THIRD_PARTY_NOTICES.md).
+
 ## Development
 
 Development requires Xcode with the iOS, macOS, and tvOS 26 SDKs and
