@@ -185,7 +185,7 @@ struct PostSeekPlaybackOutputGate {
     private var isEvaluatingFreshOutput = false
     private var baselineDiscontinuities = 0
     private var minimumPlaybackProgressMilliseconds: Int64 = 0
-    private var outputAtConcealment: PlaybackOutputCounters?
+    private var requiresDisplayedPicture = false
     private var outputAfterDiscontinuity: PlaybackOutputCounters?
 
     mutating func arm(from output: PlaybackOutputCounters) {
@@ -193,7 +193,6 @@ struct PostSeekPlaybackOutputGate {
         isConcealing = false
         isEvaluatingFreshOutput = false
         baselineDiscontinuities = output.demuxDiscontinuities
-        outputAtConcealment = nil
         outputAfterDiscontinuity = nil
     }
 
@@ -201,6 +200,10 @@ struct PostSeekPlaybackOutputGate {
         minimumPlaybackProgressMilliseconds = Int64(
             (max(0, duration) * 1_000).rounded(.up)
         )
+    }
+
+    mutating func requireDisplayedPicture() {
+        requiresDisplayedPicture = true
     }
 
     @discardableResult
@@ -216,7 +219,6 @@ struct PostSeekPlaybackOutputGate {
         guard isArmed else { return false }
         isConcealing = true
         isEvaluatingFreshOutput = true
-        outputAtConcealment = output
         if hasObservedDiscontinuity(in: output) {
             // The demuxer may consume the marker while VLC is paused. In that
             // case presentation still needs to advance after playback starts.
@@ -244,9 +246,12 @@ struct PostSeekPlaybackOutputGate {
             self.outputAfterDiscontinuity = output
             return false
         }
+        let hasFreshOutput = requiresDisplayedPicture
+            ? output.displayedPictures > outputAfterDiscontinuity.displayedPictures
+            : output.hasAdvanced(since: outputAfterDiscontinuity)
         guard isConcealing,
               hasReachedMinimumPlaybackProgress(in: output),
-              output.hasAdvanced(since: outputAfterDiscontinuity)
+              hasFreshOutput
         else { return false }
 
         reset()
@@ -257,7 +262,6 @@ struct PostSeekPlaybackOutputGate {
     mutating func suspendConcealing() -> Bool {
         let wasConcealing = isConcealing
         isConcealing = false
-        outputAtConcealment = nil
         outputAfterDiscontinuity = nil
         return wasConcealing
     }
@@ -277,7 +281,7 @@ struct PostSeekPlaybackOutputGate {
         in output: PlaybackOutputCounters
     ) -> Bool {
         guard minimumPlaybackProgressMilliseconds > 0 else { return true }
-        guard let baselineTime = outputAtConcealment?.playbackTimeMilliseconds,
+        guard let baselineTime = outputAfterDiscontinuity?.playbackTimeMilliseconds,
               let outputTime = output.playbackTimeMilliseconds
         else { return false }
         return abs(outputTime - baselineTime) >= minimumPlaybackProgressMilliseconds
@@ -289,7 +293,7 @@ struct PostSeekPlaybackOutputGate {
         isEvaluatingFreshOutput = false
         baselineDiscontinuities = 0
         minimumPlaybackProgressMilliseconds = 0
-        outputAtConcealment = nil
+        requiresDisplayedPicture = false
         outputAfterDiscontinuity = nil
     }
 }

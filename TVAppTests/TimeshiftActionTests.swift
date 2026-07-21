@@ -1107,6 +1107,48 @@ final class TimeshiftActionTests: XCTestCase {
         )
     }
 
+    func testPostSeekOutputGatePrimesFreshPictureAfterImmediatePausedConcealment() {
+        var gate = PostSeekPlaybackOutputGate()
+        let beforeSeek = PlaybackOutputCounters(
+            displayedPictures: 20,
+            playedAudioBuffers: 30,
+            demuxDiscontinuities: 4,
+            playbackTimeMilliseconds: 10_000
+        )
+        let bufferedWhilePaused = PlaybackOutputCounters(
+            displayedPictures: 20,
+            playedAudioBuffers: 30,
+            demuxDiscontinuities: 5,
+            playbackTimeMilliseconds: 8_000
+        )
+        gate.arm(from: beforeSeek)
+        gate.requireDisplayedPicture()
+
+        XCTAssertTrue(gate.concealImmediately())
+        XCTAssertFalse(gate.observe(bufferedWhilePaused))
+        XCTAssertTrue(gate.beginConcealing(from: bufferedWhilePaused))
+        XCTAssertFalse(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 20,
+                    playedAudioBuffers: 31,
+                    demuxDiscontinuities: 5,
+                    playbackTimeMilliseconds: 8_040
+                )
+            )
+        )
+        XCTAssertTrue(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 21,
+                    playedAudioBuffers: 31,
+                    demuxDiscontinuities: 5,
+                    playbackTimeMilliseconds: 8_040
+                )
+            )
+        )
+    }
+
     func testPostSeekOutputGateDoesNotRevealQueuedVideoWithoutDiscontinuity() {
         var gate = PostSeekPlaybackOutputGate()
         let beforeResume = PlaybackOutputCounters(
@@ -1205,10 +1247,20 @@ final class TimeshiftActionTests: XCTestCase {
         XCTAssertFalse(
             gate.observe(
                 PlaybackOutputCounters(
+                    displayedPictures: 101,
+                    playedAudioBuffers: 201,
+                    demuxDiscontinuities: 6,
+                    playbackTimeMilliseconds: 8_000
+                )
+            )
+        )
+        XCTAssertFalse(
+            gate.observe(
+                PlaybackOutputCounters(
                     displayedPictures: 120,
                     playedAudioBuffers: 220,
                     demuxDiscontinuities: 6,
-                    playbackTimeMilliseconds: 11_199
+                    playbackTimeMilliseconds: 9_199
                 )
             )
         )
@@ -1218,7 +1270,7 @@ final class TimeshiftActionTests: XCTestCase {
                     displayedPictures: 121,
                     playedAudioBuffers: 221,
                     demuxDiscontinuities: 6,
-                    playbackTimeMilliseconds: 11_200
+                    playbackTimeMilliseconds: 9_200
                 )
             )
         )

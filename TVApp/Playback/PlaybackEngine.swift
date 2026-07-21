@@ -150,6 +150,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private var outputHealthMonitor = PlaybackOutputHealthMonitor()
     private var postSeekOutputGate = PostSeekPlaybackOutputGate()
     private var shouldRestoreAudioAfterOutputGate = false
+    private var isPrimingPausedSeekFrame = false
     private var navigationShouldResume = true
     private var pauseRequested = false
     private var livePlaybackPosition = LivePlaybackPositionTracker()
@@ -305,6 +306,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             setState(.paused)
             return
         }
+        isPrimingPausedSeekFrame = false
         let wasPaused = state == .paused
         if wasPaused {
             logger.info("Resuming VLC playback")
@@ -337,6 +339,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             logger.info("Pause ignored for a live-only HTTP stream")
             return
         }
+        // A paused seek already has the requested user state. VLC is only
+        // running invisibly long enough to decode the selected frame.
+        guard !isPrimingPausedSeekFrame else { return }
         anchorLivePlaybackPositionIfNeeded()
         if nativeInputStream?.isNavigatingTimeshift == true {
             navigationShouldResume = false
@@ -694,10 +699,14 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         stream.setNavigationCompletionHandler { [weak self] result in
             Task { @MainActor [weak self] in
                 guard let self, self.nativeTimeshiftSessionID == sessionID else { return }
-                if case let .success(navigation) = result {
+                let navigationSucceeded: Bool
+                switch result {
+                case let .success(navigation):
+                    navigationSucceeded = true
                     self.timeshiftNavigationDebugState = "server navigation completed"
                     self.applyNavigationLanding(navigation)
-                } else if case let .failure(error) = result {
+                case let .failure(error):
+                    navigationSucceeded = false
                     self.timeshiftNavigationDebugState = "server navigation failed: \(error.localizedDescription)"
                     self.cancelPostSeekOutputGate()
                     self.logger.error(
@@ -707,6 +716,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 
                 if self.navigationShouldResume {
                     self.resumeLocalPlaybackAfterTimeshiftNavigation()
+                } else if navigationSucceeded {
+                    self.primePausedFrameAfterTimeshiftNavigation()
                 } else {
                     self.pauseRequested = true
                     self.nativeInputStream?.pause()
@@ -983,6 +994,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 
     private func resumeLocalPlaybackAfterTimeshiftNavigation() {
         timeshiftNavigationDebugState = "resuming VLC after navigation"
+        isPrimingPausedSeekFrame = false
         pauseRequested = false
         nativeInputStream?.play()
         let waitsForPlaybackProgress = livePlaybackPosition.requestResume(
@@ -1049,18 +1061,46 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 
     private func updatePostSeekOutputGate(with output: PlaybackOutputCounters) {
         guard postSeekOutputGate.observe(output) else { return }
+        if isPrimingPausedSeekFrame {
+            isPrimingPausedSeekFrame = false
+            mediaPlayer.rate = 1
+            playbackRate = 1
+            mediaPlayer.pause()
+            setState(.paused)
+            capturePausedFrame()
+            timeshiftNavigationDebugState = "paused on selected frame"
+        }
         revealPostSeekPlaybackOutput()
         logger.info("Revealed VLC output after the post-seek discontinuity")
     }
 
     private func suspendPostSeekOutputConcealment() {
+        guard !isPrimingPausedSeekFrame else { return }
         guard postSeekOutputGate.suspendConcealing() else { return }
         revealPostSeekPlaybackOutput()
     }
 
     private func cancelPostSeekOutputGate() {
+        isPrimingPausedSeekFrame = false
         postSeekOutputGate.cancel()
         revealPostSeekPlaybackOutput()
+    }
+
+    private func primePausedFrameAfterTimeshiftNavigation() {
+        timeshiftNavigationDebugState = "decoding selected frame while paused"
+        isPrimingPausedSeekFrame = true
+        pauseRequested = true
+        nativeInputStream?.pause()
+        clearPausedFrame()
+        if mediaPlayer.hasVideoOut {
+            postSeekOutputGate.requireDisplayedPicture()
+        }
+        playbackRate = 1
+        beginPostSeekOutputConcealmentIfNeeded()
+        mediaPlayer.play()
+        mediaPlayer.rate = postSeekOutputGate.isArmed ? Self.postSeekDrainRate : 1
+        setState(.paused)
+        lastMetricsUpdate = Date()
     }
 
     private func revealPostSeekPlaybackOutput() {
@@ -1243,6 +1283,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         playbackRate = 1
         pauseRequested = false
         navigationShouldResume = true
+        isPrimingPausedSeekFrame = false
         recoveryReason = nil
         recoveryAttempt = 0
         nativeTimeshiftRecoveryCount = 0
