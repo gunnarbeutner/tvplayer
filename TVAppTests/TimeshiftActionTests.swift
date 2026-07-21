@@ -730,7 +730,51 @@ final class TimeshiftActionTests: XCTestCase {
             completion,
             .buffer(
                 HTSPNavigationResult(
-                    landingTime: 104_900_000,
+                    landingTime: 105_000_000,
+                    serverLandingTime: 104_900_000,
+                    bufferStartTime: 0,
+                    liveEdgeTime: 120_000_000
+                )
+            )
+        )
+    }
+
+    func testAbsoluteSeekPrerollsFromKeyframeToExactTarget() {
+        var coordinator = HTSPAbsoluteSeekCoordinator()
+        _ = coordinator.update(
+            metrics: timeshiftMetrics(start: 0, end: 120, delay: 30),
+            updateCurrentPosition: true
+        )
+
+        XCTAssertEqual(coordinator.requestRelative(seconds: -15), 75_000_000)
+        XCTAssertEqual(
+            coordinator.complete(landingTime: 74_480_000),
+            .buffer(
+                HTSPNavigationResult(
+                    landingTime: 75_000_000,
+                    serverLandingTime: 74_480_000,
+                    bufferStartTime: 0,
+                    liveEdgeTime: 120_000_000
+                )
+            )
+        )
+    }
+
+    func testAbsoluteSeekRetriesEarlierWhenKeyframeIsAfterTarget() {
+        var coordinator = HTSPAbsoluteSeekCoordinator()
+        _ = coordinator.update(
+            metrics: timeshiftMetrics(start: 0, end: 120, delay: 30),
+            updateCurrentPosition: true
+        )
+
+        XCTAssertEqual(coordinator.requestRelative(seconds: -15), 75_000_000)
+        XCTAssertEqual(coordinator.complete(landingTime: 75_520_000), .seek(74_000_000))
+        XCTAssertEqual(
+            coordinator.complete(landingTime: 73_800_000),
+            .buffer(
+                HTSPNavigationResult(
+                    landingTime: 75_000_000,
+                    serverLandingTime: 73_800_000,
                     bufferStartTime: 0,
                     liveEdgeTime: 120_000_000
                 )
@@ -868,7 +912,7 @@ final class TimeshiftActionTests: XCTestCase {
         XCTAssertNil(speed.outstandingSpeed)
     }
 
-    func testSeekWaitsForTheServerToAcknowledgePause() {
+    func testSeekWaitsUntilTheOrderedPauseCommandHasBeenWritten() {
         XCTAssertFalse(
             HTSPSeekStartPolicy.canSendSeek(
                 actualSpeed: 100,
@@ -986,6 +1030,98 @@ final class TimeshiftActionTests: XCTestCase {
         )
     }
 
+    func testPostSeekOutputGateFallsBackToSustainedVideoProgress() {
+        var gate = PostSeekPlaybackOutputGate()
+        let beforeResume = PlaybackOutputCounters(
+            displayedPictures: 100,
+            playedAudioBuffers: 200,
+            demuxDiscontinuities: 5,
+            playbackTimeMilliseconds: 10_000
+        )
+        gate.arm(from: beforeResume)
+        XCTAssertTrue(gate.beginConcealing(from: beforeResume))
+
+        XCTAssertFalse(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 102,
+                    playedAudioBuffers: 211,
+                    demuxDiscontinuities: 5,
+                    playbackTimeMilliseconds: 10_499
+                )
+            )
+        )
+        XCTAssertTrue(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 103,
+                    playedAudioBuffers: 212,
+                    demuxDiscontinuities: 5,
+                    playbackTimeMilliseconds: 10_500
+                )
+            )
+        )
+        XCTAssertFalse(gate.isConcealing)
+    }
+
+    func testPostSeekOutputGateFallsBackToSustainedAudioOnlyProgress() {
+        var gate = PostSeekPlaybackOutputGate()
+        let beforeResume = PlaybackOutputCounters(
+            displayedPictures: 0,
+            playedAudioBuffers: 200,
+            demuxDiscontinuities: 5,
+            playbackTimeMilliseconds: 10_000
+        )
+        gate.arm(from: beforeResume)
+        XCTAssertTrue(gate.beginConcealing(from: beforeResume))
+
+        XCTAssertTrue(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 0,
+                    playedAudioBuffers: 212,
+                    demuxDiscontinuities: 5,
+                    playbackTimeMilliseconds: 9_500
+                )
+            )
+        )
+        XCTAssertFalse(gate.isConcealing)
+    }
+
+    func testPostSeekOutputGateConcealsKeyframePrerollUntilExactTarget() {
+        var gate = PostSeekPlaybackOutputGate()
+        let beforeResume = PlaybackOutputCounters(
+            displayedPictures: 100,
+            playedAudioBuffers: 200,
+            demuxDiscontinuities: 5,
+            playbackTimeMilliseconds: 10_000
+        )
+        gate.arm(from: beforeResume)
+        gate.requirePlaybackProgress(1.2)
+        XCTAssertTrue(gate.beginConcealing(from: beforeResume))
+
+        XCTAssertFalse(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 120,
+                    playedAudioBuffers: 220,
+                    demuxDiscontinuities: 6,
+                    playbackTimeMilliseconds: 11_199
+                )
+            )
+        )
+        XCTAssertTrue(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 121,
+                    playedAudioBuffers: 221,
+                    demuxDiscontinuities: 6,
+                    playbackTimeMilliseconds: 11_200
+                )
+            )
+        )
+    }
+
     func testPostSeekBufferWaitsForVideoKeyframeAndOneSecondOfMedia() {
         var tracker = HTSPPostSeekBufferTracker()
         let result = HTSPNavigationResult(
@@ -1032,6 +1168,21 @@ final class TimeshiftActionTests: XCTestCase {
             XCTAssertNil(tracker.observePacket(time: nil))
         }
         XCTAssertEqual(tracker.observePacket(time: nil), result)
+    }
+
+    func testPostSeekBufferIncludesPrerollThroughExactTarget() {
+        var tracker = HTSPPostSeekBufferTracker()
+        let result = HTSPNavigationResult(
+            landingTime: 45_000_000,
+            serverLandingTime: 43_000_000,
+            bufferStartTime: 0,
+            liveEdgeTime: 120_000_000
+        )
+        tracker.begin(result, hasVideo: false)
+
+        XCTAssertNil(tracker.observePacket(time: 43_000_000))
+        XCTAssertNil(tracker.observePacket(time: 44_500_000))
+        XCTAssertEqual(tracker.observePacket(time: 45_000_000), result)
     }
 
     func testDeliveryGateDropsPacketsUntilNavigationCompletes() {

@@ -547,25 +547,33 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     }
 
     private func requestSpeed(_ speed: Int32) {
+        let outstanding = speedController.outstandingSpeed.map(String.init) ?? "nil"
+        benchmarkTrace(
+            "speed request=\(speed) actual=\(speedController.actualSpeed) outstanding=\(outstanding)"
+        )
         if let command = speedController.request(speed) { sendSpeed(command) }
     }
 
     private func sendSpeed(_ speed: Int32) {
+        benchmarkTrace("sending subscriptionSpeed speed=\(speed)")
         sendControlRequest(
             method: "subscriptionSpeed",
             fields: ["speed": .int(Int64(speed))],
             succeeded: { [weak self] in
                 guard let self else { return }
-                // Some TVHeadend versions acknowledge the RPC without also
-                // emitting a subscriptionSpeed notification. Treat the RPC
-                // success as authoritative so a queued resume is not left
-                // waiting forever behind the acknowledged pause.
+                self.benchmarkTrace("subscriptionSpeed response succeeded speed=\(speed)")
                 if let command = self.speedController.commandSucceeded(speed) {
                     self.sendSpeed(command)
+                } else {
+                    // A subscriptionSpeed notification is optional. Once the
+                    // pause RPC has established speed zero, continue a seek
+                    // that was waiting for that acknowledgement.
+                    self.sendPendingNavigationIfPaused()
                 }
             },
             failed: { [weak self] error in
                 guard let self else { return }
+                self.benchmarkTrace("subscriptionSpeed response failed speed=\(speed) error=\(error.localizedDescription)")
                 if let command = self.speedController.commandFailed(speed) {
                     self.sendSpeed(command)
                 }
@@ -583,28 +591,40 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
     private func sendSeekWhenPaused(to target: Int64) {
         guard activeSeekSequence == nil else { return }
+        if !HTSPSeekStartPolicy.canSendSeek(
+            actualSpeed: speedController.actualSpeed,
+            outstandingSpeed: speedController.outstandingSpeed
+        ) {
+            requestSpeed(0)
+        }
         guard HTSPSeekStartPolicy.canSendSeek(
             actualSpeed: speedController.actualSpeed,
             outstandingSpeed: speedController.outstandingSpeed
         ) else {
-            requestSpeed(0)
             schedulePendingNavigationTimeout()
             return
         }
+        guard activeSeekSequence == nil else { return }
         sendAbsoluteSeek(to: target)
     }
 
     private func sendPendingNavigationIfPaused() {
         guard activeSeekSequence == nil,
               !deliveryGate.shouldDeliverPackets else { return }
+        if !HTSPSeekStartPolicy.canSendSeek(
+            actualSpeed: speedController.actualSpeed,
+            outstandingSpeed: speedController.outstandingSpeed
+        ) {
+            requestSpeed(0)
+        }
         guard HTSPSeekStartPolicy.canSendSeek(
             actualSpeed: speedController.actualSpeed,
             outstandingSpeed: speedController.outstandingSpeed
         ) else {
-            requestSpeed(0)
             schedulePendingNavigationTimeout()
             return
         }
+        guard activeSeekSequence == nil else { return }
         if pendingLiveCommand {
             sendLiveNavigation()
             return
@@ -615,7 +635,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
     private func sendAbsoluteSeek(to target: Int64) {
         sendNavigationCommand(
-            method: "subscriptionSeek",
+            method: "subscriptionSkip",
             fields: [
                 "time": .int(target),
                 "absolute": .int(1),
@@ -645,6 +665,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         acceptsLiveEdge: Bool,
         targetsLiveEdge: Bool
     ) {
+        benchmarkTrace("sending \(method) fields=\(fields)")
         seekRPCAccepted = false
         asynchronousLandingTime = nil
         navigationCommandInFlight = true
@@ -690,6 +711,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     }
 
     private func handleSubscriptionSkip(_ message: [String: HTSPValue]) {
+        benchmarkTrace("received subscriptionSkip event fields=\(message)")
         guard navigationCommandInFlight else { return }
         if message["error"]?.intValue == 1 {
             if HTSPNavigationRecoveryPolicy.shouldRetryWithLiveCommand(
@@ -839,6 +861,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         guard let request = pendingControlRequests[sequence],
               request.connectionGeneration == connectionGeneration
         else { return }
+        benchmarkTrace("received \(request.method) response seq=\(sequence) fields=\(message)")
         pendingControlRequests.removeValue(forKey: sequence)
         do {
             try HTSPConnection.validate(response: message)
@@ -854,6 +877,12 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     private func navigationError(from error: Error) -> HTSPNavigationError {
         if let navigationError = error as? HTSPNavigationError { return navigationError }
         return .controlFailed(error.localizedDescription)
+    }
+
+    private func benchmarkTrace(_ message: String) {
+        guard ProcessInfo.processInfo.arguments.contains("--vlc-timeshift-benchmark") else { return }
+        print("VLC_TIMESHIFT_HTSP \(message)")
+        fflush(stdout)
     }
 
     private func currentConnection() -> (

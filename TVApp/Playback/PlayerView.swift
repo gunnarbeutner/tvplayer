@@ -14,6 +14,47 @@ private enum PlayerOverlayTab: String, CaseIterable, Identifiable {
     var id: Self { self }
 }
 
+#if os(macOS)
+enum MacOSPlayerKeyboardCommand: Equatable {
+    case togglePlayback
+    case seekBackward(TimeInterval)
+    case seekForward(TimeInterval)
+
+    var isRepeatable: Bool {
+        switch self {
+        case .togglePlayback: false
+        case .seekBackward, .seekForward: true
+        }
+    }
+}
+
+enum MacOSPlayerKeyboardShortcuts {
+    static func command(
+        for key: KeyEquivalent,
+        modifiers: EventModifiers = []
+    ) -> MacOSPlayerKeyboardCommand? {
+        let reservedModifiers: EventModifiers = [.command, .control, .option]
+        guard modifiers.intersection(reservedModifiers).isEmpty else { return nil }
+
+        switch key {
+        case .space:
+            return .togglePlayback
+        case .leftArrow:
+            return .seekBackward(5)
+        case .rightArrow:
+            return .seekForward(5)
+        default:
+            switch String(key.character).lowercased() {
+            case "k": return .togglePlayback
+            case "j": return .seekBackward(10)
+            case "l": return .seekForward(10)
+            default: return nil
+            }
+        }
+    }
+}
+#endif
+
 struct PlaybackView: View {
     @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var playback: PlaybackCoordinator
@@ -322,6 +363,21 @@ struct PlaybackView: View {
                 playback.leavePlayer()
             }
         }
+#if os(macOS)
+        .onKeyPress(phases: [.down, .repeat]) { keyPress in
+            guard let command = MacOSPlayerKeyboardShortcuts.command(
+                for: keyPress.key,
+                modifiers: keyPress.modifiers
+            ) else {
+                return .ignored
+            }
+            guard keyPress.phase != .repeat || command.isRepeatable else {
+                return .handled
+            }
+            perform(command)
+            return .handled
+        }
+#endif
         .onChange(of: engine.state) { _, state in
             if state == .playing {
                 hasStartedCurrentPresentation = true
@@ -397,6 +453,21 @@ struct PlaybackView: View {
         if !wasPlaying { requestVideoReattachment() }
         showTimeline()
     }
+
+#if os(macOS)
+    private func perform(_ command: MacOSPlayerKeyboardCommand) {
+        switch command {
+        case .togglePlayback:
+            toggleTimelinePlayback()
+        case let .seekBackward(seconds):
+            if engine.isSeekable { engine.skipBackward(by: seconds) }
+            showTimeline()
+        case let .seekForward(seconds):
+            if engine.isSeekable { skipForward(by: seconds) }
+            showTimeline()
+        }
+    }
+#endif
 
     private func showPanel() {
         wakeSurfaceFocused = false
@@ -795,7 +866,9 @@ private struct PlaybackTransportControls: View {
             }
             .disabled(!canPause)
             .buttonStyle(.borderedProminent)
+#if !os(macOS)
             .keyboardShortcut(.space, modifiers: [])
+#endif
 
             Button(action: seekForward) {
                 Label("Forward 15 Seconds", systemImage: "goforward.15")

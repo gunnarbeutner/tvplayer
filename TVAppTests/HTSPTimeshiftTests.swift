@@ -131,6 +131,33 @@ final class HTSPTimeshiftTests: XCTestCase {
         XCTAssertTrue(firstPacketHasVLCDiscontinuity(pid: 0x0101, in: resumedAudio))
     }
 
+    func testMuxTimestampsRemainContinuousAcrossForwardAndBackwardSeeks() {
+        var continuity = MPEGTimestampContinuity()
+
+        let initial = continuity.normalize(
+            presentationTime: 1_000_000,
+            decodeTime: 980_000
+        )
+        XCTAssertEqual(initial.presentationTime, 1_000_000)
+        XCTAssertEqual(initial.decodeTime, 980_000)
+
+        continuity.beginNewEpoch()
+        let forward = continuity.normalize(
+            presentationTime: 30_000_000,
+            decodeTime: 29_980_000
+        )
+        XCTAssertEqual(forward.presentationTime, 1_060_000)
+        XCTAssertEqual(forward.decodeTime, 1_040_000)
+
+        continuity.beginNewEpoch()
+        let backward = continuity.normalize(
+            presentationTime: 500_000,
+            decodeTime: 480_000
+        )
+        XCTAssertEqual(backward.presentationTime, 1_120_000)
+        XCTAssertEqual(backward.decodeTime, 1_100_000)
+    }
+
     func testNativeSubscriptionRequestsKodiSizedQueueAndNormalizedTimestamps() {
         let fields = HTSPConnection.subscriptionFields(channelID: 42, profile: "pass")
 
@@ -292,6 +319,54 @@ final class HTSPTimeshiftTests: XCTestCase {
         stream.close()
     }
 
+    func testPauseRPCAcknowledgementStartsPendingSeekWithoutSpeedNotification() async throws {
+        let connection = ScriptedHTSPConnection(
+            streams: [
+                HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil),
+            ],
+            reads: [
+                .message([
+                    "method": .string("timeshiftStatus"),
+                    "start": .int(0),
+                    "end": .int(30_000_000),
+                    "shift": .int(0),
+                ]),
+            ]
+        )
+        let configuration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://tvheadend.local:9981"),
+            username: "viewer",
+            password: "secret",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil
+        )
+        let stream = try await HTSPLiveInputStream.connect(
+            configuration: configuration,
+            channelID: 42,
+            profile: "pass",
+            connectionFactory: { connection }
+        )
+        stream.open()
+        for _ in 0..<100 where stream.timeshiftWindowSeconds == 0 {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        stream.pause()
+        stream.seek(by: -10)
+        for _ in 0..<100 where connection.requestedSpeeds != [0] {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        connection.enqueue(.message(["seq": .int(1)]))
+
+        for _ in 0..<100 where !connection.requestedMethods.contains("subscriptionSkip") {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(connection.requestedSpeeds, [0])
+        XCTAssertTrue(connection.requestedMethods.contains("subscriptionSkip"))
+        stream.close()
+    }
+
     private func firstPacketHasDiscontinuity(pid: UInt16, in data: Data) -> Bool {
         for offset in stride(from: 0, to: data.count, by: 188) {
             guard offset + 188 <= data.count, data[offset] == 0x47 else { continue }
@@ -335,6 +410,7 @@ private final class ScriptedHTSPConnection: HTSPConnectionTransport, @unchecked 
     private var closed = false
     private var nextSequence: Int64 = 1
     private var speeds: [Int32] = []
+    private var methods: [String] = []
 
     init(streams: [HTSPStreamInfo], reads: [ScriptedHTSPRead]) {
         self.streams = streams
@@ -343,6 +419,10 @@ private final class ScriptedHTSPConnection: HTSPConnectionTransport, @unchecked 
 
     var requestedSpeeds: [Int32] {
         condition.withLock { speeds }
+    }
+
+    var requestedMethods: [String] {
+        condition.withLock { methods }
     }
 
     func handshake(username: String, password: String) throws {}
@@ -365,9 +445,17 @@ private final class ScriptedHTSPConnection: HTSPConnectionTransport, @unchecked 
         includesSubscriptionID: Bool
     ) throws {
         condition.withLock {
+            methods.append(method)
             if method == "subscriptionSpeed", let speed = fields["speed"]?.intValue {
                 speeds.append(Int32(clamping: speed))
             }
+        }
+    }
+
+    func enqueue(_ read: ScriptedHTSPRead) {
+        condition.withLock {
+            reads.append(read)
+            condition.broadcast()
         }
     }
 
@@ -428,3 +516,244 @@ private final class LockedLifecycleEvents: @unchecked Sendable {
         lock.withLock { events.append(event) }
     }
 }
+
+#if os(tvOS)
+@MainActor
+final class VLCTimeshiftIntegrationTests: XCTestCase {
+    private struct Sample {
+        let requestedDelta: TimeInterval
+        let discontinuityMilliseconds: Double
+        let firstVideoMilliseconds: Double
+        let firstAudioMilliseconds: Double?
+        let playingMilliseconds: Double
+        let liveDelay: TimeInterval
+    }
+
+    func testRepeatedSeeksThroughRealVLCPlayer() async throws {
+#if !LIVE_TIMESHIFT_BENCHMARK
+        throw XCTSkip("Run Scripts/benchmark-vlc-timeshift.swift to enable this integration benchmark.")
+#endif
+        let configuration = try XCTUnwrap(
+            SharedTVHeadendConfigurationStore().read(),
+            "No shared TVHeadend configuration is available in the simulator Keychain."
+        )
+        let channelID = try await firstNumericChannelID(configuration: configuration)
+        let streamURL = try XCTUnwrap(
+            configuration.baseURL?.appending(path: "stream/channelid/\(channelID)")
+        )
+        let request = LiveStreamRequest(
+            url: streamURL,
+            networkCachingMilliseconds: 1_500,
+            profile: configuration.streamProfile,
+            kind: .live(
+                .nativeTimeshift(
+                    HTSPPlaybackConfiguration(
+                        configuration: configuration,
+                        channelID: channelID
+                    )
+                )
+            )
+        )
+
+        let engine = VLCPlaybackEngine()
+        let drawable = UIView(frame: CGRect(x: 0, y: 0, width: 1_920, height: 1_080))
+        engine.mediaPlayer.drawable = drawable
+        defer { engine.stop() }
+
+        try await engine.prepare(request)
+        XCTAssertEqual(engine.activeLivePlaybackMode, .tvHeadend)
+        engine.play()
+        let playbackStarted = await engine.waitForPlaybackStart()
+        XCTAssertTrue(playbackStarted, "VLC did not begin playback.")
+
+        print("VLC_TIMESHIFT filling buffer through the real player for up to 45 seconds")
+        try await waitUntil(timeout: 45) {
+            engine.refreshPlaybackInformation()
+            return engine.timeshiftWindowSeconds >= 35
+        }
+        print(String(format: "VLC_TIMESHIFT available window %.2fs", engine.timeshiftWindowSeconds))
+
+        var samples: [Sample] = []
+        for (index, delta) in [-25.0, 15.0, -15.0, 15.0, -15.0, 15.0].enumerated() {
+            let sample = try await measureSeek(delta: delta, engine: engine)
+            samples.append(sample)
+            print(
+                String(
+                    format: "VLC_TIMESHIFT %d delta %+.0fs discontinuity %.1fms video %.1fms audio %@ playing %.1fms delay %.2fs",
+                    index + 1,
+                    delta,
+                    sample.discontinuityMilliseconds,
+                    sample.firstVideoMilliseconds,
+                    sample.firstAudioMilliseconds.map { String(format: "%.1fms", $0) } ?? "n/a",
+                    sample.playingMilliseconds,
+                    sample.liveDelay
+                )
+            )
+        }
+
+        printSummary("discontinuity", samples.map(\.discontinuityMilliseconds))
+        printSummary("video", samples.map(\.firstVideoMilliseconds))
+        printSummary("playing", samples.map(\.playingMilliseconds))
+        let audio = samples.compactMap(\.firstAudioMilliseconds)
+        if !audio.isEmpty { printSummary("audio", audio) }
+    }
+
+    private func measureSeek(delta: TimeInterval, engine: VLCPlaybackEngine) async throws -> Sample {
+        engine.refreshPlaybackInformation()
+        let baseline = counters(engine)
+        let started = ProcessInfo.processInfo.systemUptime
+        if delta < 0 {
+            engine.skipBackward(by: -delta)
+        } else {
+            _ = engine.skipForward(by: delta)
+        }
+
+        var discontinuityAt: Double?
+        var videoAt: Double?
+        var audioAt: Double?
+        var countersAtDiscontinuity: PlaybackOutputCounters?
+        let deadline = started + 10
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            engine.refreshPlaybackInformation()
+            let now = ProcessInfo.processInfo.systemUptime
+            let current = counters(engine)
+            if discontinuityAt == nil,
+               current.demuxDiscontinuities > baseline.demuxDiscontinuities {
+                discontinuityAt = now
+                countersAtDiscontinuity = current
+            }
+            if let countersAtDiscontinuity {
+                if videoAt == nil,
+                   current.displayedPictures > countersAtDiscontinuity.displayedPictures {
+                    videoAt = now
+                }
+                if audioAt == nil,
+                   current.playedAudioBuffers > countersAtDiscontinuity.playedAudioBuffers {
+                    audioAt = now
+                }
+            }
+            if let discontinuityAt, let videoAt,
+               engine.state == .playing,
+               !engine.isPlaybackOutputConcealed {
+                return Sample(
+                    requestedDelta: delta,
+                    discontinuityMilliseconds: (discontinuityAt - started) * 1_000,
+                    firstVideoMilliseconds: (videoAt - started) * 1_000,
+                    firstAudioMilliseconds: audioAt.map { ($0 - started) * 1_000 },
+                    playingMilliseconds: (now - started) * 1_000,
+                    liveDelay: engine.liveDelaySeconds
+                )
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail(
+            "VLC did not produce post-discontinuity video within 10 seconds "
+                + "(state: \(engine.state), concealed: \(engine.isPlaybackOutputConcealed), "
+                + "baseline: \(baseline), current: \(counters(engine)))."
+        )
+        throw BenchmarkFailure.timedOut
+    }
+
+    private func counters(_ engine: VLCPlaybackEngine) -> PlaybackOutputCounters {
+        let statistics = engine.mediaPlayer.media?.statistics
+        return PlaybackOutputCounters(
+            displayedPictures: Int(statistics?.displayedPictures ?? 0),
+            playedAudioBuffers: Int(statistics?.playedAudioBuffers ?? 0),
+            demuxDiscontinuities: Int(statistics?.demuxDiscontinuity ?? 0),
+            playbackTimeMilliseconds: engine.mediaPlayer.time.intValue > 0
+                ? Int64(engine.mediaPlayer.time.intValue)
+                : nil
+        )
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval,
+        predicate: @MainActor () -> Bool
+    ) async throws {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            if predicate() { return }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw BenchmarkFailure.timedOut
+    }
+
+    private func firstNumericChannelID(
+        configuration: TVHeadendConfiguration
+    ) async throws -> UInt32 {
+        guard let baseURL = configuration.baseURL else { throw BenchmarkFailure.invalidConfiguration }
+        let playlistURL = baseURL
+            .appending(path: "playlist/ticket/channels")
+            .appending(queryItems: [URLQueryItem(name: "profile", value: configuration.streamProfile)])
+        let delegate = BenchmarkAuthenticationDelegate(configuration: configuration)
+        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        let (data, response) = try await session.data(from: playlistURL)
+        guard let response = response as? HTTPURLResponse,
+              (200..<300).contains(response.statusCode),
+              let playlist = String(data: data, encoding: .utf8)
+        else { throw BenchmarkFailure.invalidPlaylist }
+        for line in playlist.split(whereSeparator: \.isNewline) where !line.hasPrefix("#") {
+            guard let url = URL(string: String(line)),
+                  let channelID = TVHeadendClient.numericChannelID(from: url)
+            else { continue }
+            return channelID
+        }
+        throw BenchmarkFailure.invalidPlaylist
+    }
+
+    private func printSummary(_ name: String, _ values: [Double]) {
+        let sorted = values.sorted()
+        let median = sorted.count.isMultiple(of: 2)
+            ? (sorted[sorted.count / 2 - 1] + sorted[sorted.count / 2]) / 2
+            : sorted[sorted.count / 2]
+        let p95 = sorted[max(0, Int(ceil(Double(sorted.count) * 0.95)) - 1)]
+        print(
+            String(
+                format: "VLC_TIMESHIFT_SUMMARY %@ min %.1fms median %.1fms p95 %.1fms max %.1fms",
+                name,
+                sorted.first ?? 0,
+                median,
+                p95,
+                sorted.last ?? 0
+            )
+        )
+    }
+
+    private enum BenchmarkFailure: Error {
+        case invalidConfiguration
+        case invalidPlaylist
+        case timedOut
+    }
+}
+
+private final class BenchmarkAuthenticationDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let configuration: TVHeadendConfiguration
+
+    init(configuration: TVHeadendConfiguration) {
+        self.configuration = configuration
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let method = challenge.protectionSpace.authenticationMethod
+        if method == NSURLAuthenticationMethodHTTPDigest
+            || method == NSURLAuthenticationMethodHTTPBasic {
+            completionHandler(
+                .useCredential,
+                URLCredential(
+                    user: configuration.username,
+                    password: configuration.password,
+                    persistence: .forSession
+                )
+            )
+        } else {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+}
+#endif

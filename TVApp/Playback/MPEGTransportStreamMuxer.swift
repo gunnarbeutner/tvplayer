@@ -8,6 +8,38 @@ struct HTSPMuxPacket: Sendable {
     let payload: Data
 }
 
+struct MPEGTimestampContinuity {
+    static let epochGap: Int64 = 40_000
+
+    private var offset: Int64 = 0
+    private var latestOutputTime: Int64?
+    private var startsNewEpoch = false
+
+    mutating func beginNewEpoch() {
+        startsNewEpoch = true
+    }
+
+    mutating func normalize(
+        presentationTime: Int64?,
+        decodeTime: Int64?
+    ) -> (presentationTime: Int64?, decodeTime: Int64?) {
+        let sourceAnchor = decodeTime ?? presentationTime
+        if startsNewEpoch, let sourceAnchor {
+            if let latestOutputTime {
+                offset = latestOutputTime + Self.epochGap - sourceAnchor
+            }
+            startsNewEpoch = false
+        }
+
+        let normalizedPTS = presentationTime.map { $0 + offset }
+        let normalizedDTS = decodeTime.map { $0 + offset }
+        if let outputTime = [normalizedPTS, normalizedDTS].compactMap({ $0 }).max() {
+            latestOutputTime = max(latestOutputTime ?? outputTime, outputTime)
+        }
+        return (normalizedPTS, normalizedDTS)
+    }
+}
+
 final class MPEGTransportStreamMuxer {
     // VLC 3.x intentionally does not propagate the standard MPEG-TS
     // discontinuity indicator to packetizers and decoders. Its TS demuxer
@@ -38,6 +70,7 @@ final class MPEGTransportStreamMuxer {
     private var pendingBootstrapIndexes: Set<Int> = []
     private var pendingDiscontinuityPIDs: Set<UInt16> = []
     private var pendingDecoderFlushPIDs: Set<UInt16> = []
+    private var timestampContinuity = MPEGTimestampContinuity()
     private let pmtPID: UInt16 = 0x1000
     private let pcrPID: UInt16
 
@@ -99,6 +132,7 @@ final class MPEGTransportStreamMuxer {
     }
 
     func resetAfterDiscontinuity() {
+        timestampContinuity.beginNewEpoch()
         continuity.removeAll()
         packetsSinceTables = Int.max
         pendingBootstrapIndexes = Set(
@@ -130,8 +164,12 @@ final class MPEGTransportStreamMuxer {
             pendingBootstrapIndexes.remove(packet.streamIndex)
         }
 
-        let pts = packet.presentationTime ?? packet.decodeTime
-        let dts = packet.decodeTime
+        let timestamps = timestampContinuity.normalize(
+            presentationTime: packet.presentationTime,
+            decodeTime: packet.decodeTime
+        )
+        let pts = timestamps.presentationTime ?? timestamps.decodeTime
+        let dts = timestamps.decodeTime
         let pes = Self.pesPacket(
             streamID: track.streamID,
             ptsMicroseconds: pts,

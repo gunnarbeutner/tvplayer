@@ -180,22 +180,36 @@ struct PlaybackOutputCounters: Equatable {
 /// pictures and audio while paused; those samples must not become visible when
 /// playback is resumed after moving within the timeshift buffer.
 struct PostSeekPlaybackOutputGate {
+    private static let fallbackPlaybackProgressMilliseconds: Int64 = 500
+    private static let fallbackVideoPictures = 3
+    private static let fallbackAudioBuffers = 12
+
     private(set) var isArmed = false
     private(set) var isConcealing = false
     private var baselineDiscontinuities = 0
+    private var minimumPlaybackProgressMilliseconds: Int64 = 0
+    private var outputAtConcealment: PlaybackOutputCounters?
     private var outputAfterDiscontinuity: PlaybackOutputCounters?
 
     mutating func arm(from output: PlaybackOutputCounters) {
         isArmed = true
         isConcealing = false
         baselineDiscontinuities = output.demuxDiscontinuities
+        outputAtConcealment = nil
         outputAfterDiscontinuity = nil
+    }
+
+    mutating func requirePlaybackProgress(_ duration: TimeInterval) {
+        minimumPlaybackProgressMilliseconds = Int64(
+            (max(0, duration) * 1_000).rounded(.up)
+        )
     }
 
     @discardableResult
     mutating func beginConcealing(from output: PlaybackOutputCounters) -> Bool {
         guard isArmed else { return false }
         isConcealing = true
+        outputAtConcealment = output
         if hasObservedDiscontinuity(in: output) {
             // The demuxer may consume the marker while VLC is paused. In that
             // case presentation still needs to advance after playback starts.
@@ -213,13 +227,26 @@ struct PostSeekPlaybackOutputGate {
             baselineDiscontinuities = 0
             outputAfterDiscontinuity = nil
         }
-        guard hasObservedDiscontinuity(in: output) else { return false }
+        guard hasObservedDiscontinuity(in: output) else {
+            guard isConcealing,
+                  hasSustainedPlaybackProgressWithoutDiscontinuity(in: output)
+            else { return false }
+
+            // VLC does not reliably increment the demux discontinuity
+            // statistic for every marker in a long-running transport stream.
+            // Navigation has already completed before concealment begins, so
+            // sustained clock and presentation progress after local resume is
+            // a safe fallback signal that its queued pre-seek output is gone.
+            reset()
+            return true
+        }
 
         guard let outputAfterDiscontinuity else {
             self.outputAfterDiscontinuity = output
             return false
         }
         guard isConcealing,
+              hasReachedMinimumPlaybackProgress(in: output),
               output.hasAdvanced(since: outputAfterDiscontinuity)
         else { return false }
 
@@ -231,6 +258,7 @@ struct PostSeekPlaybackOutputGate {
     mutating func suspendConcealing() -> Bool {
         let wasConcealing = isConcealing
         isConcealing = false
+        outputAtConcealment = nil
         outputAfterDiscontinuity = nil
         return wasConcealing
     }
@@ -246,10 +274,42 @@ struct PostSeekPlaybackOutputGate {
         output.demuxDiscontinuities > baselineDiscontinuities
     }
 
+    private func hasSustainedPlaybackProgressWithoutDiscontinuity(
+        in output: PlaybackOutputCounters
+    ) -> Bool {
+        guard let baseline = outputAtConcealment,
+              let baselineTime = baseline.playbackTimeMilliseconds,
+              let outputTime = output.playbackTimeMilliseconds,
+              abs(outputTime - baselineTime) >= max(
+                  Self.fallbackPlaybackProgressMilliseconds,
+                  minimumPlaybackProgressMilliseconds
+              )
+        else { return false }
+
+        if baseline.displayedPictures > 0 {
+            return output.displayedPictures - baseline.displayedPictures
+                >= Self.fallbackVideoPictures
+        }
+        return output.playedAudioBuffers - baseline.playedAudioBuffers
+            >= Self.fallbackAudioBuffers
+    }
+
+    private func hasReachedMinimumPlaybackProgress(
+        in output: PlaybackOutputCounters
+    ) -> Bool {
+        guard minimumPlaybackProgressMilliseconds > 0 else { return true }
+        guard let baselineTime = outputAtConcealment?.playbackTimeMilliseconds,
+              let outputTime = output.playbackTimeMilliseconds
+        else { return false }
+        return abs(outputTime - baselineTime) >= minimumPlaybackProgressMilliseconds
+    }
+
     private mutating func reset() {
         isArmed = false
         isConcealing = false
         baselineDiscontinuities = 0
+        minimumPlaybackProgressMilliseconds = 0
+        outputAtConcealment = nil
         outputAfterDiscontinuity = nil
     }
 }
@@ -540,8 +600,25 @@ struct HTSPTimeshiftMetrics: Equatable {
 
 struct HTSPNavigationResult: Equatable, Sendable {
     let landingTime: Int64
+    let serverLandingTime: Int64
     let bufferStartTime: Int64?
     let liveEdgeTime: Int64?
+
+    init(
+        landingTime: Int64,
+        serverLandingTime: Int64? = nil,
+        bufferStartTime: Int64?,
+        liveEdgeTime: Int64?
+    ) {
+        self.landingTime = landingTime
+        self.serverLandingTime = serverLandingTime ?? landingTime
+        self.bufferStartTime = bufferStartTime
+        self.liveEdgeTime = liveEdgeTime
+    }
+
+    var prerollDuration: TimeInterval {
+        max(0, TimeInterval(landingTime - serverLandingTime) / 1_000_000)
+    }
 
     var liveDelay: TimeInterval {
         guard let liveEdgeTime else { return 0 }
@@ -572,6 +649,7 @@ enum HTSPSeekCompletion: Equatable {
 
 struct HTSPAbsoluteSeekCoordinator {
     static let landingTolerance: Int64 = 250_000
+    static let initialEarlierSeekBackoff: Int64 = 1_000_000
 
     private(set) var inFlightTarget: Int64?
     private(set) var desiredTarget: Int64?
@@ -580,6 +658,8 @@ struct HTSPAbsoluteSeekCoordinator {
     private(set) var liveEdgeTime: Int64?
     private var pendingRelativeDelta: Int64 = 0
     private var pendingLiveEdge = false
+    private var earlierSeekBackoff = Self.initialEarlierSeekBackoff
+    private var earlierCorrectionInFlight = false
 
     var isTargetingLiveEdge: Bool {
         if pendingLiveEdge { return true }
@@ -640,22 +720,42 @@ struct HTSPAbsoluteSeekCoordinator {
         acceptsLiveEdgeLanding: Bool = false
     ) -> HTSPSeekCompletion {
         let satisfiedLiveEdge = acceptsLiveEdgeLanding && isTargetingLiveEdge
-        currentTime = clamp(landingTime)
+        let serverLandingTime = clamp(landingTime)
+        let completedRequestTarget = inFlightTarget
+        let completedEarlierCorrection = earlierCorrectionInFlight
         inFlightTarget = nil
+        earlierCorrectionInFlight = false
         pendingLiveEdge = false
 
         if !satisfiedLiveEdge,
+           !completedEarlierCorrection,
            let desiredTarget,
-           abs(desiredTarget - landingTime) > Self.landingTolerance {
-            let target = clamp(desiredTarget)
-            inFlightTarget = target
-            return .seek(target)
+           completedRequestTarget != desiredTarget {
+            inFlightTarget = desiredTarget
+            return .seek(desiredTarget)
         }
 
-        desiredTarget = currentTime
+        if !satisfiedLiveEdge, let desiredTarget, serverLandingTime > desiredTarget {
+            let earlierTarget = clamp(desiredTarget - earlierSeekBackoff)
+            if earlierTarget < desiredTarget {
+                earlierSeekBackoff = min(earlierSeekBackoff, Int64.max / 2) * 2
+                inFlightTarget = earlierTarget
+                earlierCorrectionInFlight = true
+                return .seek(earlierTarget)
+            }
+        }
+
+        let exactLandingTime = satisfiedLiveEdge
+            ? serverLandingTime
+            : clamp(desiredTarget ?? serverLandingTime)
+        currentTime = exactLandingTime
+        desiredTarget = exactLandingTime
+        earlierSeekBackoff = Self.initialEarlierSeekBackoff
+        earlierCorrectionInFlight = false
         return .buffer(
             HTSPNavigationResult(
-                landingTime: currentTime ?? landingTime,
+                landingTime: exactLandingTime,
+                serverLandingTime: serverLandingTime,
                 bufferStartTime: bufferStartTime,
                 liveEdgeTime: liveEdgeTime
             )
@@ -667,6 +767,8 @@ struct HTSPAbsoluteSeekCoordinator {
         desiredTarget = currentTime
         pendingRelativeDelta = 0
         pendingLiveEdge = false
+        earlierSeekBackoff = Self.initialEarlierSeekBackoff
+        earlierCorrectionInFlight = false
     }
 
     private mutating func startIfPossible() -> Int64? {
@@ -788,8 +890,9 @@ struct HTSPPostSeekBufferTracker {
             latestTime = max(latestTime ?? time, time)
         }
         let bufferedDuration = max(0, (latestTime ?? 0) - (firstTime ?? 0))
-        guard bufferedDuration >= Self.requiredDuration
-                || packetCount >= Self.packetFallbackCount
+        let reachedExactLanding = latestTime.map { $0 >= result.landingTime } ?? false
+        guard (bufferedDuration >= Self.requiredDuration && reachedExactLanding)
+                || (latestTime == nil && packetCount >= Self.packetFallbackCount)
         else { return nil }
         cancel()
         return result

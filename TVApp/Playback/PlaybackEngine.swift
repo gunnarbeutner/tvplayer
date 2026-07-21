@@ -126,6 +126,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     @Published private(set) var livePlaybackMarkerDate: Date?
     @Published private(set) var isPlaybackOutputConcealed = false
     @Published private(set) var pausedFrame: PlatformImage?
+    @Published private(set) var timeshiftNavigationDebugState = "idle"
 #if os(tvOS)
     @Published private(set) var isPictureInPictureReady = false
     @Published private(set) var usesSampleBufferRendering = false
@@ -690,8 +691,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             Task { @MainActor [weak self] in
                 guard let self, self.nativeTimeshiftSessionID == sessionID else { return }
                 if case let .success(navigation) = result {
+                    self.timeshiftNavigationDebugState = "server navigation completed"
                     self.applyNavigationLanding(navigation)
                 } else if case let .failure(error) = result {
+                    self.timeshiftNavigationDebugState = "server navigation failed: \(error.localizedDescription)"
                     self.cancelPostSeekOutputGate()
                     self.logger.error(
                         "Timeshift navigation failed: \(error.localizedDescription, privacy: .public)"
@@ -719,8 +722,14 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 
     private func rememberNavigationPlaybackIntent() {
-        guard nativeInputStream?.isNavigatingTimeshift != true else { return }
+        guard nativeInputStream?.isNavigatingTimeshift != true else {
+            timeshiftNavigationDebugState = "ignored new intent while already navigating"
+            return
+        }
         navigationShouldResume = !pauseRequested
+        timeshiftNavigationDebugState = navigationShouldResume
+            ? "navigation requested; will resume"
+            : "navigation requested; will remain paused"
     }
 
     private func handleNativeLifecycleEvent(_ event: HTSPStreamLifecycleEvent) {
@@ -967,6 +976,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 #endif
 
     private func resumeLocalPlaybackAfterTimeshiftNavigation() {
+        timeshiftNavigationDebugState = "resuming VLC after navigation"
         pauseRequested = false
         nativeInputStream?.play()
         let waitsForPlaybackProgress = livePlaybackPosition.requestResume(
@@ -980,10 +990,15 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         lastMetricsUpdate = Date()
     }
 
+    var nativeTimeshiftHealthSnapshot: HTSPStreamHealthSnapshot? {
+        nativeInputStream?.healthSnapshot
+    }
+
     private func applyNavigationLanding(
         _ navigation: HTSPNavigationResult,
         at date: Date = Date()
     ) {
+        postSeekOutputGate.requirePlaybackProgress(navigation.prerollDuration)
         let liveEdge = date
         let landingDate = liveEdge.addingTimeInterval(-navigation.liveDelay)
         livePlaybackPosition.moveAnchor(
