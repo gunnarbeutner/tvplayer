@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import ImageIO
 import SwiftUI
 #if canImport(UIKit)
 import UIKit
@@ -34,7 +35,9 @@ struct ChannelBadge: View {
         self.diameter = diameter
 
         let key = channel.iconURL.map(ChannelLogoImageCache.cacheKey)
-        let artwork = channel.iconURL.flatMap(ChannelLogoImageCache.shared.cachedArtwork)
+        let artwork = channel.iconURL.flatMap {
+            ChannelLogoImageCache.shared.memoryArtwork(for: $0)
+        }
         _loadedArtwork = State(initialValue: artwork)
         _loadedKey = State(initialValue: artwork == nil ? nil : key)
     }
@@ -69,13 +72,14 @@ struct ChannelBadge: View {
         channel.iconURL.map(ChannelLogoImageCache.cacheKey)
     }
 
-    /// Reading the shared cache in `body` is intentional. A badge that is
+    /// Reading the memory cache in `body` is intentional. A badge that is
     /// remounted after another badge loaded the same artwork can paint the
-    /// decoded image on its first frame instead of briefly showing a monogram.
+    /// decoded image on its first frame without doing disk work while SwiftUI
+    /// is rendering.
     private var displayedArtwork: ChannelLogoArtwork? {
         if loadedKey == currentKey, let loadedArtwork { return loadedArtwork }
         guard let iconURL = channel.iconURL else { return nil }
-        return ChannelLogoImageCache.shared.cachedArtwork(for: iconURL)
+        return ChannelLogoImageCache.shared.memoryArtwork(for: iconURL)
     }
 
     private var monogram: some View {
@@ -97,7 +101,7 @@ struct ChannelBadge: View {
         let key = ChannelLogoImageCache.cacheKey(for: iconURL)
         failedKey = nil
 
-        if let artwork = ChannelLogoImageCache.shared.cachedArtwork(for: iconURL) {
+        if let artwork = ChannelLogoImageCache.shared.memoryArtwork(for: iconURL) {
             loadedArtwork = artwork
             loadedKey = key
             return
@@ -134,10 +138,16 @@ struct ChannelLogoArtwork: @unchecked Sendable {
     let backgroundTone: ChannelLogoBackgroundTone?
 }
 
-/// A decoded memory cache backed by the app's caches directory. The lookup is
-/// synchronous by design so SwiftUI views can paint an already-known logo on
-/// their very first frame. Only a SHA-256 digest is used as a filename; server
-/// credentials and authentication query values are never persisted.
+enum CachedArtworkKind: String, Hashable, Sendable {
+    case channelLogo
+    case programmeArtwork
+}
+
+/// A decoded memory cache backed by raw image data in the app's caches
+/// directory. SwiftUI render paths use the memory-only lookup; disk access and
+/// decoding are performed by `ChannelLogoDataLoader` on its actor executor.
+/// Only a SHA-256 digest is used as a filename; server credentials and
+/// authentication query values are never persisted.
 final class ChannelLogoImageCache: @unchecked Sendable {
     static let shared = ChannelLogoImageCache()
 
@@ -150,55 +160,61 @@ final class ChannelLogoImageCache: @unchecked Sendable {
     }
 
     private let memory = NSCache<NSString, ArtworkBox>()
-    private let lock = NSLock()
-    private var checkedDiskKeys: Set<String> = []
     private let directoryURL: URL?
 
-    init(fileManager: FileManager = .default) {
-        directoryURL = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)
+    convenience init(fileManager: FileManager = .default) {
+        self.init(directoryURL: fileManager.urls(for: .cachesDirectory, in: .userDomainMask)
             .first?
-            .appending(path: "ChannelLogos-v1", directoryHint: .isDirectory)
+            .appending(path: "ChannelLogos-v1", directoryHint: .isDirectory))
+    }
+
+    init(directoryURL: URL?) {
+        self.directoryURL = directoryURL
         memory.countLimit = 256
         memory.totalCostLimit = 32 * 1_024 * 1_024
     }
 
-    func cachedArtwork(for url: URL) -> ChannelLogoArtwork? {
-        let key = Self.cacheKey(for: url)
-        if let artwork = memoryArtwork(forKey: key) {
+    fileprivate func loadArtworkFromDisk(
+        for url: URL,
+        kind: CachedArtworkKind
+    ) -> ChannelLogoArtwork? {
+        let resourceKey = Self.cacheKey(for: url)
+        let memoryKey = Self.memoryKey(resourceKey: resourceKey, kind: kind)
+        if let artwork = memoryArtwork(forKey: memoryKey) {
             return artwork
         }
 
-        // Avoid synchronous filesystem work on every SwiftUI body evaluation.
-        lock.lock()
-        let hasCheckedDisk = checkedDiskKeys.contains(key)
-        if !hasCheckedDisk { checkedDiskKeys.insert(key) }
-        lock.unlock()
-        guard !hasCheckedDisk, let fileURL = fileURL(for: key),
+        guard let fileURL = fileURL(for: resourceKey),
               let data = try? Data(contentsOf: fileURL),
-              let artwork = Self.decode(data)
+              let artwork = Self.decode(data, kind: kind)
         else { return nil }
 
-        storeInMemory(artwork, dataCost: data.count, key: key)
+        storeInMemory(artwork, dataCost: data.count, key: memoryKey)
         return artwork
     }
 
-    /// Memory-only lookup for scrolling surfaces. Unlike `cachedArtwork`,
-    /// this never reads or decodes a file synchronously on the caller.
-    func memoryArtwork(for url: URL) -> ChannelLogoArtwork? {
-        memoryArtwork(forKey: Self.cacheKey(for: url))
+    /// Safe to call from view construction and other latency-sensitive paths.
+    /// This never reads or decodes a file synchronously on the caller.
+    func memoryArtwork(
+        for url: URL,
+        kind: CachedArtworkKind = .channelLogo
+    ) -> ChannelLogoArtwork? {
+        let resourceKey = Self.cacheKey(for: url)
+        return memoryArtwork(forKey: Self.memoryKey(resourceKey: resourceKey, kind: kind))
     }
 
     @discardableResult
-    func store(data: Data, for url: URL) -> ChannelLogoArtwork? {
-        guard let artwork = Self.decode(data) else { return nil }
-        let key = Self.cacheKey(for: url)
-        storeInMemory(artwork, dataCost: data.count, key: key)
+    func store(
+        data: Data,
+        for url: URL,
+        kind: CachedArtworkKind = .channelLogo
+    ) -> ChannelLogoArtwork? {
+        guard let artwork = Self.decode(data, kind: kind) else { return nil }
+        let resourceKey = Self.cacheKey(for: url)
+        let memoryKey = Self.memoryKey(resourceKey: resourceKey, kind: kind)
+        storeInMemory(artwork, dataCost: data.count, key: memoryKey)
 
-        lock.lock()
-        checkedDiskKeys.insert(key)
-        lock.unlock()
-
-        if let fileURL = fileURL(for: key) {
+        if let fileURL = fileURL(for: resourceKey) {
             Task.detached(priority: .utility) {
                 do {
                     try FileManager.default.createDirectory(
@@ -220,6 +236,13 @@ final class ChannelLogoImageCache: @unchecked Sendable {
         let canonicalURL = canonicalResourceIdentifier(for: url)
         let digest = SHA256.hash(data: Data(canonicalURL.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func memoryKey(
+        resourceKey: String,
+        kind: CachedArtworkKind
+    ) -> String {
+        "\(kind.rawValue):\(resourceKey)"
     }
 
     private static func canonicalResourceIdentifier(for url: URL) -> String {
@@ -262,12 +285,47 @@ final class ChannelLogoImageCache: @unchecked Sendable {
         memory.object(forKey: key as NSString)?.artwork
     }
 
-    private static func decode(_ data: Data) -> ChannelLogoArtwork? {
-        guard let image = PlatformImage(data: data) else { return nil }
+    private static func decode(
+        _ data: Data,
+        kind: CachedArtworkKind
+    ) -> ChannelLogoArtwork? {
+        guard let image = image(from: data, kind: kind) else { return nil }
         return ChannelLogoArtwork(
             image: image,
-            backgroundTone: image.channelLogoCGImage.flatMap(ChannelLogoContrast.backgroundTone)
+            backgroundTone: kind == .channelLogo
+                ? image.channelLogoCGImage.flatMap(ChannelLogoContrast.backgroundTone)
+                : nil
         )
+    }
+
+    private static func image(
+        from data: Data,
+        kind: CachedArtworkKind
+    ) -> PlatformImage? {
+        guard kind == .programmeArtwork else {
+            return PlatformImage(data: data)
+        }
+
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            return nil
+        }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1_280,
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(
+            source,
+            0,
+            options as CFDictionary
+        ) else { return nil }
+
+#if canImport(UIKit)
+        return PlatformImage(cgImage: image)
+#else
+        return PlatformImage(cgImage: image, size: .zero)
+#endif
     }
 }
 
@@ -280,6 +338,7 @@ actor ChannelLogoDataLoader {
     private struct Key: Hashable {
         let imageKey: String
         let configurationIdentifier: String
+        let kind: CachedArtworkKind
     }
 
     private var requestsByKey: [Key: Task<ChannelLogoArtwork, Error>] = [:]
@@ -288,15 +347,20 @@ actor ChannelLogoDataLoader {
 
     func artwork(
         at url: URL,
-        configuration: TVHeadendConfiguration
+        configuration: TVHeadendConfiguration,
+        kind: CachedArtworkKind = .channelLogo
     ) async throws -> ChannelLogoArtwork {
-        if let artwork = ChannelLogoImageCache.shared.cachedArtwork(for: url) {
+        if let artwork = ChannelLogoImageCache.shared.memoryArtwork(for: url, kind: kind) {
+            return artwork
+        }
+        if let artwork = ChannelLogoImageCache.shared.loadArtworkFromDisk(for: url, kind: kind) {
             return artwork
         }
 
         let key = Key(
             imageKey: ChannelLogoImageCache.cacheKey(for: url),
-            configurationIdentifier: configuration.guideSnapshotIdentifier
+            configurationIdentifier: configuration.guideSnapshotIdentifier,
+            kind: kind
         )
         if let request = requestsByKey[key] { return try await request.value }
 
@@ -310,7 +374,11 @@ actor ChannelLogoDataLoader {
         }
         let request = Task {
             let data = try await client.fetchChannelIcon(at: url)
-            guard let artwork = ChannelLogoImageCache.shared.store(data: data, for: url) else {
+            guard let artwork = ChannelLogoImageCache.shared.store(
+                data: data,
+                for: url,
+                kind: kind
+            ) else {
                 throw TVProviderError.invalidResponse
             }
             return artwork

@@ -1001,7 +1001,7 @@ private struct ProgrammeArtworkView: View {
     private var displayedArtwork: ChannelLogoArtwork? {
         if loadedKey == currentKey, let loadedArtwork { return loadedArtwork }
         guard let url else { return nil }
-        return ChannelLogoImageCache.shared.cachedArtwork(for: url)
+        return ChannelLogoImageCache.shared.memoryArtwork(for: url, kind: .programmeArtwork)
     }
 
     private var pausedPlayerFrame: PlatformImage? {
@@ -1119,7 +1119,10 @@ private struct ProgrammeArtworkView: View {
         }
 
         let key = ChannelLogoImageCache.cacheKey(for: url)
-        if let artwork = ChannelLogoImageCache.shared.cachedArtwork(for: url) {
+        if let artwork = ChannelLogoImageCache.shared.memoryArtwork(
+            for: url,
+            kind: .programmeArtwork
+        ) {
             loadedArtwork = artwork
             loadedKey = key
             return
@@ -1130,7 +1133,8 @@ private struct ProgrammeArtworkView: View {
         do {
             let artwork = try await ChannelLogoDataLoader.shared.artwork(
                 at: url,
-                configuration: settings.configuration
+                configuration: settings.configuration,
+                kind: .programmeArtwork
             )
             guard !Task.isCancelled else { return }
             loadedArtwork = artwork

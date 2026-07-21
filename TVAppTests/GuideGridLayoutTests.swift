@@ -1,6 +1,13 @@
 import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 import XCTest
 @testable import TVApp
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
 
 final class GuideGridLayoutTests: XCTestCase {
     func testChannelLogoCacheKeyDoesNotPersistCredentials() throws {
@@ -29,6 +36,24 @@ final class GuideGridLayoutTests: XCTestCase {
             ChannelLogoImageCache.cacheKey(for: first),
             ChannelLogoImageCache.cacheKey(for: otherVariant)
         )
+    }
+
+    func testProgrammeArtworkIsDownsampledWithoutLogoAnalysis() throws {
+        let cache = ChannelLogoImageCache(directoryURL: nil)
+        let url = try XCTUnwrap(URL(string: "https://example.test/programme/42.jpg"))
+        let data = try solidPNGData(width: 1_600, height: 900)
+
+        let artwork = try XCTUnwrap(cache.store(
+            data: data,
+            for: url,
+            kind: .programmeArtwork
+        ))
+
+        XCTAssertNil(artwork.backgroundTone)
+        let image = try XCTUnwrap(cgImage(for: artwork.image))
+        XCTAssertLessThanOrEqual(max(image.width, image.height), 1_280)
+        XCTAssertNotNil(cache.memoryArtwork(for: url, kind: .programmeArtwork))
+        XCTAssertNil(cache.memoryArtwork(for: url, kind: .channelLogo))
     }
 
     func testPlaybackFocusRestoresThePlayingChannelAndCurrentProgramme() throws {
@@ -603,4 +628,41 @@ final class GuideGridLayoutTests: XCTestCase {
             end: date.addingTimeInterval(10_800)
         )
     }
+}
+
+private func solidPNGData(width: Int, height: Int) throws -> Data {
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+    let context = try XCTUnwrap(CGContext(
+        data: nil,
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bytesPerRow: width * 4,
+        space: colorSpace,
+        bitmapInfo: bitmapInfo
+    ))
+    context.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 0.8, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+
+    let image = try XCTUnwrap(context.makeImage())
+    let data = NSMutableData()
+    let destination = try XCTUnwrap(CGImageDestinationCreateWithData(
+        data,
+        UTType.png.identifier as CFString,
+        1,
+        nil
+    ))
+    CGImageDestinationAddImage(destination, image, nil)
+    XCTAssertTrue(CGImageDestinationFinalize(destination))
+    return data as Data
+}
+
+private func cgImage(for image: PlatformImage) -> CGImage? {
+#if canImport(UIKit)
+    image.cgImage
+#else
+    var proposedRect = CGRect(origin: .zero, size: image.size)
+    return image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil)
+#endif
 }
