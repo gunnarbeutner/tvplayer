@@ -493,10 +493,10 @@ struct LivePlaybackPositionTracker {
         let observationInterval = lastOutputObservationDate.map {
             max(0, date.timeIntervalSince($0))
         } ?? 0
-        lastOutputObservationDate = date
         lastResumeOutput = output
 
         let outputAdvanced: Bool
+        let playbackProgress: TimeInterval?
         if let playbackTime = output.playbackTimeMilliseconds {
             if let highestPlaybackTimeMilliseconds {
                 if playbackTime < highestPlaybackTimeMilliseconds - 1_000 {
@@ -506,26 +506,37 @@ struct LivePlaybackPositionTracker {
                     return false
                 }
                 outputAdvanced = playbackTime > highestPlaybackTimeMilliseconds
+                playbackProgress = outputAdvanced
+                    ? TimeInterval(playbackTime - highestPlaybackTimeMilliseconds) / 1_000
+                    : nil
                 self.highestPlaybackTimeMilliseconds = max(
                     playbackTime,
                     highestPlaybackTimeMilliseconds
                 )
             } else {
                 highestPlaybackTimeMilliseconds = playbackTime
-                outputAdvanced = false
+                outputAdvanced = output.hasAdvanced(since: previous)
+                playbackProgress = nil
             }
         } else {
             outputAdvanced = output.hasAdvanced(since: previous)
+            playbackProgress = nil
         }
 
         guard outputAdvanced else { return false }
+        lastOutputObservationDate = date
         if awaitingPlaybackProgress {
             awaitingPlaybackProgress = false
         } else if let pausedDate {
-            // Advance only by time observed between two genuinely newer VLC
-            // presentation samples. This freezes the marker during stalls and
-            // ignores small backwards/forwards media-clock flaps.
-            self.pausedDate = pausedDate.addingTimeInterval(min(1, observationInterval))
+            // Prefer VLC's media-clock delta because that clock can update
+            // less frequently than this tracker is sampled. Advancing by only
+            // the most recent sampling interval made the programme timeline
+            // steadily fall behind during otherwise uninterrupted playback.
+            // The capped wall-clock interval remains a fallback for output
+            // pipelines which do not expose a usable media clock.
+            self.pausedDate = pausedDate.addingTimeInterval(
+                playbackProgress ?? min(1, observationInterval)
+            )
         }
         return true
     }

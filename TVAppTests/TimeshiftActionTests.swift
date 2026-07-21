@@ -558,6 +558,83 @@ final class TimeshiftActionTests: XCTestCase {
         )
     }
 
+    func testPlaybackMarkerUsesMediaClockDeltaWhenClockUpdatesLessOftenThanPolling() {
+        var tracker = LivePlaybackPositionTracker()
+        let start = Date(timeIntervalSinceReferenceDate: 10_000)
+        tracker.pause(at: start, liveDelay: 0, bufferStartedAt: nil)
+        tracker.requestResume(
+            from: PlaybackOutputCounters(
+                displayedPictures: 100,
+                playedAudioBuffers: 100,
+                playbackTimeMilliseconds: 10_000
+            )
+        )
+
+        // The first presented sample releases the resume anchor.
+        XCTAssertTrue(
+            tracker.observePlaybackOutput(
+                PlaybackOutputCounters(
+                    displayedPictures: 101,
+                    playedAudioBuffers: 101,
+                    playbackTimeMilliseconds: 10_500
+                ),
+                at: start.addingTimeInterval(0.5)
+            )
+        )
+
+        // VLC commonly publishes the same media time across consecutive UI
+        // polls. The idle poll must not discard half of the next clock delta.
+        XCTAssertFalse(
+            tracker.observePlaybackOutput(
+                PlaybackOutputCounters(
+                    displayedPictures: 102,
+                    playedAudioBuffers: 102,
+                    playbackTimeMilliseconds: 10_500
+                ),
+                at: start.addingTimeInterval(1)
+            )
+        )
+        XCTAssertTrue(
+            tracker.observePlaybackOutput(
+                PlaybackOutputCounters(
+                    displayedPictures: 103,
+                    playedAudioBuffers: 103,
+                    playbackTimeMilliseconds: 11_500
+                ),
+                at: start.addingTimeInterval(1.5)
+            )
+        )
+        XCTAssertFalse(
+            tracker.observePlaybackOutput(
+                PlaybackOutputCounters(
+                    displayedPictures: 104,
+                    playedAudioBuffers: 104,
+                    playbackTimeMilliseconds: 11_500
+                ),
+                at: start.addingTimeInterval(2)
+            )
+        )
+        XCTAssertTrue(
+            tracker.observePlaybackOutput(
+                PlaybackOutputCounters(
+                    displayedPictures: 105,
+                    playedAudioBuffers: 105,
+                    playbackTimeMilliseconds: 12_500
+                ),
+                at: start.addingTimeInterval(2.5)
+            )
+        )
+
+        XCTAssertEqual(
+            tracker.playbackDate(
+                at: start.addingTimeInterval(2.5),
+                liveDelay: 0,
+                bufferStartedAt: nil
+            ),
+            start.addingTimeInterval(2)
+        )
+    }
+
     func testResumeRequestKeepsMarkerAnchoredUntilOutputAdvances() {
         var tracker = LivePlaybackPositionTracker()
         let pauseTime = Date(timeIntervalSinceReferenceDate: 10_000)
