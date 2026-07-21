@@ -1348,9 +1348,9 @@ private struct PlayerTabbedOverlay: View {
 
     private var playbackSettings: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                if !presentation.isRecording {
-                    playbackSettingCard(
+            VStack(alignment: .leading, spacing: 0) {
+                if !presentation.isRecording, profiles.count > 1 {
+                    playbackSettingsRow(
                         title: "Stream quality",
                         systemImage: "sparkles.tv"
                     ) {
@@ -1366,98 +1366,65 @@ private struct PlayerTabbedOverlay: View {
                                     selected: engine.activeProfile == profile.name
                                 ) { selectProfile(profile) }
                             }
-                            if profiles.isEmpty {
-                                unavailable("\(engine.activeProfile) · Direct stream")
-                            }
                         }
+                    }
+                    playbackSettingsDivider
+                }
+
+                playbackSettingsRow(
+                    title: "Audio",
+                    systemImage: "speaker.wave.2.fill"
+                ) {
+                    trackChoices(
+                        tracks: engine.audioTracks,
+                        selectedTrackID: engine.selectedAudioTrackID,
+                        emptyMessage: "No audio streams reported yet",
+                        selectTrack: engine.selectAudioTrack
+                    )
+                }
+                if selectedTrackIsEnabled(
+                    tracks: engine.audioTracks,
+                    selectedTrackID: engine.selectedAudioTrackID
+                ) {
+                    playbackSettingsDivider
+                    playbackSettingsRow(title: "Audio sync", systemImage: "waveform") {
+                        delayButtons(
+                            value: engine.audioDelayMilliseconds,
+                            change: engine.adjustAudioDelay
+                        )
                     }
                 }
 
-                VStack(alignment: .leading, spacing: 18) {
-                    audioSettingsCard
-                    subtitleSettingsCard
+                playbackSettingsDivider
+                playbackSettingsRow(
+                    title: "Subtitles",
+                    systemImage: "captions.bubble.fill"
+                ) {
+                    trackChoices(
+                        tracks: engine.subtitleTracks,
+                        selectedTrackID: engine.selectedSubtitleTrackID,
+                        emptyMessage: "No subtitles available",
+                        selectTrack: engine.selectSubtitleTrack
+                    )
+                }
+                if selectedTrackIsEnabled(
+                    tracks: engine.subtitleTracks,
+                    selectedTrackID: engine.selectedSubtitleTrackID
+                ) {
+                    playbackSettingsDivider
+                    playbackSettingsRow(title: "Subtitle sync", systemImage: "waveform") {
+                        delayButtons(
+                            value: engine.subtitleDelayMilliseconds,
+                            change: engine.adjustSubtitleDelay
+                        )
+                    }
                 }
             }
+            .frame(maxWidth: usesCompactLayout ? .infinity : 1_360, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
             .padding(.bottom, 8)
         }
         .scrollIndicators(.hidden)
-    }
-
-    private var audioSettingsCard: some View {
-        playbackSettingCard(
-            title: "Audio",
-            systemImage: "speaker.wave.2.fill"
-        ) {
-            trackAndDelayLayout(
-                tracks: engine.audioTracks,
-                selectedTrackID: engine.selectedAudioTrackID,
-                emptyMessage: "No audio streams reported yet",
-                selectTrack: engine.selectAudioTrack,
-                delayValue: engine.audioDelayMilliseconds,
-                adjustDelay: engine.adjustAudioDelay
-            )
-        }
-    }
-
-    private var subtitleSettingsCard: some View {
-        playbackSettingCard(
-            title: "Subtitles",
-            systemImage: "captions.bubble.fill"
-        ) {
-            trackAndDelayLayout(
-                tracks: engine.subtitleTracks,
-                selectedTrackID: engine.selectedSubtitleTrackID,
-                emptyMessage: "No subtitle streams",
-                selectTrack: engine.selectSubtitleTrack,
-                delayValue: engine.subtitleDelayMilliseconds,
-                adjustDelay: engine.adjustSubtitleDelay
-            )
-        }
-    }
-
-    @ViewBuilder
-    private func trackAndDelayLayout(
-        tracks: [PlaybackTrack],
-        selectedTrackID: Int?,
-        emptyMessage: String,
-        selectTrack: @escaping (Int) -> Void,
-        delayValue: Int,
-        adjustDelay: @escaping (Int) -> Void
-    ) -> some View {
-        if usesCompactLayout {
-            VStack(alignment: .leading, spacing: 16) {
-                trackChoices(
-                    tracks: tracks,
-                    selectedTrackID: selectedTrackID,
-                    emptyMessage: emptyMessage,
-                    selectTrack: selectTrack
-                )
-                Divider().overlay(.white.opacity(0.12))
-                compactDelayControl(
-                    title: "Synchronization",
-                    value: delayValue,
-                    change: adjustDelay
-                )
-            }
-        } else {
-            HStack(alignment: .bottom, spacing: 22) {
-                trackChoices(
-                    tracks: tracks,
-                    selectedTrackID: selectedTrackID,
-                    emptyMessage: emptyMessage,
-                    selectTrack: selectTrack
-                )
-                Divider()
-                    .overlay(.white.opacity(0.12))
-                    .frame(height: 68)
-                compactDelayControl(
-                    title: "Synchronization",
-                    value: delayValue,
-                    change: adjustDelay
-                )
-                .fixedSize(horizontal: true, vertical: false)
-            }
-        }
     }
 
     private func trackChoices(
@@ -1466,12 +1433,15 @@ private struct PlayerTabbedOverlay: View {
         emptyMessage: String,
         selectTrack: @escaping (Int) -> Void
     ) -> some View {
-        LazyVGrid(
+        let orderedTracks = tracks.filter { !isDisabledTrack($0) }
+            + tracks.filter(isDisabledTrack)
+
+        return LazyVGrid(
             columns: [
                 GridItem(
                     .adaptive(
-                        minimum: usesCompactLayout ? 210 : 340,
-                        maximum: usesCompactLayout ? 340 : 560
+                        minimum: usesCompactLayout ? 190 : 250,
+                        maximum: usesCompactLayout ? 320 : 300
                     ),
                     spacing: 12
                 )
@@ -1479,10 +1449,11 @@ private struct PlayerTabbedOverlay: View {
             alignment: .leading,
             spacing: 12
         ) {
-            ForEach(tracks) { track in
+            ForEach(orderedTracks) { track in
+                let labels = trackLabels(track)
                 choiceButton(
-                    title: track.name,
-                    subtitle: nil,
+                    title: labels.title,
+                    subtitle: labels.subtitle,
                     selected: selectedTrackID == track.id
                 ) {
                     selectTrack(track.id)
@@ -1494,6 +1465,36 @@ private struct PlayerTabbedOverlay: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func isDisabledTrack(_ track: PlaybackTrack) -> Bool {
+        track.id < 0 || track.name.localizedCaseInsensitiveContains("disable")
+    }
+
+    private func selectedTrackIsEnabled(
+        tracks: [PlaybackTrack],
+        selectedTrackID: Int?
+    ) -> Bool {
+        guard let selectedTrackID,
+              let track = tracks.first(where: { $0.id == selectedTrackID })
+        else { return false }
+        return !isDisabledTrack(track)
+    }
+
+    private func trackLabels(_ track: PlaybackTrack) -> (title: String, subtitle: String?) {
+        guard !isDisabledTrack(track) else { return ("Off", nil) }
+
+        let separator = " - ["
+        guard let separatorRange = track.name.range(of: separator),
+              track.name.hasSuffix("]")
+        else { return (track.name, nil) }
+
+        let trackName = String(track.name[..<separatorRange.lowerBound])
+        let valueStart = separatorRange.upperBound
+        let valueEnd = track.name.index(before: track.name.endIndex)
+        let rawValue = String(track.name[valueStart..<valueEnd])
+        let displayValue = rawValue.count <= 3 ? rawValue.uppercased() : rawValue
+        return (displayValue, trackName)
     }
 
     private var technicalDetails: some View {
@@ -1542,24 +1543,38 @@ private struct PlayerTabbedOverlay: View {
         .scrollIndicators(.hidden)
     }
 
-    private func playbackSettingCard<Content: View>(
+    @ViewBuilder
+    private func playbackSettingsRow<Content: View>(
         title: String,
         systemImage: String,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        VStack(alignment: .leading, spacing: 15) {
-            Label(title, systemImage: systemImage)
-                .font(.headline.weight(.semibold))
-                .foregroundStyle(.white)
-            content()
+        if usesCompactLayout {
+            VStack(alignment: .leading, spacing: 12) {
+                playbackSettingsLabel(title: title, systemImage: systemImage)
+                content()
+            }
+            .padding(.vertical, 14)
+        } else {
+            HStack(alignment: .top, spacing: 34) {
+                playbackSettingsLabel(title: title, systemImage: systemImage)
+                    .frame(width: 210, alignment: .leading)
+                content()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.vertical, 18)
         }
-        .padding(usesCompactLayout ? 14 : 18)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(Color.white.opacity(0.065), in: RoundedRectangle(cornerRadius: 14))
-        .overlay {
-            RoundedRectangle(cornerRadius: 14)
-                .strokeBorder(.white.opacity(0.08), lineWidth: 1)
-        }
+    }
+
+    private func playbackSettingsLabel(title: String, systemImage: String) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.headline.weight(.semibold))
+            .foregroundStyle(.white.opacity(0.86))
+            .padding(.top, 10)
+    }
+
+    private var playbackSettingsDivider: some View {
+        Divider().overlay(.white.opacity(0.12))
     }
 
     private func choiceButton(
@@ -1581,31 +1596,6 @@ private struct PlayerTabbedOverlay: View {
             .font(.headline)
             .foregroundStyle(.white.opacity(0.62))
             .padding(.vertical, 12)
-    }
-
-    private func compactDelayControl(
-        title: String,
-        value: Int,
-        change: @escaping (Int) -> Void
-    ) -> some View {
-        Group {
-            if usesCompactLayout && !usesCompactHeight {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(AppTheme.secondaryText)
-                    delayButtons(value: value, change: change)
-                }
-            } else {
-                HStack(spacing: 12) {
-                    Text(title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(AppTheme.secondaryText)
-                    Spacer(minLength: 10)
-                    delayButtons(value: value, change: change)
-                }
-            }
-        }
     }
 
     private func delayButtons(value: Int, change: @escaping (Int) -> Void) -> some View {
@@ -1652,11 +1642,22 @@ private struct PlayerChoiceButton: View {
         .foregroundStyle(.white)
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
-        .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
         .background(
-            selected || isFocused ? AppTheme.focused : Color.white.opacity(0.1),
+            isFocused
+                ? AppTheme.focused
+                : Color.white.opacity(selected ? 0.16 : 0.08),
             in: RoundedRectangle(cornerRadius: 10)
         )
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(
+                    isFocused
+                        ? AppTheme.focusBorder
+                        : (selected ? AppTheme.accent.opacity(0.85) : Color.white.opacity(0.08)),
+                    lineWidth: isFocused ? 3 : (selected ? 2 : 1)
+                )
+        }
         .contentShape(RoundedRectangle(cornerRadius: 10))
         .focusable()
         .focused($isFocused)
