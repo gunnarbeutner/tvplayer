@@ -103,6 +103,9 @@ protocol PlaybackEngine: AnyObject {
 
 @MainActor
 final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @preconcurrency VLCMediaPlayerDelegate {
+    // Match TVHeadend's 400% post-seek prebuffer rate. Faster local draining
+    // can outrun the replacement stream and destabilize VLC.
+    private static let postSeekDrainRate: Float = 4
     private let logger = Logger(subsystem: "de.beutner.TVPlayer", category: "Playback")
     @Published private(set) var state: PlaybackState = .idle
     @Published private(set) var elapsedSeconds: TimeInterval = 0
@@ -985,10 +988,15 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         let waitsForPlaybackProgress = livePlaybackPosition.requestResume(
             from: playbackOutputCounters
         )
-        mediaPlayer.rate = 1
+        // VLC may still have many seconds of pre-seek transport data queued
+        // ahead of the discontinuity marker. Drain it quickly while output is
+        // hidden and muted, then restore normal rate when the new epoch is
+        // ready to reveal.
+        let drainsQueuedOutput = postSeekOutputGate.isArmed
         playbackRate = 1
         beginPostSeekOutputConcealmentIfNeeded()
         mediaPlayer.play()
+        mediaPlayer.rate = drainsQueuedOutput ? Self.postSeekDrainRate : 1
         setState(waitsForPlaybackProgress ? .preparing : (hasStartedPlayback ? .playing : .preparing))
         lastMetricsUpdate = Date()
     }
@@ -1026,6 +1034,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 
     private func beginPostSeekOutputConcealmentIfNeeded() {
         guard postSeekOutputGate.beginConcealing(from: playbackOutputCounters) else { return }
+        concealPlaybackOutput()
+    }
+
+    private func concealPlaybackOutput() {
         guard !isPlaybackOutputConcealed else { return }
 
         isPlaybackOutputConcealed = true
@@ -1052,6 +1064,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 
     private func revealPostSeekPlaybackOutput() {
+        if mediaPlayer.rate != 1 {
+            mediaPlayer.rate = 1
+        }
         if isPlaybackOutputConcealed { isPlaybackOutputConcealed = false }
         if shouldRestoreAudioAfterOutputGate {
             mediaPlayer.audio?.isMuted = false
@@ -1108,6 +1123,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         case .pauseUntilNavigationCompletes:
             cancelPostSeekOutputGate()
             postSeekOutputGate.arm(from: playbackOutputCounters)
+            if postSeekOutputGate.concealImmediately() {
+                concealPlaybackOutput()
+            }
             anchorLivePlaybackPositionIfNeeded()
             publishLivePlaybackMarker()
             pauseRequested = true

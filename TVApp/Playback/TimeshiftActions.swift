@@ -180,12 +180,9 @@ struct PlaybackOutputCounters: Equatable {
 /// pictures and audio while paused; those samples must not become visible when
 /// playback is resumed after moving within the timeshift buffer.
 struct PostSeekPlaybackOutputGate {
-    private static let fallbackPlaybackProgressMilliseconds: Int64 = 500
-    private static let fallbackVideoPictures = 3
-    private static let fallbackAudioBuffers = 12
-
     private(set) var isArmed = false
     private(set) var isConcealing = false
+    private var isEvaluatingFreshOutput = false
     private var baselineDiscontinuities = 0
     private var minimumPlaybackProgressMilliseconds: Int64 = 0
     private var outputAtConcealment: PlaybackOutputCounters?
@@ -194,6 +191,7 @@ struct PostSeekPlaybackOutputGate {
     mutating func arm(from output: PlaybackOutputCounters) {
         isArmed = true
         isConcealing = false
+        isEvaluatingFreshOutput = false
         baselineDiscontinuities = output.demuxDiscontinuities
         outputAtConcealment = nil
         outputAfterDiscontinuity = nil
@@ -206,9 +204,18 @@ struct PostSeekPlaybackOutputGate {
     }
 
     @discardableResult
+    mutating func concealImmediately() -> Bool {
+        guard isArmed else { return false }
+        let startedConcealing = !isConcealing
+        isConcealing = true
+        return startedConcealing
+    }
+
+    @discardableResult
     mutating func beginConcealing(from output: PlaybackOutputCounters) -> Bool {
         guard isArmed else { return false }
         isConcealing = true
+        isEvaluatingFreshOutput = true
         outputAtConcealment = output
         if hasObservedDiscontinuity(in: output) {
             // The demuxer may consume the marker while VLC is paused. In that
@@ -220,26 +227,18 @@ struct PostSeekPlaybackOutputGate {
 
     /// Returns true once output can safely be revealed.
     mutating func observe(_ output: PlaybackOutputCounters) -> Bool {
-        guard isArmed else { return false }
+        guard isArmed, isEvaluatingFreshOutput else { return false }
 
         if output.demuxDiscontinuities < baselineDiscontinuities {
             // VLC statistics restart if the media pipeline is recreated.
             baselineDiscontinuities = 0
             outputAfterDiscontinuity = nil
         }
-        guard hasObservedDiscontinuity(in: output) else {
-            guard isConcealing,
-                  hasSustainedPlaybackProgressWithoutDiscontinuity(in: output)
-            else { return false }
-
-            // VLC does not reliably increment the demux discontinuity
-            // statistic for every marker in a long-running transport stream.
-            // Navigation has already completed before concealment begins, so
-            // sustained clock and presentation progress after local resume is
-            // a safe fallback signal that its queued pre-seek output is gone.
-            reset()
-            return true
-        }
+        // Counter/clock progress alone is unsafe here: VLC can drain many
+        // seconds of queued pre-seek media before it consumes our transport
+        // discontinuity. Keep that stale output hidden until the demuxer has
+        // explicitly crossed into the new epoch.
+        guard hasObservedDiscontinuity(in: output) else { return false }
 
         guard let outputAfterDiscontinuity else {
             self.outputAfterDiscontinuity = output
@@ -274,26 +273,6 @@ struct PostSeekPlaybackOutputGate {
         output.demuxDiscontinuities > baselineDiscontinuities
     }
 
-    private func hasSustainedPlaybackProgressWithoutDiscontinuity(
-        in output: PlaybackOutputCounters
-    ) -> Bool {
-        guard let baseline = outputAtConcealment,
-              let baselineTime = baseline.playbackTimeMilliseconds,
-              let outputTime = output.playbackTimeMilliseconds,
-              abs(outputTime - baselineTime) >= max(
-                  Self.fallbackPlaybackProgressMilliseconds,
-                  minimumPlaybackProgressMilliseconds
-              )
-        else { return false }
-
-        if baseline.displayedPictures > 0 {
-            return output.displayedPictures - baseline.displayedPictures
-                >= Self.fallbackVideoPictures
-        }
-        return output.playedAudioBuffers - baseline.playedAudioBuffers
-            >= Self.fallbackAudioBuffers
-    }
-
     private func hasReachedMinimumPlaybackProgress(
         in output: PlaybackOutputCounters
     ) -> Bool {
@@ -307,6 +286,7 @@ struct PostSeekPlaybackOutputGate {
     private mutating func reset() {
         isArmed = false
         isConcealing = false
+        isEvaluatingFreshOutput = false
         baselineDiscontinuities = 0
         minimumPlaybackProgressMilliseconds = 0
         outputAtConcealment = nil

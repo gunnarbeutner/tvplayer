@@ -1030,7 +1030,7 @@ final class TimeshiftActionTests: XCTestCase {
         )
     }
 
-    func testPostSeekOutputGateFallsBackToSustainedVideoProgress() {
+    func testPostSeekOutputGateDoesNotRevealQueuedVideoWithoutDiscontinuity() {
         var gate = PostSeekPlaybackOutputGate()
         let beforeResume = PlaybackOutputCounters(
             displayedPictures: 100,
@@ -1051,7 +1051,7 @@ final class TimeshiftActionTests: XCTestCase {
                 )
             )
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             gate.observe(
                 PlaybackOutputCounters(
                     displayedPictures: 103,
@@ -1061,10 +1061,10 @@ final class TimeshiftActionTests: XCTestCase {
                 )
             )
         )
-        XCTAssertFalse(gate.isConcealing)
+        XCTAssertTrue(gate.isConcealing)
     }
 
-    func testPostSeekOutputGateFallsBackToSustainedAudioOnlyProgress() {
+    func testPostSeekOutputGateDoesNotRevealQueuedAudioWithoutDiscontinuity() {
         var gate = PostSeekPlaybackOutputGate()
         let beforeResume = PlaybackOutputCounters(
             displayedPictures: 0,
@@ -1075,7 +1075,7 @@ final class TimeshiftActionTests: XCTestCase {
         gate.arm(from: beforeResume)
         XCTAssertTrue(gate.beginConcealing(from: beforeResume))
 
-        XCTAssertTrue(
+        XCTAssertFalse(
             gate.observe(
                 PlaybackOutputCounters(
                     displayedPictures: 0,
@@ -1085,7 +1085,32 @@ final class TimeshiftActionTests: XCTestCase {
                 )
             )
         )
-        XCTAssertFalse(gate.isConcealing)
+        XCTAssertTrue(gate.isConcealing)
+    }
+
+    func testPostSeekOutputGateConcealsBeforeResumeWithoutEvaluatingQueuedOutput() {
+        var gate = PostSeekPlaybackOutputGate()
+        let beforeSeek = PlaybackOutputCounters(
+            displayedPictures: 20,
+            playedAudioBuffers: 30,
+            demuxDiscontinuities: 4,
+            playbackTimeMilliseconds: 10_000
+        )
+        gate.arm(from: beforeSeek)
+
+        XCTAssertTrue(gate.concealImmediately())
+        XCTAssertTrue(gate.isConcealing)
+        XCTAssertFalse(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 100,
+                    playedAudioBuffers: 200,
+                    demuxDiscontinuities: 5,
+                    playbackTimeMilliseconds: 20_000
+                )
+            )
+        )
+        XCTAssertTrue(gate.isConcealing)
     }
 
     func testPostSeekOutputGateConcealsKeyframePrerollUntilExactTarget() {
