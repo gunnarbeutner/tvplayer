@@ -13,6 +13,16 @@ struct HTSPStreamHealthSnapshot: Equatable, Sendable {
     let desiredSpeed: Int32
     let lastMuxPacketAt: Date?
     let expectsAudio: Bool
+    let videoPacketCount: Int64
+    let videoPayloadBytes: Int64
+    let firstVideoPacketAt: Date?
+    let lastVideoPacketAt: Date?
+    let audioPacketCount: Int64
+    let audioPayloadBytes: Int64
+    let firstAudioPacketAt: Date?
+    let lastAudioPacketAt: Date?
+    let audioStreamTypes: [String]
+    let transportStartup: MPEGTransportStreamStartupSnapshot
 }
 
 private enum HTSPStreamFailure: LocalizedError {
@@ -62,6 +72,14 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     private var currentBufferStart: Date?
     private var timelineEpoch: Date?
     private var lastMuxPacketAt: Date?
+    private var videoPacketCount: Int64 = 0
+    private var videoPayloadBytes: Int64 = 0
+    private var firstVideoPacketAt: Date?
+    private var lastVideoPacketAt: Date?
+    private var audioPacketCount: Int64 = 0
+    private var audioPayloadBytes: Int64 = 0
+    private var firstAudioPacketAt: Date?
+    private var lastAudioPacketAt: Date?
     private var subscriptionReadyAt = Date()
     private var recovering = false
     private var recoveryWaitsForVideoKeyframe = false
@@ -199,14 +217,30 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
     var healthSnapshot: HTSPStreamHealthSnapshot {
         let navigating = !deliveryGate.shouldDeliverPackets
-        let expectsAudio = processLock.withLock { muxer.hasAudio }
+        let streamInfo = processLock.withLock {
+            (
+                expectsAudio: muxer.hasAudio,
+                audioStreamTypes: muxer.audioStreamTypes,
+                transportStartup: muxer.startupSnapshot
+            )
+        }
         return condition.withLock {
             HTSPStreamHealthSnapshot(
                 isRecovering: recovering,
                 isNavigating: navigating || postSeekBuffer.result != nil,
                 desiredSpeed: desiredPlaybackSpeed,
                 lastMuxPacketAt: lastMuxPacketAt,
-                expectsAudio: expectsAudio
+                expectsAudio: streamInfo.expectsAudio,
+                videoPacketCount: videoPacketCount,
+                videoPayloadBytes: videoPayloadBytes,
+                firstVideoPacketAt: firstVideoPacketAt,
+                lastVideoPacketAt: lastVideoPacketAt,
+                audioPacketCount: audioPacketCount,
+                audioPayloadBytes: audioPayloadBytes,
+                firstAudioPacketAt: firstAudioPacketAt,
+                lastAudioPacketAt: lastAudioPacketAt,
+                audioStreamTypes: streamInfo.audioStreamTypes,
+                transportStartup: streamInfo.transportStartup
             )
         }
     }
@@ -386,7 +420,6 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
         switch message["method"]?.stringValue {
         case "muxpkt":
-            guard deliveryGate.shouldDeliverPackets else { return }
             guard let streamIndex = message["stream"]?.intValue,
                   let payload = message["payload"]?.dataValue
             else { throw HTSPCodecError.malformedMessage }
@@ -397,11 +430,31 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 decodeTime: message["dts"]?.intValue,
                 payload: payload
             )
-            let isVideo = processLock.withLock { muxer.isVideoStream(packet.streamIndex) }
+            let trackKind = processLock.withLock {
+                (
+                    isVideo: muxer.isVideoStream(packet.streamIndex),
+                    isAudio: muxer.isAudioStream(packet.streamIndex)
+                )
+            }
+            let receiptDate = Date()
+            condition.withLock {
+                lastMuxPacketAt = receiptDate
+                if trackKind.isVideo {
+                    videoPacketCount += 1
+                    videoPayloadBytes += Int64(payload.count)
+                    firstVideoPacketAt = firstVideoPacketAt ?? receiptDate
+                    lastVideoPacketAt = receiptDate
+                } else if trackKind.isAudio {
+                    audioPacketCount += 1
+                    audioPayloadBytes += Int64(payload.count)
+                    firstAudioPacketAt = firstAudioPacketAt ?? receiptDate
+                    lastAudioPacketAt = receiptDate
+                }
+            }
+            guard deliveryGate.shouldDeliverPackets else { return }
             let recoveryAcceptsPacket = condition.withLock {
-                lastMuxPacketAt = Date()
                 guard recovering, recoveryWaitsForVideoKeyframe else { return true }
-                guard isVideo, packet.frameType == Character("I").asciiValue else {
+                guard trackKind.isVideo, packet.frameType == Character("I").asciiValue else {
                     return false
                 }
                 recoveryWaitsForVideoKeyframe = false
@@ -410,7 +463,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             guard recoveryAcceptsPacket else { return }
             let acceptsPacket = condition.withLock {
                 postSeekBuffer.shouldAcceptPacket(
-                    isVideo: isVideo,
+                    isVideo: trackKind.isVideo,
                     frameType: packet.frameType
                 )
             }
@@ -1047,6 +1100,14 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             timelineEpoch = nil
             subscriptionReadyAt = Date()
             lastMuxPacketAt = nil
+            videoPacketCount = 0
+            videoPayloadBytes = 0
+            firstVideoPacketAt = nil
+            lastVideoPacketAt = nil
+            audioPacketCount = 0
+            audioPayloadBytes = 0
+            firstAudioPacketAt = nil
+            lastAudioPacketAt = nil
             recoveryWaitsForVideoKeyframe = replacementMuxer.hasVideo
             buffer.removeAll(keepingCapacity: true)
             readOffset = 0

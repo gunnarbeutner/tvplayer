@@ -91,6 +91,49 @@ final class HTSPTimeshiftTests: XCTestCase {
         XCTAssertEqual(resumed[2 * 188 + 5] & 0x80, 0x80)
     }
 
+    func testTransportMuxerReportsAudioTracksForDiagnostics() throws {
+        let muxer = try MPEGTransportStreamMuxer(
+            streams: [
+                HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil),
+                HTSPStreamInfo(index: 2, type: "AAC", language: "eng", metadata: nil),
+                HTSPStreamInfo(index: 3, type: "AC3", language: "deu", metadata: nil),
+            ]
+        )
+
+        XCTAssertEqual(muxer.audioStreamTypes, ["AAC", "AC3"])
+        XCTAssertFalse(muxer.isAudioStream(1))
+        XCTAssertTrue(muxer.isAudioStream(2))
+        XCTAssertTrue(muxer.isAudioStream(3))
+        XCTAssertFalse(muxer.isAudioStream(99))
+
+        _ = muxer.mux(
+            HTSPMuxPacket(
+                streamIndex: 2,
+                frameType: 0,
+                presentationTime: 1_000_000,
+                decodeTime: 1_000_000,
+                payload: Data([0xff, 0xf1, 0x50, 0x80])
+            )
+        )
+        _ = muxer.mux(
+            HTSPMuxPacket(
+                streamIndex: 1,
+                frameType: 0x49,
+                presentationTime: 1_040_000,
+                decodeTime: 1_040_000,
+                payload: Data([0, 0, 0, 1, 0x65])
+            )
+        )
+
+        let startup = muxer.startupSnapshot
+        XCTAssertTrue(startup.trackLayout.contains("101=AAC:eng"))
+        XCTAssertTrue(startup.packetOrder.hasPrefix("a101@0"))
+        XCTAssertEqual(startup.audioVideoTimestampDeltaMilliseconds, -40)
+        XCTAssertNotEqual(startup.patPrefix, "unseen")
+        XCTAssertNotEqual(startup.pmtPrefix, "unseen")
+        XCTAssertTrue(startup.audioPESPrefixes.contains("101:000001c0"))
+    }
+
     func testTransportMuxerMarksEveryElementaryPIDAfterASeek() throws {
         let muxer = try MPEGTransportStreamMuxer(
             streams: [

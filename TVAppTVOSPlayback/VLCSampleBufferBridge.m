@@ -1,10 +1,10 @@
 #import "VLCSampleBufferBridge.h"
-#import <TVVLCKit/TVVLCKit.h>
-#import <TVVLCKit/vlc/vlc.h>
+#import <VLCKit/VLCKit.h>
+#import <VLCKit/vlc/vlc.h>
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
 
-// TVVLCKit ships this bridge method with the framework. Keeping the declaration
+// VLCKit ships this bridge method with the framework. Keeping the declaration
 // here avoids importing its broad Internal header into Swift or app code.
 @interface VLCMediaPlayer (TVPlayerLibVLCBridge)
 @property (nonatomic, readonly) void *libVLCMediaPlayer;

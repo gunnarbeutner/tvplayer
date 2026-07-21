@@ -5,7 +5,11 @@ struct TVAppApp: App {
     var body: some Scene {
 #if os(macOS)
         WindowGroup {
-            if ProcessInfo.processInfo.arguments.contains("--vlc-timeshift-benchmark") {
+            if ProcessInfo.processInfo.arguments.contains("--vlc-tuning-benchmark") {
+                VLCTuningBenchmarkView()
+                    .preferredColorScheme(.dark)
+                    .frame(minWidth: 1_200, minHeight: 700)
+            } else if ProcessInfo.processInfo.arguments.contains("--vlc-timeshift-benchmark") {
                 VLCTimeshiftBenchmarkView()
                     .preferredColorScheme(.dark)
                     .frame(minWidth: 1_200, minHeight: 700)

@@ -8,6 +8,23 @@ struct HTSPMuxPacket: Sendable {
     let payload: Data
 }
 
+struct MPEGTransportStreamStartupSnapshot: Equatable, Sendable {
+    let trackLayout: String
+    let packetOrder: String
+    let audioVideoTimestampDeltaMilliseconds: Int64?
+    let patPrefix: String
+    let pmtPrefix: String
+    let audioStarts: String
+    let audioPESPrefixes: String
+
+    var summary: String {
+        let delta = audioVideoTimestampDeltaMilliseconds.map { "\($0)ms" } ?? "unknown"
+        return "layout=[\(trackLayout)] order=[\(packetOrder)] avPTS=\(delta) "
+            + "pat=\(patPrefix) pmt=\(pmtPrefix) audioStarts=[\(audioStarts)] "
+            + "audioPES=[\(audioPESPrefixes)]"
+    }
+}
+
 struct MPEGTimestampContinuity {
     static let epochGap: Int64 = 40_000
 
@@ -71,6 +88,16 @@ final class MPEGTransportStreamMuxer {
     private var pendingDiscontinuityPIDs: Set<UInt16> = []
     private var pendingDecoderFlushPIDs: Set<UInt16> = []
     private var timestampContinuity = MPEGTimestampContinuity()
+    private var startupTimestampAnchor: Int64?
+    private var startupPacketEvents: [String] = []
+    private var startupFirstVideoTimestamp: Int64?
+    private var startupFirstAudioTimestamp: Int64?
+    private var startupMuxInputCount = 0
+    private var startupFirstAudioOrdinals: [UInt16: Int] = [:]
+    private var startupFirstAudioTimestamps: [UInt16: Int64] = [:]
+    private var startupPATPrefix = "unseen"
+    private var startupPMTPrefix = "unseen"
+    private var startupAudioPESPrefixes: [UInt16: String] = [:]
     private let pmtPID: UInt16 = 0x1000
     private let pcrPID: UInt16
 
@@ -126,9 +153,56 @@ final class MPEGTransportStreamMuxer {
     var supportedTrackCount: Int { tracksByIndex.count }
     var hasVideo: Bool { tracksByIndex.values.contains(where: \.isVideo) }
     var hasAudio: Bool { tracksByIndex.values.contains(where: \.isAudio) }
+    var audioStreamTypes: [String] {
+        tracksByIndex.values
+            .filter(\.isAudio)
+            .map(\.info.type)
+            .sorted()
+    }
+    var startupSnapshot: MPEGTransportStreamStartupSnapshot {
+        let tracks = tracksByIndex.values.sorted { $0.pid < $1.pid }
+        let layout = tracks.map { track in
+            let language = track.info.language.map { ":\($0)" } ?? ""
+            return String(
+                format: "%03x=%@%@/st%02x/sid%02x",
+                track.pid,
+                track.info.type,
+                language,
+                track.streamType,
+                track.streamID
+            )
+        }.joined(separator: ",")
+        let audioPrefixes = startupAudioPESPrefixes
+            .sorted { $0.key < $1.key }
+            .map { String(format: "%03x:%@", $0.key, $0.value) }
+            .joined(separator: ",")
+        let audioStarts = tracks.filter(\.isAudio).map { track in
+            let ordinal = startupFirstAudioOrdinals[track.pid].map(String.init) ?? "?"
+            let delta = startupFirstAudioTimestamps[track.pid].flatMap { audio in
+                startupFirstVideoTimestamp.map { video in (audio - video) / 1_000 }
+            }.map(String.init) ?? "?"
+            return String(format: "%03x", track.pid) + "#\(ordinal)@\(delta)ms"
+        }.joined(separator: ",")
+        let timestampDelta = startupFirstVideoTimestamp.flatMap { video in
+            startupFirstAudioTimestamp.map { audio in (audio - video) / 1_000 }
+        }
+        return MPEGTransportStreamStartupSnapshot(
+            trackLayout: layout,
+            packetOrder: startupPacketEvents.joined(separator: ","),
+            audioVideoTimestampDeltaMilliseconds: timestampDelta,
+            patPrefix: startupPATPrefix,
+            pmtPrefix: startupPMTPrefix,
+            audioStarts: audioStarts,
+            audioPESPrefixes: audioPrefixes
+        )
+    }
 
     func isVideoStream(_ streamIndex: Int) -> Bool {
         tracksByIndex[streamIndex]?.isVideo == true
+    }
+
+    func isAudioStream(_ streamIndex: Int) -> Bool {
+        tracksByIndex[streamIndex]?.isAudio == true
     }
 
     func resetAfterDiscontinuity() {
@@ -177,6 +251,12 @@ final class MPEGTransportStreamMuxer {
             payload: payload,
             unboundedLength: track.isVideo
         )
+        recordStartup(
+            track: track,
+            packet: packet,
+            timestamp: dts ?? pts,
+            pes: pes
+        )
         let transportPackets = packetize(
             pes,
             pid: track.pid,
@@ -191,22 +271,70 @@ final class MPEGTransportStreamMuxer {
 
     func tables() -> Data {
         var result = Data()
-        result.append(
-            sectionPacket(
-                pid: 0,
-                section: Self.patSection(pmtPID: pmtPID),
-                discontinuity: consumeDiscontinuity(for: 0) != .none
-            )
+        let patSection = Self.patSection(pmtPID: pmtPID)
+        let pat = sectionPacket(
+            pid: 0,
+            section: patSection,
+            discontinuity: consumeDiscontinuity(for: 0) != .none
         )
+        result.append(pat)
         let tracks = tracksByIndex.values.sorted { $0.pid < $1.pid }
-        result.append(
-            sectionPacket(
-                pid: pmtPID,
-                section: Self.pmtSection(pcrPID: pcrPID, tracks: tracks),
-                discontinuity: consumeDiscontinuity(for: pmtPID) != .none
+        let pmtSection = Self.pmtSection(pcrPID: pcrPID, tracks: tracks)
+        let pmt = sectionPacket(
+            pid: pmtPID,
+            section: pmtSection,
+            discontinuity: consumeDiscontinuity(for: pmtPID) != .none
+        )
+        result.append(pmt)
+        if startupPATPrefix == "unseen" {
+            startupPATPrefix = Self.hexPrefix(patSection, count: patSection.count)
+            startupPMTPrefix = Self.hexPrefix(pmtSection, count: pmtSection.count)
+        }
+        return result
+    }
+
+    private func recordStartup(
+        track: Track,
+        packet: HTSPMuxPacket,
+        timestamp: Int64?,
+        pes: Data
+    ) {
+        startupMuxInputCount += 1
+        if startupTimestampAnchor == nil { startupTimestampAnchor = timestamp }
+        if track.isVideo {
+            startupFirstVideoTimestamp = startupFirstVideoTimestamp ?? timestamp
+        } else if track.isAudio {
+            startupFirstAudioTimestamp = startupFirstAudioTimestamp ?? timestamp
+            startupFirstAudioOrdinals[track.pid] = startupFirstAudioOrdinals[track.pid]
+                ?? startupMuxInputCount
+            if let timestamp {
+                startupFirstAudioTimestamps[track.pid] = startupFirstAudioTimestamps[track.pid]
+                    ?? timestamp
+            }
+            if startupAudioPESPrefixes[track.pid] == nil {
+                startupAudioPESPrefixes[track.pid] = Self.hexPrefix(pes, count: 32)
+            }
+        }
+        guard startupPacketEvents.count < 16 else { return }
+        let kind = track.isVideo ? "v" : (track.isAudio ? "a" : "o")
+        let delta = timestamp.flatMap { value in
+            startupTimestampAnchor.map { (value - $0) / 1_000 }
+        }
+        let timing = delta.map { "\($0)" } ?? "?"
+        startupPacketEvents.append(
+            String(
+                format: "%@%03x@%@/%c/%dB",
+                kind,
+                track.pid,
+                timing,
+                packet.frameType,
+                packet.payload.count
             )
         )
-        return result
+    }
+
+    private static func hexPrefix(_ data: Data, count: Int) -> String {
+        data.prefix(count).map { String(format: "%02x", $0) }.joined()
     }
 
     private func sectionPacket(pid: UInt16, section: Data, discontinuity: Bool) -> Data {

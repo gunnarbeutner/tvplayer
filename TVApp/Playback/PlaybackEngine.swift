@@ -1,14 +1,12 @@
 import Foundation
 import OSLog
 import SwiftUI
+@preconcurrency import VLCKit
 #if os(tvOS)
-@preconcurrency import TVVLCKit
 import UIKit
 #elseif os(iOS)
-@preconcurrency import MobileVLCKit
 import UIKit
 #elseif os(macOS)
-@preconcurrency import VLCKit
 import AppKit
 #endif
 
@@ -132,6 +130,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     @Published private(set) var pausedFrame: PlatformImage?
     @Published private(set) var timeshiftNavigationDebugState = "idle"
     @Published private(set) var nativeTimeshiftRecoveryCount = 0
+    @Published private(set) var lastNativePipelineDiagnostic: String?
 #if os(tvOS)
     @Published private(set) var isPictureInPictureReady = false
     @Published private(set) var usesSampleBufferRendering = false
@@ -164,12 +163,13 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private var pendingSnapshotURL: URL?
 
     override init() {
-        mediaPlayer = VLCMediaPlayer()
+        mediaPlayer = VLCMediaPlayer(library: VLCLibrary(options: ["--quiet"]))
 #if os(tvOS)
         sampleBufferBridge = TVPlayerSampleBufferBridge(mediaPlayer: mediaPlayer)
 #endif
         super.init()
         mediaPlayer.delegate = self
+        configureVideoSizing()
 #if os(tvOS)
         sampleBufferBridge.readinessChanged = { [weak self] ready in
             self?.isPictureInPictureReady = ready
@@ -259,7 +259,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                         stream.close()
                         throw CancellationError()
                     }
-                    media = VLCMedia(stream: stream)
+                    media = Self.makeMedia(stream: stream)
                     media.addOption(":demux=ts")
                     nativeInputStream = stream
                     nativeTimeshiftActions = NativeTimeshiftActionController(sink: stream)
@@ -275,15 +275,15 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                         throw CancellationError()
                     }
                     logger.error("Native timeshift unavailable; using live-only HTTP: \(error.localizedDescription, privacy: .public)")
-                    media = VLCMedia(url: request.url)
+                    media = Self.makeMedia(url: request.url)
                     activeLivePlaybackMode = .liveOnly(reason: error.localizedDescription)
                 }
             case let .liveOnly(reason):
-                media = VLCMedia(url: request.url)
+                media = Self.makeMedia(url: request.url)
                 activeLivePlaybackMode = .liveOnly(reason: reason)
             }
         case .recording:
-            media = VLCMedia(url: request.url)
+            media = Self.makeMedia(url: request.url)
         }
         guard activePreparationID == preparationID, !Task.isCancelled else {
             throw CancellationError()
@@ -389,6 +389,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 
     func stop() {
         activePreparationID = nil
+        lastNativePipelineDiagnostic = nil
         cancelPostSeekOutputGate()
         pipelineRecoveryTask?.cancel()
         pipelineRecoveryTask = nil
@@ -568,12 +569,12 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 
     func selectAudioTrack(_ id: Int) {
-        mediaPlayer.currentAudioTrackIndex = Int32(id)
+        mediaPlayer.selectTrack(at: id, type: .audio)
         selectedAudioTrackID = id
     }
 
     func selectSubtitleTrack(_ id: Int) {
-        mediaPlayer.currentVideoSubTitleIndex = Int32(id)
+        mediaPlayer.selectTrack(at: id, type: .text)
         selectedSubtitleTrackID = id
     }
 
@@ -700,12 +701,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         return false
     }
 
-    nonisolated func mediaPlayerStateChanged(_ notification: Notification) {
-        guard let player = notification.object as? VLCMediaPlayer else { return }
-        let rawState = player.state.rawValue
-
+    nonisolated func mediaPlayerStateChanged(_ newState: VLCMediaPlayerState) {
         Task { @MainActor [weak self] in
-            self?.applyPlayerState(rawState)
+            self?.applyPlayerState(newState.rawValue)
         }
     }
 
@@ -718,8 +716,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private func applyPlayerState(_ rawState: Int) {
         guard let playerState = VLCMediaPlayerState(rawValue: rawState) else { return }
         logger.info("VLC state changed: \(String(describing: playerState), privacy: .public)")
-        switch playerState {
-        case .opening, .buffering:
+        let isOpening = playerState == .opening
+        let isPlaying = playerState == .playing
+        let isStopped = playerState == .stopped || playerState == .stopping
+        if isOpening {
+            configureVideoSizing()
             if pauseRequested {
                 setState(.paused)
             } else if let recoveryReason {
@@ -729,7 +730,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             } else {
                 setState(hasStartedPlayback || mediaPlayer.hasVideoOut ? .playing : .preparing)
             }
-        case .playing, .esAdded:
+        } else if isPlaying {
+            configureVideoSizing()
             hasStartedPlayback = true
             if pauseRequested {
                 setState(.paused)
@@ -738,14 +740,14 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             } else {
                 setState(livePlaybackPosition.isAwaitingPlaybackProgress ? .preparing : .playing)
             }
-        case .paused:
+        } else if playerState == .paused {
             anchorLivePlaybackPositionIfNeeded()
             if let recoveryReason {
                 setState(.recovering(recoveryReason, attempt: recoveryAttempt))
             } else {
                 setState(.paused)
             }
-        case .error:
+        } else if playerState == .error {
             let detail = VLCLibrary.currentErrorMessage
             logger.error("VLC playback failed: \(detail ?? "No additional error was reported", privacy: .public)")
             if let streamError = nativeInputStream?.streamError {
@@ -759,14 +761,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             } else {
                 setState(.failed(detail ?? "VLC could not play this TVHeadend stream."))
             }
-        case .stopped, .ended:
-            guard recoveryReason == nil, pipelineRecoveryTask == nil else { break }
-            hasStartedPlayback = false
-            pauseRequested = false
-            livePlaybackPosition.reset()
-            setState(.idle)
-        default:
-            break
+        } else if isStopped, recoveryReason == nil, pipelineRecoveryTask == nil {
+                hasStartedPlayback = false
+                pauseRequested = false
+                livePlaybackPosition.reset()
+                setState(.idle)
         }
         refreshPlaybackInformation()
     }
@@ -818,6 +817,15 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                 self.handleNativeLifecycleEvent(event)
             }
         }
+    }
+
+    private func configureVideoSizing() {
+        // VLC 4 can retain an explicit 1:1 scale while replacing or rebinding
+        // its video output, leaving SD video at its decoded pixel dimensions.
+        // Zero restores drawable-relative scaling; the fit mode preserves the
+        // source aspect ratio while using the full available surface.
+        mediaPlayer.scaleFactor = 0
+        mediaPlayer.videoFitMode = .smaller
     }
 
     private func rememberNavigationPlaybackIntent() {
@@ -910,8 +918,14 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
               case .live(.nativeTimeshift) = request.kind
         else { return }
 
+        let diagnostic = nativePipelineDiagnostic(detail: detail)
+        lastNativePipelineDiagnostic = diagnostic
         nativeTimeshiftRecoveryCount += 1
-        logger.error("Restarting stalled VLC pipeline: \(detail, privacy: .public)")
+        logger.error("Restarting stalled VLC pipeline: \(diagnostic, privacy: .public)")
+#if DEBUG
+        print("PLAYBACK_AUDIO_DIAGNOSTIC \(diagnostic)")
+        fflush(stdout)
+#endif
         anchorLivePlaybackPositionIfNeeded()
         publishLivePlaybackMarker()
         recoveryReason = .player
@@ -941,6 +955,35 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         }
     }
 
+    private func nativePipelineDiagnostic(
+        detail: String,
+        at date: Date = Date()
+    ) -> String {
+        let output = playbackOutputCounters
+        guard let health = nativeInputStream?.healthSnapshot else {
+            return "\(detail) htsp=unavailable vlcPictures=\(output.displayedPictures) vlcAudioBuffers=\(output.playedAudioBuffers)"
+        }
+
+        func ageDescription(_ timestamp: Date?) -> String {
+            guard let timestamp else { return "never" }
+            return String(format: "%.3fs", max(0, date.timeIntervalSince(timestamp)))
+        }
+
+        let codecs = health.audioStreamTypes.isEmpty
+            ? "none"
+            : health.audioStreamTypes.joined(separator: ",")
+        return "\(detail) audioCodecs=\(codecs) "
+            + "htspVideoPackets=\(health.videoPacketCount) "
+            + "htspVideoBytes=\(health.videoPayloadBytes) "
+            + "lastHTSPVideo=\(ageDescription(health.lastVideoPacketAt)) "
+            + "htspAudioPackets=\(health.audioPacketCount) "
+            + "htspAudioBytes=\(health.audioPayloadBytes) "
+            + "lastHTSPAudio=\(ageDescription(health.lastAudioPacketAt)) "
+            + "vlcPictures=\(output.displayedPictures) "
+            + "vlcAudioBuffers=\(output.playedAudioBuffers) "
+            + "tsStartup={\(health.transportStartup.summary)}"
+    }
+
     private func rebuildNativePipeline(
         request: LiveStreamRequest,
         recoveryID: UUID
@@ -968,7 +1011,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                     return
                 }
 
-                let media = VLCMedia(stream: stream)
+                let media = Self.makeMedia(stream: stream)
                 media.addOption(":demux=ts")
                 addCachingOptions(to: media, milliseconds: request.networkCachingMilliseconds)
                 nativeInputStream = stream
@@ -1038,6 +1081,20 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             media.addOption(":no-avcodec-dr")
         }
 #endif
+    }
+
+    private static func makeMedia(stream: InputStream) -> VLCMedia {
+        guard let media = VLCMedia(stream: stream) else {
+            preconditionFailure("VLC 4 rejected the native input stream")
+        }
+        return media
+    }
+
+    private static func makeMedia(url: URL) -> VLCMedia {
+        guard let media = VLCMedia(url: url) else {
+            preconditionFailure("VLC 4 rejected the media URL")
+        }
+        return media
     }
 
 #if os(tvOS)
@@ -1297,20 +1354,22 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 
     private func refreshTracks() {
-        let audioNames = mediaPlayer.audioTrackNames.map { String(describing: $0) }
-        let audioIDs = mediaPlayer.audioTrackIndexes.compactMap { ($0 as? NSNumber)?.intValue }
-        let updatedAudioTracks = zip(audioIDs, audioNames).map(PlaybackTrack.init)
+        let vlcAudioTracks = mediaPlayer.audioTracks
+        let updatedAudioTracks = vlcAudioTracks.enumerated().map { index, track in
+            PlaybackTrack(id: index, name: track.trackName)
+        }
         if audioTracks != updatedAudioTracks { audioTracks = updatedAudioTracks }
-        let updatedAudioTrackID = Int(mediaPlayer.currentAudioTrackIndex)
+        let updatedAudioTrackID = vlcAudioTracks.firstIndex { $0.isSelected }
         if selectedAudioTrackID != updatedAudioTrackID {
             selectedAudioTrackID = updatedAudioTrackID
         }
 
-        let subtitleNames = mediaPlayer.videoSubTitlesNames.map { String(describing: $0) }
-        let subtitleIDs = mediaPlayer.videoSubTitlesIndexes.compactMap { ($0 as? NSNumber)?.intValue }
-        let updatedSubtitleTracks = zip(subtitleIDs, subtitleNames).map(PlaybackTrack.init)
+        let vlcSubtitleTracks = mediaPlayer.textTracks
+        let updatedSubtitleTracks = vlcSubtitleTracks.enumerated().map { index, track in
+            PlaybackTrack(id: index, name: track.trackName)
+        }
         if subtitleTracks != updatedSubtitleTracks { subtitleTracks = updatedSubtitleTracks }
-        let updatedSubtitleTrackID = Int(mediaPlayer.currentVideoSubTitleIndex)
+        let updatedSubtitleTrackID = vlcSubtitleTracks.firstIndex { $0.isSelected }
         if selectedSubtitleTrackID != updatedSubtitleTrackID {
             selectedSubtitleTrackID = updatedSubtitleTrackID
         }
@@ -1319,9 +1378,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private func refreshTechnicalDetails() {
         guard let media = mediaPlayer.media else { return }
 
-        let tracks = media.tracksInformation.compactMap { $0 as? [String: Any] }
-        let video = tracks.first { ($0[VLCMediaTracksInformationType] as? String) == VLCMediaTracksInformationTypeVideo }
-        let audio = tracks.first { ($0[VLCMediaTracksInformationType] as? String) == VLCMediaTracksInformationTypeAudio }
+        let tracks = media.tracksInformation
+        let video = tracks.first { $0.type == .video }
+        let audio = tracks.first { $0.type == .audio }
         let statistics = media.statistics
 
         let delivery: String
@@ -1340,15 +1399,19 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             PlaybackTechnicalDetail(label: "Player", value: "VLC"),
         ]
 
-        if let width = (video?[VLCMediaTracksInformationVideoWidth] as? NSNumber)?.intValue,
-           let height = (video?[VLCMediaTracksInformationVideoHeight] as? NSNumber)?.intValue,
-           width > 0, height > 0 {
-            details.append(PlaybackTechnicalDetail(label: "Resolution", value: "\(width) × \(height)"))
+        if let videoDetails = video?.video,
+           videoDetails.width > 0, videoDetails.height > 0 {
+            details.append(
+                PlaybackTechnicalDetail(
+                    label: "Resolution",
+                    value: "\(videoDetails.width) × \(videoDetails.height)"
+                )
+            )
         }
-        if let codec = codecName(from: video) {
+        if let codec = video.map({ $0.codecName() }), !codec.isEmpty {
             details.append(PlaybackTechnicalDetail(label: "Video", value: codec))
         }
-        if let codec = codecName(from: audio) {
+        if let codec = audio.map({ $0.codecName() }), !codec.isEmpty {
             details.append(PlaybackTechnicalDetail(label: "Audio", value: codec))
         }
         if statistics.inputBitrate > 0 {
@@ -1371,12 +1434,6 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         details.append(PlaybackTechnicalDetail(label: "Discontinuities", value: "\(statistics.demuxDiscontinuity)"))
 
         if technicalDetails != details { technicalDetails = details }
-    }
-
-    private func codecName(from track: [String: Any]?) -> String? {
-        guard let codecNumber = track?[VLCMediaTracksInformationCodec] as? NSNumber else { return nil }
-        let codec = VLCMedia.codecName(forFourCC: codecNumber.uint32Value, trackType: track?[VLCMediaTracksInformationType] as? String ?? "")
-        return codec.isEmpty ? nil : codec
     }
 
     private func resetPlaybackMetrics() {
@@ -1576,6 +1633,7 @@ private final class VLCVideoContainerView: UIView {
 
     func attachIfVisible(force: Bool = false) {
         guard window != nil, let mediaPlayer else { return }
+        configureVideoSizing(mediaPlayer)
         if !force, let current = mediaPlayer.drawable as? UIView, current === self { return }
 
         // VLC can retain the previous full-screen cover's UIView after that
@@ -1586,6 +1644,12 @@ private final class VLCVideoContainerView: UIView {
         // the nil/self transition through attachmentRevision.
         mediaPlayer.drawable = nil
         mediaPlayer.drawable = self
+        configureVideoSizing(mediaPlayer)
+    }
+
+    private func configureVideoSizing(_ mediaPlayer: VLCMediaPlayer) {
+        mediaPlayer.scaleFactor = 0
+        mediaPlayer.videoFitMode = .smaller
     }
 
     func detachIfOwned() {
@@ -1755,9 +1819,16 @@ private final class VLCVideoContainerView: NSView {
 
     private func attachIfVisible(force: Bool = false) {
         guard window != nil, let mediaPlayer else { return }
+        configureVideoSizing(mediaPlayer)
         if !force, let current = mediaPlayer.drawable as? NSView, current === self { return }
         mediaPlayer.drawable = nil
         mediaPlayer.drawable = self
+        configureVideoSizing(mediaPlayer)
+    }
+
+    private func configureVideoSizing(_ mediaPlayer: VLCMediaPlayer) {
+        mediaPlayer.scaleFactor = 0
+        mediaPlayer.videoFitMode = .smaller
     }
 
     func detachIfOwned() {

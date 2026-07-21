@@ -10,10 +10,26 @@ fi
 server_url="${1%/}"
 username="$2"
 simulator="${3:-booted}"
-app_path=".build/DerivedData/Build/Products/Debug-appletvsimulator/TVApp.app"
+app_path="${TVPLAYER_APP_PATH:-.build/DerivedData/Build/Products/Debug-appletvsimulator/TVApp.app}"
 
 if [[ ! -d "$app_path" ]]; then
   echo "Build the TVApp scheme before running this script." >&2
+  exit 1
+fi
+
+if ! codesign --verify --strict "$app_path"; then
+  echo "Refusing to install an unsigned or invalidly signed app: $app_path" >&2
+  exit 1
+fi
+
+executable_name="$(plutil -extract CFBundleExecutable raw "$app_path/Info.plist")"
+executable_path="$app_path/$executable_name"
+entitlement_strings_path="$(mktemp "${TMPDIR:-/tmp}/tvplayer-entitlements.XXXXXX")"
+trap 'rm -f "$entitlement_strings_path"' EXIT
+strings "$executable_path" >"$entitlement_strings_path"
+if ! grep -q 'keychain-access-groups' "$entitlement_strings_path" ||
+   ! grep -q 'runs-as-current-user-with-user-independent-keychain' "$entitlement_strings_path"; then
+  echo "Refusing to install an app without the simulated Keychain entitlements: $app_path" >&2
   exit 1
 fi
 

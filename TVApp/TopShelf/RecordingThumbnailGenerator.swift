@@ -1,7 +1,7 @@
 #if os(tvOS)
 import Foundation
 import TVServices
-@preconcurrency import TVVLCKit
+@preconcurrency import VLCKit
 import UIKit
 
 actor RecordingThumbnailGenerator {
@@ -99,7 +99,7 @@ actor RecordingThumbnailGenerator {
             .recordingStreamURL(recordingID: recording.id)
         else { return nil }
 
-        let media = VLCMedia(url: url)
+        guard let media = VLCMedia(url: url) else { return nil }
         let pointSize = TVTopShelfSectionedContent.imageSize(for: .hdtv)
         let outputSize = CGSize(
             width: max(1_216, pointSize.width * 2),

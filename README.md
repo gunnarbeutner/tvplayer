@@ -7,6 +7,8 @@ platform.
 
 ![TV Player guide on Apple TV](Artwork/tvos-guide.png)
 
+![TV Player on the Apple TV Home screen](Artwork/tvos-home.png)
+
 ## What TV Player offers
 
 ### Live TV and programme guide
