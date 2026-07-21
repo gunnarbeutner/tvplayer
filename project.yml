@@ -61,6 +61,7 @@ targets:
         NSLocalNetworkUsageDescription: TV Player discovers and connects to your TVHeadend server on the local network.
         NSBonjourServices:
           - _tvplayer._tcp
+          - _tvplayer-guide._tcp
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         UIApplicationSceneManifest:
@@ -118,6 +119,7 @@ targets:
         NSLocalNetworkUsageDescription: TV Player discovers and connects to your TVHeadend server on the local network.
         NSBonjourServices:
           - _tvplayer._tcp
+          - _tvplayer-guide._tcp
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         UIApplicationSceneManifest:
@@ -155,6 +157,7 @@ targets:
         NSLocalNetworkUsageDescription: TV Player discovers and connects to your TVHeadend server on the local network.
         NSBonjourServices:
           - _tvplayer._tcp
+          - _tvplayer-guide._tcp
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
     settings:
