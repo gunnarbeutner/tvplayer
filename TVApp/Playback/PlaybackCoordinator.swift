@@ -774,6 +774,10 @@ final class PlaybackCoordinator: ObservableObject {
         logger.notice(
             "Playback startup \(stage, privacy: .public) after \(milliseconds, privacy: .public) ms"
         )
+#if DEBUG
+        print("PLAYBACK_STARTUP \(id.uuidString) \(stage) \(milliseconds)ms")
+        fflush(stdout)
+#endif
     }
 
     private static func placeholderChannel(for recording: TVRecording) -> GuideChannel {
