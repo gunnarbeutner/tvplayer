@@ -5,6 +5,7 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
     private let configuration: TVHeadendConfiguration
     private let urlSessionConfiguration: URLSessionConfiguration
     private let serverCapabilitiesCache = TVHeadendServerCapabilitiesCache()
+    private let ticketedPlaylistCache = TVHeadendTicketedPlaylistCache()
     private lazy var session: URLSession = {
         let sessionConfiguration = urlSessionConfiguration.copy() as! URLSessionConfiguration
         sessionConfiguration.timeoutIntervalForRequest = 20
@@ -144,13 +145,19 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
     /// VLC can then open the stream without having to implement TVHeadend's
     /// Digest authentication flow itself.
     func canonicalLiveStreamURL(channelID: String, profile: String? = nil) async throws -> URL {
+        let selectedProfile = profile ?? configuration.streamProfile
         let playlistURL = try endpointURL(
             path: "/playlist/ticket/channels",
-            queryItems: [URLQueryItem(name: "profile", value: profile ?? configuration.streamProfile)]
+            queryItems: [URLQueryItem(name: "profile", value: selectedProfile)]
         )
-        let data = try await fetchData(at: playlistURL)
-        guard let playlist = String(data: data, encoding: .utf8),
-              let streamURL = Self.streamURL(for: channelID, in: playlist)
+        let streamURLs = try await ticketedPlaylistCache.streamURLs(for: selectedProfile) { [self] in
+            let data = try await fetchData(at: playlistURL)
+            guard let playlist = String(data: data, encoding: .utf8) else {
+                throw TVProviderError.invalidResponse
+            }
+            return Self.streamURLs(in: playlist)
+        }
+        guard let streamURL = streamURLs[channelID]
         else { throw TVProviderError.channelNotInPlaylist }
         return streamURL
     }
@@ -649,18 +656,22 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
         }
     }
 
-    private static func streamURL(for channelID: String, in playlist: String) -> URL? {
+    private static func streamURLs(in playlist: String) -> [String: URL] {
         var precedingChannelID: String?
+        var result: [String: URL] = [:]
 
         for rawLine in playlist.split(whereSeparator: \.isNewline) {
             let line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
             if line.hasPrefix("#EXTINF:") {
                 precedingChannelID = attribute(named: "tvg-id", in: line)
-            } else if !line.hasPrefix("#"), precedingChannelID == channelID {
-                return URL(string: line)
+            } else if !line.hasPrefix("#"),
+                      let channelID = precedingChannelID,
+                      let url = URL(string: line) {
+                result[channelID] = url
+                precedingChannelID = nil
             }
         }
-        return nil
+        return result
     }
 
     private static func firstMediaURL(in data: Data) -> URL? {
@@ -855,6 +866,42 @@ private actor TVHeadendServerCapabilitiesCache {
             return capabilities
         } catch {
             loadTask = nil
+            throw error
+        }
+    }
+}
+
+private actor TVHeadendTicketedPlaylistCache {
+    private struct Entry {
+        let streamURLs: [String: URL]
+        let loadedAt: Date
+    }
+
+    private static let lifetime: TimeInterval = 8
+    private var entriesByProfile: [String: Entry] = [:]
+    private var loadTasksByProfile: [String: Task<[String: URL], Error>] = [:]
+
+    func streamURLs(
+        for profile: String,
+        load: @escaping @Sendable () async throws -> [String: URL]
+    ) async throws -> [String: URL] {
+        if let entry = entriesByProfile[profile],
+           Date().timeIntervalSince(entry.loadedAt) < Self.lifetime {
+            return entry.streamURLs
+        }
+        if let task = loadTasksByProfile[profile] {
+            return try await task.value
+        }
+
+        let task = Task { try await load() }
+        loadTasksByProfile[profile] = task
+        do {
+            let streamURLs = try await task.value
+            entriesByProfile[profile] = Entry(streamURLs: streamURLs, loadedAt: Date())
+            loadTasksByProfile[profile] = nil
+            return streamURLs
+        } catch {
+            loadTasksByProfile[profile] = nil
             throw error
         }
     }

@@ -38,7 +38,7 @@ final class TVHeadendClientTests: XCTestCase {
             return XCTFail("Expected cached timeshift capability to select native playback")
         }
         XCTAssertEqual(PlaybackURLProtocol.requestCount(for: "/api/serverinfo"), 1)
-        XCTAssertEqual(PlaybackURLProtocol.requestCount(for: "/playlist/ticket/channels"), 2)
+        XCTAssertEqual(PlaybackURLProtocol.requestCount(for: "/playlist/ticket/channels"), 1)
     }
 
     @MainActor
