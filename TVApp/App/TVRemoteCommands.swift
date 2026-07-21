@@ -6,6 +6,11 @@ enum TVPageDirection: Int, Sendable {
     case down = 1
 }
 
+enum TVPlayerSeekDirection: Sendable {
+    case backward
+    case forward
+}
+
 extension Notification.Name {
     static let tvGuidePageCommand = Notification.Name("TVPlayer.GuidePageCommand")
     static let tvChannelsPageCommand = Notification.Name("TVPlayer.ChannelsPageCommand")
@@ -16,14 +21,16 @@ extension Notification.Name {
 enum TVRemoteCommandCenter {
     static var pageHandler: ((TVPageDirection) -> Bool)?
     static var playPauseHandler: (() -> Bool)?
+    static var seekHoldHandler: ((TVPlayerSeekDirection, Bool) -> Bool)?
 }
 
-/// Captures the dedicated Page Up/Down buttons before the focus engine turns
-/// them into geometry-dependent movement. Directional arrows remain entirely
-/// owned by SwiftUI/UIKit focus.
+/// Captures app-level remote commands before the focus engine turns them into
+/// geometry-dependent movement. Directional arrows are intercepted only while
+/// the player installs a seek-hold handler.
 @objc(TVPlayerApplication)
 final class TVPlayerApplication: UIApplication {
     private var consumedTypes: Set<Int> = []
+    private var consumedDirectionalTypes: Set<Int> = []
 
     override func sendEvent(_ event: UIEvent) {
         guard let pressesEvent = event as? UIPressesEvent else {
@@ -33,6 +40,23 @@ final class TVPlayerApplication: UIApplication {
 
         var shouldConsume = false
         for press in pressesEvent.allPresses {
+            if let direction = seekDirection(for: press) {
+                let rawType = press.type.rawValue
+                if press.phase == .began,
+                   !consumedDirectionalTypes.contains(rawType),
+                   TVRemoteCommandCenter.seekHoldHandler?(direction, true) == true {
+                    consumedDirectionalTypes.insert(rawType)
+                }
+                if consumedDirectionalTypes.contains(rawType) {
+                    shouldConsume = true
+                    if press.phase == .ended || press.phase == .cancelled {
+                        _ = TVRemoteCommandCenter.seekHoldHandler?(direction, false)
+                        consumedDirectionalTypes.remove(rawType)
+                    }
+                }
+                continue
+            }
+
             let direction: TVPageDirection?
             switch press.type {
             case .pageUp: direction = .up
@@ -53,6 +77,19 @@ final class TVPlayerApplication: UIApplication {
         }
 
         if !shouldConsume { super.sendEvent(event) }
+    }
+
+    private func seekDirection(for press: UIPress) -> TVPlayerSeekDirection? {
+        switch press.type {
+        case .leftArrow: return .backward
+        case .rightArrow: return .forward
+        default:
+            switch press.key?.keyCode {
+            case .keyboardLeftArrow: return .backward
+            case .keyboardRightArrow: return .forward
+            default: return nil
+            }
+        }
     }
 }
 #endif

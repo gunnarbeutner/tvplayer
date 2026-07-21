@@ -75,6 +75,7 @@ struct PlaybackView: View {
     @State private var hasStartedCurrentPresentation = false
     @State private var timelineSeekTargetDate: Date?
     @State private var timelineSeekCommitTask: Task<Void, Never>?
+    @State private var timelineSeekRepeatTask: Task<Void, Never>?
     @State private var isRefreshingGrowingRecording = false
     @State private var videoAttachmentRevision = 0
     @FocusState private var wakeSurfaceFocused: Bool
@@ -324,8 +325,17 @@ struct PlaybackView: View {
             guard !Task.isCancelled, chromeMode == .timeline, engine.state == .playing else { return }
             hideChrome()
         }
+#if os(tvOS)
+        .onAppear {
+            TVRemoteCommandCenter.seekHoldHandler = handleRemoteSeekPress
+        }
+#endif
         .onDisappear {
             timelineSeekCommitTask?.cancel()
+            timelineSeekRepeatTask?.cancel()
+#if os(tvOS)
+            TVRemoteCommandCenter.seekHoldHandler = nil
+#endif
             // Back intentionally collapses live playback into the guide
             // header. Only pause when the player view disappears for another
             // reason (or when the coordinator already paused a recording).
@@ -481,16 +491,20 @@ struct PlaybackView: View {
             toggleTimelinePlayback()
         case let .seekBackward(seconds):
             if engine.isSeekable {
-                presentation.isRecording
-                    ? engine.skipBackward(by: seconds)
-                    : stageTimelineSeek(by: -seconds)
+                if presentation.isRecording {
+                    engine.skipBackward(by: seconds)
+                } else {
+                    stageTimelineSeek(by: -seconds)
+                }
             }
             showTimeline()
         case let .seekForward(seconds):
             if engine.isSeekable {
-                presentation.isRecording
-                    ? skipForward(by: seconds)
-                    : stageTimelineSeek(by: seconds)
+                if presentation.isRecording {
+                    skipForward(by: seconds)
+                } else {
+                    stageTimelineSeek(by: seconds)
+                }
             }
             showTimeline()
         }
@@ -525,14 +539,15 @@ struct PlaybackView: View {
         if needsLiveReconnect { Task { await returnToLive() } }
     }
 
-    private func stageTimelineSeek(by seconds: TimeInterval) {
-        guard !presentation.isRecording, engine.isSeekable, seconds != 0 else { return }
+    @discardableResult
+    private func stageTimelineSeek(by seconds: TimeInterval) -> Bool {
+        guard !presentation.isRecording, engine.isSeekable, seconds != 0 else { return false }
         let liveEdge = Date()
         let current = timelineSeekTargetDate ?? engine.livePlaybackDate(at: liveEdge)
         let availableStart = engine.bufferStartedAt ?? liveEdge
         let target = min(max(current.addingTimeInterval(seconds), availableStart), liveEdge)
         guard abs(target.timeIntervalSince(current)) > NativeTimeshiftActionPlan.liveEdgeTolerance else {
-            return
+            return false
         }
         timelineSeekTargetDate = target
         noteActivity()
@@ -567,11 +582,50 @@ struct PlaybackView: View {
                 }
             }
         }
+        return true
     }
+
+#if os(tvOS)
+    private func handleRemoteSeekPress(
+        _ direction: TVPlayerSeekDirection,
+        isPressed: Bool
+    ) -> Bool {
+        guard isPressed else {
+            timelineSeekRepeatTask?.cancel()
+            timelineSeekRepeatTask = nil
+            noteActivity()
+            return true
+        }
+        guard chromeMode != .panel, !presentation.isRecording else { return false }
+
+        let wasHidden = chromeMode == .hidden
+        if wasHidden { showTimeline() }
+        guard engine.isSeekable else { return true }
+
+        let interval: TimeInterval = direction == .backward ? -15 : 15
+        if !wasHidden, !stageTimelineSeek(by: interval) { return true }
+
+        timelineSeekRepeatTask?.cancel()
+        timelineSeekRepeatTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .milliseconds(450))
+                while !Task.isCancelled {
+                    guard stageTimelineSeek(by: interval) else { return }
+                    try await Task.sleep(for: .milliseconds(180))
+                }
+            } catch {
+                // Releasing or cancelling the directional press ends repeat.
+            }
+        }
+        return true
+    }
+#endif
 
     private func cancelTimelineSeek() {
         timelineSeekCommitTask?.cancel()
         timelineSeekCommitTask = nil
+        timelineSeekRepeatTask?.cancel()
+        timelineSeekRepeatTask = nil
         timelineSeekTargetDate = nil
         noteActivity()
     }
