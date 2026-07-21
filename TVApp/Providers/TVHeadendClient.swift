@@ -3,16 +3,22 @@ import SwiftUI
 
 final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unchecked Sendable {
     private let configuration: TVHeadendConfiguration
+    private let urlSessionConfiguration: URLSessionConfiguration
+    private let serverCapabilitiesCache = TVHeadendServerCapabilitiesCache()
     private lazy var session: URLSession = {
-        let sessionConfiguration = URLSessionConfiguration.default
+        let sessionConfiguration = urlSessionConfiguration.copy() as! URLSessionConfiguration
         sessionConfiguration.timeoutIntervalForRequest = 20
         sessionConfiguration.timeoutIntervalForResource = 45
         sessionConfiguration.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: sessionConfiguration, delegate: self, delegateQueue: nil)
     }()
 
-    init(configuration: TVHeadendConfiguration) {
+    init(
+        configuration: TVHeadendConfiguration,
+        sessionConfiguration: URLSessionConfiguration = .default
+    ) {
         self.configuration = configuration
+        urlSessionConfiguration = sessionConfiguration
         super.init()
     }
 
@@ -169,9 +175,16 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
         networkCachingMilliseconds: Int = 1_500
     ) async throws -> LiveStreamRequest {
         let selectedProfile = profile ?? configuration.streamProfile
-        let url = try await canonicalLiveStreamURL(channelID: channelID, profile: selectedProfile)
+        async let pendingURL = canonicalLiveStreamURL(
+            channelID: channelID,
+            profile: selectedProfile
+        )
+        async let pendingCapabilities = cachedServerCapabilities()
+
+        let url = try await pendingURL
+        let capabilities = try? await pendingCapabilities
         let mode: LivePlaybackMode
-        if let info = try? await serverInfo(), info.capabilities.contains("timeshift") {
+        if capabilities?.contains("timeshift") == true {
             if let numericChannelID = Self.numericChannelID(from: url) {
                 mode = .nativeTimeshift(
                     HTSPPlaybackConfiguration(
@@ -191,6 +204,10 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
             profile: selectedProfile,
             kind: .live(mode)
         )
+    }
+
+    private func cachedServerCapabilities() async throws -> Set<String> {
+        try await serverCapabilitiesCache.capabilities(using: self)
     }
 
     static func numericChannelID(from url: URL) -> UInt32? {
@@ -815,6 +832,31 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
         guard let value = channel.iconPublicURL ?? channel.icon, !value.isEmpty else { return nil }
         if let absolute = URL(string: value), absolute.scheme != nil { return absolute }
         return baseURL?.appending(path: value.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
+    }
+}
+
+private actor TVHeadendServerCapabilitiesCache {
+    private var cachedCapabilities: Set<String>?
+    private var loadTask: Task<Set<String>, Error>?
+
+    func capabilities(using client: TVHeadendClient) async throws -> Set<String> {
+        if let cachedCapabilities { return cachedCapabilities }
+        if let loadTask { return try await loadTask.value }
+
+        let task = Task {
+            Set(try await client.serverInfo().capabilities)
+        }
+        loadTask = task
+
+        do {
+            let capabilities = try await task.value
+            cachedCapabilities = capabilities
+            loadTask = nil
+            return capabilities
+        } catch {
+            loadTask = nil
+            throw error
+        }
     }
 }
 

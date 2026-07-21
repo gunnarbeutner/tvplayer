@@ -20,6 +20,43 @@ struct PlaybackNavigationSelection: Equatable, Sendable {
 }
 
 @MainActor
+final class PlaybackStartIntentTracker {
+    private var currentID: UUID?
+    private var currentTask: Task<Void, Never>?
+
+    func begin() -> UUID {
+        cancel()
+        let id = UUID()
+        currentID = id
+        return id
+    }
+
+    func attach(_ task: Task<Void, Never>, to id: UUID) {
+        guard currentID == id else {
+            task.cancel()
+            return
+        }
+        currentTask = task
+    }
+
+    func isCurrent(_ id: UUID) -> Bool {
+        currentID == id
+    }
+
+    func finish(_ id: UUID) {
+        guard currentID == id else { return }
+        currentTask = nil
+        currentID = nil
+    }
+
+    func cancel() {
+        currentTask?.cancel()
+        currentTask = nil
+        currentID = nil
+    }
+}
+
+@MainActor
 final class PlaybackCoordinator: ObservableObject {
     private let logger = Logger(subsystem: "de.beutner.TVPlayer", category: "PlaybackCoordinator")
     @Published var presentation: PlaybackPresentation?
@@ -34,7 +71,9 @@ final class PlaybackCoordinator: ObservableObject {
 #endif
     private var prewarmTask: Task<Void, Never>?
     private var prewarmedChannelID: String?
-    private var channelSwitchTask: Task<Void, Never>?
+    private let playbackStartIntents = PlaybackStartIntentTracker()
+    private var playbackClient: TVHeadendClient?
+    private var playbackClientConfiguration: TVHeadendConfiguration?
 #if os(tvOS)
     private struct BackgroundSuspension {
         let presentationID: UUID
@@ -63,6 +102,7 @@ final class PlaybackCoordinator: ObservableObject {
         program: GuideProgram?,
         configuration: TVHeadendConfiguration
     ) {
+        cancelPlaybackStartIntent()
         let sessionCanResume: Bool
         switch engine.state {
         case .idle, .failed:
@@ -100,11 +140,15 @@ final class PlaybackCoordinator: ObservableObject {
         prewarmTask?.cancel()
         prewarmTask = nil
         prewarmedChannelID = nil
-        Task {
+        let intentID = playbackStartIntents.begin()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
             do {
                 guard configuration.isComplete else { throw TVProviderError.incompleteConfiguration }
-                let request = try await TVHeadendClient(configuration: configuration)
+                let request = try await client(for: configuration)
                     .livePlaybackRequest(channelID: channel.id)
+                try Task.checkCancellation()
+                guard playbackStartIntents.isCurrent(intentID) else { return }
                 engine.stop()
                 presentation = PlaybackPresentation(
                     channel: channel,
@@ -119,10 +163,16 @@ final class PlaybackCoordinator: ObservableObject {
                 isUserInitiatedPlayback = true
                 isPlayerPresented = true
                 errorMessage = nil
+                finishPlaybackStartIntent(intentID)
+            } catch is CancellationError {
+                finishPlaybackStartIntent(intentID)
             } catch {
+                guard playbackStartIntents.isCurrent(intentID) else { return }
                 errorMessage = error.localizedDescription
+                finishPlaybackStartIntent(intentID)
             }
         }
+        playbackStartIntents.attach(task, to: intentID)
     }
 
 #if os(tvOS)
@@ -145,13 +195,15 @@ final class PlaybackCoordinator: ObservableObject {
         let target = channels[targetIndex]
         let program = target.programs.first { $0.isAiring(at: date) }
 
-        channelSwitchTask?.cancel()
-        channelSwitchTask = Task { @MainActor [weak self] in
+        cancelPlaybackStartIntent()
+        let intentID = playbackStartIntents.begin()
+        let task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let request = try await TVHeadendClient(configuration: configuration)
+                let request = try await client(for: configuration)
                     .livePlaybackRequest(channelID: target.id)
                 try Task.checkCancellation()
+                guard playbackStartIntents.isCurrent(intentID) else { return }
 
                 engine.stop()
                 presentation = PlaybackPresentation(
@@ -166,17 +218,22 @@ final class PlaybackCoordinator: ObservableObject {
                 )
                 isUserInitiatedPlayback = true
                 errorMessage = nil
+                finishPlaybackStartIntent(intentID)
             } catch is CancellationError {
-                return
+                finishPlaybackStartIntent(intentID)
             } catch {
+                guard playbackStartIntents.isCurrent(intentID) else { return }
                 errorMessage = error.localizedDescription
+                finishPlaybackStartIntent(intentID)
             }
         }
+        playbackStartIntents.attach(task, to: intentID)
         return true
     }
 #endif
 
     func leavePlayer() {
+        cancelPlaybackStartIntent()
         // Live television keeps running when it collapses into the guide's
         // artwork area. Recorded media retains the previous pause-on-exit
         // behavior because it has no corresponding live channel preview.
@@ -284,7 +341,7 @@ final class PlaybackCoordinator: ObservableObject {
             guard let self else { return }
             do {
                 guard configuration.isComplete else { return }
-                let request = try await TVHeadendClient(configuration: configuration)
+                let request = try await client(for: configuration)
                     .livePlaybackRequest(channelID: channel.id)
                 guard !Task.isCancelled else { return }
 
@@ -341,6 +398,7 @@ final class PlaybackCoordinator: ObservableObject {
         channel: GuideChannel?,
         configuration: TVHeadendConfiguration
     ) {
+        cancelPlaybackStartIntent()
         let sessionCanResume: Bool
         switch engine.state {
         case .idle, .failed: sessionCanResume = false
@@ -363,11 +421,15 @@ final class PlaybackCoordinator: ObservableObject {
         prewarmTask?.cancel()
         prewarmTask = nil
         prewarmedChannelID = nil
-        Task {
+        let intentID = playbackStartIntents.begin()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
             do {
                 guard configuration.isComplete else { throw TVProviderError.incompleteConfiguration }
-                let url = try await TVHeadendClient(configuration: configuration)
+                let url = try await client(for: configuration)
                     .recordingStreamURL(recordingID: recording.id)
+                try Task.checkCancellation()
+                guard playbackStartIntents.isCurrent(intentID) else { return }
                 let playbackChannel = channel ?? Self.placeholderChannel(for: recording)
                 engine.stop()
                 presentation = PlaybackPresentation(
@@ -389,10 +451,61 @@ final class PlaybackCoordinator: ObservableObject {
                 isUserInitiatedPlayback = true
                 isPlayerPresented = true
                 errorMessage = nil
+                finishPlaybackStartIntent(intentID)
+            } catch is CancellationError {
+                finishPlaybackStartIntent(intentID)
             } catch {
+                guard playbackStartIntents.isCurrent(intentID) else { return }
                 errorMessage = error.localizedDescription
+                finishPlaybackStartIntent(intentID)
             }
         }
+        playbackStartIntents.attach(task, to: intentID)
+    }
+
+    func streamProfiles(
+        configuration: TVHeadendConfiguration
+    ) async throws -> [TVHeadendStreamProfile] {
+        try await client(for: configuration).streamProfiles()
+    }
+
+    func livePlaybackRequest(
+        channelID: String,
+        profile: String? = nil,
+        networkCachingMilliseconds: Int = 1_500,
+        configuration: TVHeadendConfiguration
+    ) async throws -> LiveStreamRequest {
+        try await client(for: configuration).livePlaybackRequest(
+            channelID: channelID,
+            profile: profile,
+            networkCachingMilliseconds: networkCachingMilliseconds
+        )
+    }
+
+    func recordingStreamURL(
+        recordingID: String,
+        configuration: TVHeadendConfiguration
+    ) async throws -> URL {
+        try await client(for: configuration).recordingStreamURL(recordingID: recordingID)
+    }
+
+    private func client(for configuration: TVHeadendConfiguration) -> TVHeadendClient {
+        if playbackClientConfiguration == configuration, let playbackClient {
+            return playbackClient
+        }
+
+        let client = TVHeadendClient(configuration: configuration)
+        playbackClient = client
+        playbackClientConfiguration = configuration
+        return client
+    }
+
+    private func cancelPlaybackStartIntent() {
+        playbackStartIntents.cancel()
+    }
+
+    private func finishPlaybackStartIntent(_ intentID: UUID) {
+        playbackStartIntents.finish(intentID)
     }
 
     private static func placeholderChannel(for recording: TVRecording) -> GuideChannel {

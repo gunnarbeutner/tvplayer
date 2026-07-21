@@ -312,7 +312,9 @@ struct PlaybackView: View {
         }
         .task {
             guard !presentation.isRecording else { return }
-            profiles = (try? await TVHeadendClient(configuration: settings.configuration).streamProfiles()) ?? []
+            profiles = (try? await playback.streamProfiles(
+                configuration: settings.configuration
+            )) ?? []
         }
 #if DEBUG
         .task(id: engine.state) {
@@ -480,8 +482,10 @@ struct PlaybackView: View {
 
             // Ticket credentials are deliberately short-lived, so obtain a
             // fresh URL each time a growing recording reaches its current EOF.
-            let url = try await TVHeadendClient(configuration: settings.configuration)
-                .recordingStreamURL(recordingID: recording.id)
+            let url = try await playback.recordingStreamURL(
+                recordingID: recording.id,
+                configuration: settings.configuration
+            )
             await startPlayback(
                 with: LiveStreamRequest(
                     url: url,
@@ -676,12 +680,12 @@ struct PlaybackView: View {
             return
         }
         do {
-            let request = try await TVHeadendClient(configuration: settings.configuration)
-                .livePlaybackRequest(
-                    channelID: presentation.channel.id,
-                    profile: engine.activeProfile,
-                    networkCachingMilliseconds: presentation.request.networkCachingMilliseconds
-                )
+            let request = try await playback.livePlaybackRequest(
+                channelID: presentation.channel.id,
+                profile: engine.activeProfile,
+                networkCachingMilliseconds: presentation.request.networkCachingMilliseconds,
+                configuration: settings.configuration
+            )
             await startPlayback(with: request)
         } catch {
             engine.reportFailure(error.localizedDescription)
@@ -692,12 +696,12 @@ struct PlaybackView: View {
         guard !presentation.isRecording else { return }
         guard profile.name != engine.activeProfile else { return }
         do {
-            let request = try await TVHeadendClient(configuration: settings.configuration)
-                .livePlaybackRequest(
-                    channelID: presentation.channel.id,
-                    profile: profile.name,
-                    networkCachingMilliseconds: presentation.request.networkCachingMilliseconds
-                )
+            let request = try await playback.livePlaybackRequest(
+                channelID: presentation.channel.id,
+                profile: profile.name,
+                networkCachingMilliseconds: presentation.request.networkCachingMilliseconds,
+                configuration: settings.configuration
+            )
             await startPlayback(with: request)
             showPanel()
         } catch {
