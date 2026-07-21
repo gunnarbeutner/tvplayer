@@ -132,6 +132,12 @@ struct RootTabView: View {
             }
         }
         .tint(AppTheme.accent)
+#if os(macOS)
+        .toolbarVisibility(
+            playback.isPlayerPresented ? .hidden : .visible,
+            for: .windowToolbar
+        )
+#endif
         .environmentObject(settings)
         .environmentObject(guide)
         .environmentObject(channelPreferences)

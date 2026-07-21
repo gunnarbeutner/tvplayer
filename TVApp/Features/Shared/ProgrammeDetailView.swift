@@ -155,7 +155,6 @@ struct ProgrammeDetailView: View {
             }
 #endif
         }
-        .programmeDetailWindowSizing()
         .televisionPlayPauseCommand {
             if canWatchLive {
                 watchLive()
@@ -396,24 +395,6 @@ struct ProgrammeDetailView: View {
             .padding(.horizontal, 11)
             .padding(.vertical, 6)
             .background(AppTheme.surfaceRaised, in: Capsule())
-    }
-}
-
-private extension View {
-    @ViewBuilder
-    func programmeDetailWindowSizing() -> some View {
-#if os(macOS)
-        frame(
-            minWidth: 700,
-            idealWidth: 820,
-            maxWidth: 900,
-            minHeight: 500,
-            idealHeight: 540,
-            maxHeight: 620
-        )
-#else
-        self
-#endif
     }
 }
 

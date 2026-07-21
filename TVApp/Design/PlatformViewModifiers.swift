@@ -47,7 +47,33 @@ extension View {
 #elseif os(macOS)
         sheet(item: item) { value in
             content(value)
-                .frame(minWidth: 760, minHeight: 560)
+                .frame(
+                    minWidth: 700,
+                    idealWidth: 820,
+                    maxWidth: 900,
+                    maxHeight: 720
+                )
+                .presentationSizing(.fitted)
+                .overlay(alignment: .topTrailing) {
+                    Button {
+                        item.wrappedValue = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.headline.bold())
+                            .foregroundStyle(.primary)
+                            .frame(width: 32, height: 32)
+                            .background(.regularMaterial, in: Circle())
+                            .overlay {
+                                Circle().strokeBorder(.primary.opacity(0.12), lineWidth: 1)
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .focusable(false)
+                    .accessibilityLabel("Close Details")
+                    .help("Close")
+                    .keyboardShortcut(.cancelAction)
+                    .padding(16)
+                }
         }
 #else
         sheet(item: item) { value in
