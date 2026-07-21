@@ -15,6 +15,7 @@ extension Notification.Name {
 @MainActor
 enum TVRemoteCommandCenter {
     static var pageHandler: ((TVPageDirection) -> Bool)?
+    static var playPauseHandler: (() -> Bool)?
 }
 
 /// Captures the dedicated Page Up/Down buttons before the focus engine turns

@@ -26,6 +26,7 @@ final class NowPlayingCoordinator {
     private weak var playback: PlaybackCoordinator?
     private var cancellables: Set<AnyCancellable> = []
     private var commandTargets: [(MPRemoteCommand, Any)] = []
+    private var transportCommandTargets: [(MPRemoteCommand, Any)] = []
     private var artworkTask: Task<Void, Never>?
     private var artworkURL: URL?
 
@@ -59,38 +60,13 @@ final class NowPlayingCoordinator {
         artworkTask = nil
         for (command, token) in commandTargets { command.removeTarget(token) }
         commandTargets.removeAll()
+        removeTransportCommands()
         playback = nil
         refreshCommandAvailability(for: nil)
     }
 
     private func installCommands() {
         let center = MPRemoteCommandCenter.shared()
-        add(center.playCommand) { [weak self] _ in
-            guard let playback = self?.playback,
-                  self?.ownsTransportCommands(playback) == true
-            else { return .noActionableNowPlayingItem }
-            let engine = playback.engine
-            engine.play()
-            return .success
-        }
-        add(center.pauseCommand) { [weak self] _ in
-            guard let playback = self?.playback,
-                  self?.ownsTransportCommands(playback) == true,
-                  playback.engine.canPause
-            else {
-                return .commandFailed
-            }
-            playback.engine.pause()
-            return .success
-        }
-        add(center.togglePlayPauseCommand) { [weak self] _ in
-            guard let playback = self?.playback,
-                  self?.ownsTransportCommands(playback) == true
-            else { return .noActionableNowPlayingItem }
-            playback.engine.togglePlayPause()
-            return .success
-        }
-
         center.skipForwardCommand.preferredIntervals = [15]
         add(center.skipForwardCommand) { [weak self] event in
             guard let engine = self?.playback?.engine, engine.isSeekable else { return .commandFailed }
@@ -114,9 +90,57 @@ final class NowPlayingCoordinator {
         playback.isPlayerPresented || playback.pictureInPicture.isActive
     }
 
+    private func installTransportCommandsIfNeeded() {
+        guard transportCommandTargets.isEmpty else { return }
+        let center = MPRemoteCommandCenter.shared()
+        addTransport(center.playCommand) { [weak self] _ in
+            guard let self, let playback = self.playback else {
+                return .noActionableNowPlayingItem
+            }
+            if self.ownsTransportCommands(playback) {
+                playback.engine.play()
+                return .success
+            }
+            return self.handleContextualPlayPauseCommand()
+        }
+        addTransport(center.pauseCommand) { [weak self] _ in
+            guard let self, let playback = self.playback else {
+                return .noActionableNowPlayingItem
+            }
+            if self.ownsTransportCommands(playback) {
+                guard playback.engine.canPause else { return .commandFailed }
+                playback.engine.pause()
+                return .success
+            }
+            return self.handleContextualPlayPauseCommand()
+        }
+        addTransport(center.togglePlayPauseCommand) { [weak self] _ in
+            guard let self, let playback = self.playback else {
+                return .noActionableNowPlayingItem
+            }
+            if self.ownsTransportCommands(playback) {
+                playback.engine.togglePlayPause()
+                return .success
+            }
+            return self.handleContextualPlayPauseCommand()
+        }
+    }
+
+    private func handleContextualPlayPauseCommand() -> MPRemoteCommandHandlerStatus {
+        TVRemoteCommandCenter.playPauseHandler?() == true
+            ? .success
+            : .noActionableNowPlayingItem
+    }
+
+    private func removeTransportCommands() {
+        for (command, token) in transportCommandTargets { command.removeTarget(token) }
+        transportCommandTargets.removeAll()
+    }
+
     private func refreshCommandAvailability(for playback: PlaybackCoordinator?) {
         let center = MPRemoteCommandCenter.shared()
-        guard let playback, ownsTransportCommands(playback) else {
+        guard let playback else {
+            removeTransportCommands()
             center.playCommand.isEnabled = false
             center.pauseCommand.isEnabled = false
             center.togglePlayPauseCommand.isEnabled = false
@@ -125,6 +149,17 @@ final class NowPlayingCoordinator {
             return
         }
 
+        guard ownsTransportCommands(playback) else {
+            installTransportCommandsIfNeeded()
+            center.playCommand.isEnabled = true
+            center.pauseCommand.isEnabled = true
+            center.togglePlayPauseCommand.isEnabled = true
+            center.skipForwardCommand.isEnabled = false
+            center.skipBackwardCommand.isEnabled = false
+            return
+        }
+
+        installTransportCommandsIfNeeded()
         center.playCommand.isEnabled = true
         center.pauseCommand.isEnabled = playback.engine.canPause
         center.togglePlayPauseCommand.isEnabled = true
@@ -145,6 +180,21 @@ final class NowPlayingCoordinator {
             }
         }
         commandTargets.append((command, token))
+    }
+
+    private func addTransport(
+        _ command: MPRemoteCommand,
+        handler: @escaping @MainActor (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus
+    ) {
+        let token = command.addTarget { event in
+            if Thread.isMainThread {
+                return MainActor.assumeIsolated { handler(event) }
+            }
+            return DispatchQueue.main.sync {
+                MainActor.assumeIsolated { handler(event) }
+            }
+        }
+        transportCommandTargets.append((command, token))
     }
 
     private func refresh() {

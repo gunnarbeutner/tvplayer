@@ -705,6 +705,15 @@ private final class GuideCollectionView: UICollectionView,
         )
 
 #if os(tvOS)
+        let playPauseRecognizer = UITapGestureRecognizer(
+            target: self,
+            action: #selector(handlePlayPausePress(_:))
+        )
+        playPauseRecognizer.allowedPressTypes = [
+            NSNumber(value: UIPress.PressType.playPause.rawValue)
+        ]
+        addGestureRecognizer(playPauseRecognizer)
+
         pageCommandObserver = NotificationCenter.default.addObserver(
             forName: .tvGuidePageCommand,
             object: nil,
@@ -717,6 +726,20 @@ private final class GuideCollectionView: UICollectionView,
         }
 #endif
     }
+
+#if os(tvOS)
+    @objc private func handlePlayPausePress(_ recognizer: UITapGestureRecognizer) {
+        guard recognizer.state == .ended,
+              isGuideEnabled,
+              let snapshot = guideSnapshot,
+              let programID = currentlyFocusedProgramID,
+              let indexPath = snapshot.indexPath(for: programID),
+              let item = snapshot.item(at: indexPath)
+        else { return }
+
+        onPlay(item.program)
+    }
+#endif
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {

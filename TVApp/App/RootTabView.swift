@@ -195,10 +195,12 @@ struct RootTabView: View {
 #if os(tvOS)
         .onAppear {
             TVRemoteCommandCenter.pageHandler = handlePageCommand
+            TVRemoteCommandCenter.playPauseHandler = handlePlayPauseCommand
             NowPlayingCoordinator.shared.connect(to: playback)
         }
         .onDisappear {
             TVRemoteCommandCenter.pageHandler = nil
+            TVRemoteCommandCenter.playPauseHandler = nil
             NowPlayingCoordinator.shared.disconnect()
         }
 #endif
@@ -335,6 +337,24 @@ struct RootTabView: View {
         )
         return true
     }
+
+    @MainActor
+    private func handlePlayPauseCommand() -> Bool {
+        guard selection == .guide,
+              !playback.isPlayerPresented,
+              !playback.pictureInPicture.isActive,
+              let guideHeaderChannelID,
+              let channel = guide.channels.first(where: { $0.id == guideHeaderChannelID })
+        else { return false }
+
+        playback.start(
+            channel: channel,
+            program: channel.programs.first { $0.isAiring(at: guide.now) },
+            configuration: settings.configuration
+        )
+        return true
+    }
+
 #endif
 
     @ViewBuilder
