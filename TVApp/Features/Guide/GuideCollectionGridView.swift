@@ -862,7 +862,8 @@ private final class GuideCollectionView: UICollectionView,
                 retriesRemaining: 8,
                 directly: true
             )
-        } else if let focusedProgramID,
+        } else if focusedChannelID == nil,
+                  let focusedProgramID,
                   focusedProgramID != previousRequestedFocusedProgramID,
                   focusedProgramID != currentlyFocusedProgramID,
                   guideSnapshot?.indexPath(for: focusedProgramID) != nil {
@@ -1007,6 +1008,16 @@ private final class GuideCollectionView: UICollectionView,
             .compactMap { $0 as? GuideProgrammeCollectionCell }
             .first(where: \.isFocused)?
             .programID
+    }
+
+    private func currentProgramID(for channelID: GuideChannel.ID) -> GuideProgram.ID? {
+        guard let snapshot = guideSnapshot,
+              let section = snapshot.channels.firstIndex(where: { $0.id == channelID })
+        else { return nil }
+
+        return snapshot.rows[section]
+            .first(where: { $0.program.isAiring(at: currentNow) })?
+            .id
     }
 
     private func scrollToLeadingEdge(animated: Bool) {
@@ -1468,10 +1479,31 @@ private final class GuideCollectionView: UICollectionView,
                         self?.channelReturnProgramIDAwaitingSnapshotFocus = returnProgramID
                         self?.onToggleFavorite(channel.id)
                     },
-                    onFocused: { [weak self] returnProgramID in
-                        self?.pendingChannelProgramID = nil
-                        self?.focusedChannelID = channel.id
-                        self?.focusedChannelReturnProgramID = returnProgramID
+                    onFocused: { [weak self, weak view] returnProgramID in
+                        guard let self else { return }
+
+                        // A favourite toggle rebuilds and reorders the guide
+                        // snapshot. Its focus restoration is only needed until
+                        // a channel header actually acquires focus. Keeping the
+                        // request (and its retry task) alive beyond that point
+                        // can override the user's next Up/Down move and snap
+                        // focus back to the channel they just toggled.
+                        self.channelFocusRetryTask?.cancel()
+                        self.channelFocusRetryTask = nil
+                        self.channelIDAwaitingSnapshotFocus = nil
+                        self.channelReturnProgramIDAwaitingSnapshotFocus = nil
+                        self.pendingChannelProgramID = nil
+                        self.focusedChannelID = channel.id
+                        let selectedProgramID = self.currentProgramID(for: channel.id)
+                            ?? returnProgramID
+                        view?.returnProgramID = selectedProgramID
+                        self.focusedChannelReturnProgramID = selectedProgramID
+
+                        if let selectedProgramID {
+                            self.requestedFocusedProgramID = selectedProgramID
+                            self.reconfigureVisibleProgrammeCells()
+                            self.onFocused(selectedProgramID)
+                        }
                     },
                     onMoveRight: { [weak self] programID in
                         self?.requestFocus(on: programID, animated: true, retriesRemaining: 8)
