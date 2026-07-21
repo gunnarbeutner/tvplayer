@@ -850,20 +850,17 @@ enum HTSPNavigationRecoveryPolicy {
 
 struct HTSPPostSeekBufferTracker {
     static let requiredDuration: Int64 = 1_000_000
-    static let packetFallbackCount = 48
 
     private(set) var result: HTSPNavigationResult?
     private var waitsForVideoKeyframe = false
     private var firstTime: Int64?
     private var latestTime: Int64?
-    private var packetCount = 0
 
     mutating func begin(_ result: HTSPNavigationResult, hasVideo: Bool) {
         self.result = result
         waitsForVideoKeyframe = hasVideo
         firstTime = nil
         latestTime = nil
-        packetCount = 0
     }
 
     mutating func cancel() {
@@ -871,7 +868,6 @@ struct HTSPPostSeekBufferTracker {
         waitsForVideoKeyframe = false
         firstTime = nil
         latestTime = nil
-        packetCount = 0
     }
 
     mutating func shouldAcceptPacket(isVideo: Bool, frameType: UInt8) -> Bool {
@@ -884,16 +880,13 @@ struct HTSPPostSeekBufferTracker {
 
     mutating func observePacket(time: Int64?) -> HTSPNavigationResult? {
         guard let result else { return nil }
-        packetCount += 1
         if let time {
             firstTime = firstTime ?? time
             latestTime = max(latestTime ?? time, time)
         }
         let bufferedDuration = max(0, (latestTime ?? 0) - (firstTime ?? 0))
         let reachedExactLanding = latestTime.map { $0 >= result.landingTime } ?? false
-        guard (bufferedDuration >= Self.requiredDuration && reachedExactLanding)
-                || (latestTime == nil && packetCount >= Self.packetFallbackCount)
-        else { return nil }
+        guard bufferedDuration >= Self.requiredDuration, reachedExactLanding else { return nil }
         cancel()
         return result
     }

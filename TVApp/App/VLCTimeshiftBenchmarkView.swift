@@ -8,8 +8,16 @@ struct VLCTimeshiftBenchmarkView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            BenchmarkVideoPane(benchmark: benchmark)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Group {
+                if let presentation = benchmark.presentation {
+                    PlaybackView(engine: benchmark.engine, presentation: presentation)
+                        .environmentObject(benchmark.settings)
+                        .environmentObject(benchmark.playback)
+                } else {
+                    BenchmarkVideoPane(benchmark: benchmark)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             Divider()
 
@@ -165,14 +173,22 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
     @Published private(set) var progress = 0.0
     @Published private(set) var isFailed = false
     @Published private(set) var canRerun = false
+    @Published private(set) var presentation: PlaybackPresentation?
 
     let engine = VLCPlaybackEngine()
+    let settings = ServerSettingsStore(
+        startsDiscovery: false,
+        automaticallyTestsConnections: false
+    )
+    let playback = PlaybackCoordinator()
 
     private let startedAt = ProcessInfo.processInfo.systemUptime
     private var discovery: TVHeadendDiscovery?
     private var runTask: Task<Void, Never>?
     private var hasStarted = false
     private var completedCycleCount = 0
+    private var maximumObservedTimeshiftWindow: TimeInterval = 0
+    private var expectedRecoveryCount = 0
 
     var playerState: String {
         switch engine.state {
@@ -238,23 +254,28 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
             )
         )
         phase = "Opening VLC playback…"
-        try await engine.prepare(request)
+        // Mount PlaybackView before opening the media so its real video
+        // surface owns VLC attachment for the entire fill and seek run.
+        presentation = makePresentation(channel: channel, request: request)
+        await Task.yield()
+        guard await engine.waitForPlaybackStart() else { throw BenchmarkError.playbackDidNotStart }
         guard engine.activeLivePlaybackMode == .tvHeadend else {
             throw BenchmarkError.nativeTimeshiftUnavailable
         }
-        engine.play()
-        guard await engine.waitForPlaybackStart() else { throw BenchmarkError.playbackDidNotStart }
+        try validateSessionContinuity()
         append(.success, "VLC playback started", "Video output is attached to the left pane.")
 
-        phase = "Filling the timeshift buffer (40 seconds)…"
-        for second in 1...40 {
+        let bufferFillSeconds = automaticBufferFillSeconds
+        phase = "Filling the timeshift buffer (\(bufferFillSeconds) seconds)…"
+        for second in 1...bufferFillSeconds {
             try await Task.sleep(for: .seconds(1))
             engine.refreshPlaybackInformation()
-            progress = Double(second) / 46
+            try validateSessionContinuity()
+            progress = Double(second) / Double(bufferFillSeconds + 6)
             if second.isMultiple(of: 5) {
                 append(
                     .information,
-                    "Buffer fill \(second)s / 40s",
+                    "Buffer fill \(second)s / \(bufferFillSeconds)s",
                     String(format: "TVHeadend reports a %.2fs window.", engine.timeshiftWindowSeconds)
                 )
             }
@@ -267,6 +288,7 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
                 do {
                     try await resetAtLiveEdge()
                 } catch {
+                    if error is BenchmarkContinuityError { throw error }
                     cycleFailures.append("cycle \(cycle) reset: \(error.localizedDescription)")
                     append(.failure, "Cycle \(cycle) could not reset", error.localizedDescription)
                     continue
@@ -275,6 +297,7 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
             do {
                 try await runSeekCycle(number: cycle)
             } catch {
+                if error is BenchmarkContinuityError { throw error }
                 cycleFailures.append("cycle \(cycle): \(error.localizedDescription)")
                 append(.failure, "Cycle \(cycle) failed", error.localizedDescription)
             }
@@ -306,19 +329,39 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
 
     private func runSeekCycle(number: Int) async throws {
         append(.navigation, "Starting seek cycle \(number)", "Reusing the existing TVHeadend buffer.")
-        let deltas: [TimeInterval] = [-25, 15, -15, 15, -15, 15]
+        engine.refreshPlaybackInformation()
+        let seekableWindow = engine.timeshiftWindowSeconds
+        let targetPercentages: [Double] = [0.10, 0.50, 0.90, 0.20, 0.80, 0]
+        let seekCount = targetPercentages.count
+        append(
+            .information,
+            "Seek targets based on buffer window",
+            String(
+                format: "Window %.2fs; targets 10%%, 50%%, 90%%, 20%%, 80%%, then live.",
+                seekableWindow
+            )
+        )
         var samples: [SeekSample] = []
-        for (index, delta) in deltas.enumerated() {
-            phase = "Cycle \(number) · seek \(index + 1) of \(deltas.count)…"
-            samples.append(try await measureSeek(delta: delta, number: index + 1))
+        for index in 0..<seekCount {
+            phase = "Cycle \(number) · seek \(index + 1) of \(seekCount)…"
+            let targetPercentage = targetPercentages[index]
+            samples.append(
+                try await measureSeek(
+                    targetLiveDelay: seekableWindow * targetPercentage,
+                    targetPercentage: targetPercentage,
+                    number: index + 1
+                )
+            )
             phase = "Playing for 3 seconds after seek \(index + 1)…"
             append(.information, "Post-seek playback dwell", "Allowing VLC to run for 3 seconds.")
             for _ in 0..<30 {
                 try await Task.sleep(for: .milliseconds(100))
                 engine.refreshPlaybackInformation()
+                try validateSessionContinuity()
             }
             append(.success, "Post-seek dwell complete", debugState)
-            progress = Double(40 + index + 1) / 46
+            progress = Double(automaticBufferFillSeconds + index + 1)
+                / Double(automaticBufferFillSeconds + seekCount)
         }
 
         completedCycleCount = max(completedCycleCount, number)
@@ -336,14 +379,19 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
     private func resetAtLiveEdge() async throws {
         phase = "Returning to live before the next cycle…"
         append(.navigation, "Resetting at the live edge", debugState)
+        engine.refreshPlaybackInformation()
+        try validateSessionContinuity()
+        if isReadyAtLiveEdge {
+            append(.success, "Already ready for another seek cycle", debugState)
+            return
+        }
         engine.returnToLive()
         let started = ProcessInfo.processInfo.systemUptime
         while ProcessInfo.processInfo.systemUptime - started < 10 {
             try await Task.sleep(for: .milliseconds(50))
             engine.refreshPlaybackInformation()
-            if engine.liveDelaySeconds < 1,
-               engine.state == .playing,
-               !engine.isPlaybackOutputConcealed {
+            try validateSessionContinuity()
+            if isReadyAtLiveEdge {
                 append(.success, "Ready for another seek cycle", debugState)
                 return
             }
@@ -351,20 +399,57 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
         throw BenchmarkError.resetTimedOut(debugState)
     }
 
+    private var isReadyAtLiveEdge: Bool {
+        engine.liveDelaySeconds < 2
+            && engine.state == .playing
+            && !engine.isPlaybackOutputConcealed
+    }
+
     private func measureSeek(delta: TimeInterval, number: Int) async throws -> SeekSample {
+        try await measureSeek(delta: delta, targetLiveDelay: nil, number: number)
+    }
+
+    private func measureSeek(
+        targetLiveDelay: TimeInterval,
+        targetPercentage: Double,
+        number: Int
+    ) async throws -> SeekSample {
         engine.refreshPlaybackInformation()
-        let baseline = counters
+        let delta = engine.liveDelaySeconds - targetLiveDelay
+        return try await measureSeek(
+            delta: delta,
+            targetLiveDelay: targetLiveDelay,
+            targetPercentage: targetPercentage,
+            number: number
+        )
+    }
+
+    private func measureSeek(
+        delta: TimeInterval,
+        targetLiveDelay: TimeInterval?,
+        targetPercentage: Double? = nil,
+        number: Int
+    ) async throws -> SeekSample {
+        engine.refreshPlaybackInformation()
+        var baseline = counters
+        let initialNavigationState = engine.timeshiftNavigationDebugState
+        var navigationStarted = false
         let started = ProcessInfo.processInfo.systemUptime
         append(
             .navigation,
-            "Seek \(number): \(delta < 0 ? "back" : "forward") \(Int(abs(delta)))s",
+            targetLiveDelay.map {
+                if let targetPercentage {
+                    return String(
+                        format: "Seek %d: target %.0f%% (\(formatDuration($0)) behind live)",
+                        number,
+                        targetPercentage * 100
+                    )
+                }
+                return "Seek \(number): target \(formatDuration($0)) behind live"
+            } ?? "Seek \(number): \(delta < 0 ? "back" : "forward") \(Int(abs(delta)))s",
             String(format: "Starting %.2fs behind live; VLC pictures: %d.", engine.liveDelaySeconds, baseline.displayedPictures)
         )
-        if delta < 0 {
-            engine.skipBackward(by: -delta)
-        } else {
-            _ = engine.skipForward(by: delta)
-        }
+        try await sendPlayerSeek(delta: delta)
 
         var discontinuityAt: Double?
         var videoAt: Double?
@@ -374,9 +459,20 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
         while ProcessInfo.processInfo.systemUptime - started < 10 {
             try await Task.sleep(for: .milliseconds(10))
             engine.refreshPlaybackInformation()
+            try validateSessionContinuity()
             let now = ProcessInfo.processInfo.systemUptime
             let current = counters
-            if discontinuityAt == nil,
+            let health = engine.nativeTimeshiftHealthSnapshot
+            if !navigationStarted,
+               engine.state == .paused
+                || engine.isPlaybackOutputConcealed
+                || health?.isNavigating == true
+                || engine.timeshiftNavigationDebugState != initialNavigationState {
+                navigationStarted = true
+                baseline = current
+            }
+            if navigationStarted,
+               discontinuityAt == nil,
                current.demuxDiscontinuities > baseline.demuxDiscontinuities {
                 discontinuityAt = now
                 atDiscontinuity = current
@@ -386,7 +482,7 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
                 loggedConcealment = true
                 append(.information, "Output gate concealed stale frames", elapsedDetail(since: started))
             }
-            if let atDiscontinuity {
+            if navigationStarted, let atDiscontinuity {
                 if videoAt == nil, current.displayedPictures > atDiscontinuity.displayedPictures {
                     videoAt = now
                     append(.success, "First new VLC video frame", elapsedDetail(since: started))
@@ -395,7 +491,7 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
                     audioAt = now
                     append(.success, "First new VLC audio buffer", elapsedDetail(since: started))
                 }
-            } else if videoAt == nil,
+            } else if navigationStarted, videoAt == nil,
                       current.displayedPictures > baseline.displayedPictures {
                 videoAt = now
             }
@@ -418,11 +514,24 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
         throw BenchmarkError.seekTimedOut(number, debugState)
     }
 
+    private func sendPlayerSeek(delta: TimeInterval) async throws {
+        let backward = delta < 0
+        var remaining = abs(delta)
+        while remaining > NativeTimeshiftActionPlan.liveEdgeTolerance {
+            let step = min(15, remaining)
+            sendPlayerCommand(backward ? .seekBackward(step) : .seekForward(step))
+            remaining -= step
+            if remaining > NativeTimeshiftActionPlan.liveEdgeTolerance {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+        }
+    }
+
     private var debugState: String {
         let current = counters
         let health = engine.nativeTimeshiftHealthSnapshot
         let packetAge = health?.lastMuxPacketAt.map { String(format: "%.2fs", -$0.timeIntervalSinceNow) } ?? "nil"
-        return "engine=\(playerState), vlc=\(engine.mediaPlayer.state), playing=\(engine.mediaPlayer.isPlaying), concealed=\(engine.isPlaybackOutputConcealed), navigation=\(engine.timeshiftNavigationDebugState), streamNavigating=\(health?.isNavigating.description ?? "nil"), desiredSpeed=\(health.map { String($0.desiredSpeed) } ?? "nil"), lastPacketAge=\(packetAge), delay=\(String(format: "%.2f", engine.liveDelaySeconds))s, discontinuities=\(current.demuxDiscontinuities), pictures=\(current.displayedPictures), audio=\(current.playedAudioBuffers), time=\(current.playbackTimeMilliseconds.map(String.init) ?? "nil")ms"
+        return "engine=\(playerState), vlc=\(engine.mediaPlayer.state), playing=\(engine.mediaPlayer.isPlaying), concealed=\(engine.isPlaybackOutputConcealed), navigation=\(engine.timeshiftNavigationDebugState), streamNavigating=\(health?.isNavigating.description ?? "nil"), desiredSpeed=\(health.map { String($0.desiredSpeed) } ?? "nil"), lastPacketAge=\(packetAge), delay=\(String(format: "%.2f", engine.liveDelaySeconds))s, recoveries=\(engine.nativeTimeshiftRecoveryCount), discontinuities=\(current.demuxDiscontinuities), pictures=\(current.displayedPictures), audio=\(current.playedAudioBuffers), time=\(current.playbackTimeMilliseconds.map(String.init) ?? "nil")ms"
     }
 
     private var automaticCycleCount: Int {
@@ -431,6 +540,77 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
             return max(1, Int(argument.dropFirst("--benchmark-cycles=".count)) ?? 1)
         }
         return 1
+    }
+
+    private var automaticBufferFillSeconds: Int {
+        for argument in ProcessInfo.processInfo.arguments {
+            guard argument.hasPrefix("--benchmark-buffer-seconds=") else { continue }
+            return max(1, Int(argument.dropFirst("--benchmark-buffer-seconds=".count)) ?? 40)
+        }
+        return 40
+    }
+
+    private func sendPlayerCommand(_ command: MacOSPlayerKeyboardCommand) {
+        NotificationCenter.default.post(
+            name: .vlcTimeshiftBenchmarkPlayerCommand,
+            object: command
+        )
+    }
+
+    private func validateSessionContinuity() throws {
+        let recoveryCount = engine.nativeTimeshiftRecoveryCount
+        guard recoveryCount == expectedRecoveryCount else {
+            throw BenchmarkContinuityError.reconnected(
+                count: recoveryCount - expectedRecoveryCount,
+                state: debugState
+            )
+        }
+
+        let window = engine.timeshiftWindowSeconds
+        if maximumObservedTimeshiftWindow >= 10,
+           window < maximumObservedTimeshiftWindow * 0.5,
+           maximumObservedTimeshiftWindow - window >= 5 {
+            throw BenchmarkContinuityError.bufferReset(
+                previous: maximumObservedTimeshiftWindow,
+                current: window,
+                state: debugState
+            )
+        }
+        maximumObservedTimeshiftWindow = max(maximumObservedTimeshiftWindow, window)
+    }
+
+    private func makePresentation(
+        channel: (id: UInt32, name: String),
+        request: LiveStreamRequest
+    ) -> PlaybackPresentation {
+        let now = Date()
+        let channelID = String(channel.id)
+        let program = GuideProgram(
+            id: "benchmark-program",
+            channelID: channelID,
+            title: "VLC Timeshift Benchmark",
+            subtitle: nil,
+            overview: "Automated seeks through the real player timeline.",
+            start: now.addingTimeInterval(-12 * 60 * 60),
+            end: now.addingTimeInterval(12 * 60 * 60)
+        )
+        let words = channel.name.split(whereSeparator: { $0.isWhitespace || $0 == "." })
+        let monogram = words.prefix(2).compactMap(\.first).map(String.init).joined().uppercased()
+        let guideChannel = GuideChannel(
+            id: channelID,
+            number: 0,
+            name: channel.name,
+            monogram: monogram.isEmpty ? "TV" : monogram,
+            tint: .blue,
+            iconURL: nil,
+            programs: [program]
+        )
+        return PlaybackPresentation(
+            channel: guideChannel,
+            program: program,
+            recording: nil,
+            request: request
+        )
     }
 
     private var counters: PlaybackOutputCounters {
@@ -533,6 +713,11 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
         String(format: "%.1fms", milliseconds)
     }
 
+    private func formatDuration(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        return total >= 60 ? "\(total / 60)m \(total % 60)s" : "\(total)s"
+    }
+
     private struct SeekSample {
         let discontinuityMilliseconds: Double?
         let videoMilliseconds: Double
@@ -558,6 +743,25 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
             case let .resetTimedOut(state): "Returning to live timed out. \(state)"
             case let .cyclesFailed(detail): detail
             }
+        }
+    }
+}
+
+private enum BenchmarkContinuityError: LocalizedError {
+    case reconnected(count: Int, state: String)
+    case bufferReset(previous: TimeInterval, current: TimeInterval, state: String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .reconnected(count, state):
+            "Native timeshift reconnected \(count) time(s); session continuity was lost. \(state)"
+        case let .bufferReset(previous, current, state):
+            String(
+                format: "Timeshift buffer reset from %.2fs to %.2fs. %@",
+                previous,
+                current,
+                state
+            )
         }
     }
 }

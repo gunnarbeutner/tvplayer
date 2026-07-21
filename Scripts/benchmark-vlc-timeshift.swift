@@ -39,6 +39,12 @@ do {
         }
         return max(1, Int(arguments[index + 1]) ?? 1)
     }()
+    let bufferSeconds: Int = {
+        guard let index = arguments.firstIndex(of: "--buffer-seconds"), arguments.indices.contains(index + 1) else {
+            return 40
+        }
+        return max(1, Int(arguments[index + 1]) ?? 40)
+    }()
     let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
     let derivedData = root.appending(path: ".build/DerivedData-VLCTimeshiftBenchmarkMac")
     print("Building the macOS VLC benchmark…")
@@ -62,6 +68,7 @@ do {
         "--vlc-timeshift-benchmark",
         "--exit-after-benchmark",
         "--benchmark-cycles=\(cycles)",
+        "--benchmark-buffer-seconds=\(bufferSeconds)",
     ]
     benchmark.standardOutput = benchmarkOutput
     benchmark.standardError = benchmarkOutput

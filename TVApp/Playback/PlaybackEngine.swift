@@ -127,6 +127,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     @Published private(set) var isPlaybackOutputConcealed = false
     @Published private(set) var pausedFrame: PlatformImage?
     @Published private(set) var timeshiftNavigationDebugState = "idle"
+    @Published private(set) var nativeTimeshiftRecoveryCount = 0
 #if os(tvOS)
     @Published private(set) var isPictureInPictureReady = false
     @Published private(set) var usesSampleBufferRendering = false
@@ -735,6 +736,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private func handleNativeLifecycleEvent(_ event: HTSPStreamLifecycleEvent) {
         switch event {
         case let .reconnecting(reason, attempt):
+            nativeTimeshiftRecoveryCount += 1
             logger.error(
                 "Recovering TVHeadend stream (attempt \(attempt, privacy: .public)): \(reason, privacy: .public)"
             )
@@ -810,6 +812,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
               case .live(.nativeTimeshift) = request.kind
         else { return }
 
+        nativeTimeshiftRecoveryCount += 1
         logger.error("Restarting stalled VLC pipeline: \(detail, privacy: .public)")
         anchorLivePlaybackPositionIfNeeded()
         publishLivePlaybackMarker()
@@ -1224,6 +1227,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         navigationShouldResume = true
         recoveryReason = nil
         recoveryAttempt = 0
+        nativeTimeshiftRecoveryCount = 0
         outputHealthMonitor.reset()
         livePlaybackPosition.reset()
         livePlaybackMarkerDate = nil

@@ -53,6 +53,12 @@ enum MacOSPlayerKeyboardShortcuts {
         }
     }
 }
+
+extension Notification.Name {
+    static let vlcTimeshiftBenchmarkPlayerCommand = Notification.Name(
+        "VLC_TIMESHIFT_BENCHMARK_PLAYER_COMMAND"
+    )
+}
 #endif
 
 struct PlaybackView: View {
@@ -67,6 +73,8 @@ struct PlaybackView: View {
     @State private var chromeActivity = UUID()
     @State private var profiles: [TVHeadendStreamProfile] = []
     @State private var hasStartedCurrentPresentation = false
+    @State private var timelineSeekTargetDate: Date?
+    @State private var timelineSeekCommitTask: Task<Void, Never>?
     @State private var isRefreshingGrowingRecording = false
     @State private var videoAttachmentRevision = 0
     @FocusState private var wakeSurfaceFocused: Bool
@@ -145,6 +153,7 @@ struct PlaybackView: View {
                             pausedPlaybackDate: engine.isLivePlaybackPositionAnchored
                                 ? engine.livePlaybackDate()
                                 : nil,
+                            seekTargetDate: timelineSeekTargetDate,
                             liveDelaySeconds: engine.liveDelaySeconds,
                             bufferStartedAt: engine.bufferStartedAt,
                             canPause: engine.canPause,
@@ -152,8 +161,8 @@ struct PlaybackView: View {
                             isPlaying: engine.state == .playing,
                             usesCompactLayout: usesCompactLayout,
                             usesCompactHeight: usesCompactHeight,
-                            seekBackward: { engine.skipBackward(by: $0); noteActivity() },
-                            seekForward: { skipForward(by: $0) },
+                            seekBackward: { stageTimelineSeek(by: -$0) },
+                            seekForward: { stageTimelineSeek(by: $0) },
                             togglePlayback: toggleTimelinePlayback,
                             showPanel: showPanel
                         )
@@ -316,6 +325,7 @@ struct PlaybackView: View {
             hideChrome()
         }
         .onDisappear {
+            timelineSeekCommitTask?.cancel()
             // Back intentionally collapses live playback into the guide
             // header. Only pause when the player view disappears for another
             // reason (or when the coordinator already paused a recording).
@@ -357,7 +367,9 @@ struct PlaybackView: View {
             }
         }
         .platformExitCommand {
-            if chromeMode != .hidden {
+            if timelineSeekTargetDate != nil {
+                cancelTimelineSeek()
+            } else if chromeMode != .hidden {
                 hideChrome()
             } else {
                 playback.leavePlayer()
@@ -376,6 +388,14 @@ struct PlaybackView: View {
             }
             perform(command)
             return .handled
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .vlcTimeshiftBenchmarkPlayerCommand)
+        ) { notification in
+            guard ProcessInfo.processInfo.arguments.contains("--vlc-timeshift-benchmark"),
+                  let command = notification.object as? MacOSPlayerKeyboardCommand
+            else { return }
+            perform(command)
         }
 #endif
         .onChange(of: engine.state) { _, state in
@@ -460,10 +480,18 @@ struct PlaybackView: View {
         case .togglePlayback:
             toggleTimelinePlayback()
         case let .seekBackward(seconds):
-            if engine.isSeekable { engine.skipBackward(by: seconds) }
+            if engine.isSeekable {
+                presentation.isRecording
+                    ? engine.skipBackward(by: seconds)
+                    : stageTimelineSeek(by: -seconds)
+            }
             showTimeline()
         case let .seekForward(seconds):
-            if engine.isSeekable { skipForward(by: seconds) }
+            if engine.isSeekable {
+                presentation.isRecording
+                    ? skipForward(by: seconds)
+                    : stageTimelineSeek(by: seconds)
+            }
             showTimeline()
         }
     }
@@ -495,6 +523,57 @@ struct PlaybackView: View {
         let needsLiveReconnect = engine.skipForward(by: seconds)
         noteActivity()
         if needsLiveReconnect { Task { await returnToLive() } }
+    }
+
+    private func stageTimelineSeek(by seconds: TimeInterval) {
+        guard !presentation.isRecording, engine.isSeekable, seconds != 0 else { return }
+        let liveEdge = Date()
+        let current = timelineSeekTargetDate ?? engine.livePlaybackDate(at: liveEdge)
+        let availableStart = engine.bufferStartedAt ?? liveEdge
+        let target = min(max(current.addingTimeInterval(seconds), availableStart), liveEdge)
+        guard abs(target.timeIntervalSince(current)) > NativeTimeshiftActionPlan.liveEdgeTolerance else {
+            return
+        }
+        timelineSeekTargetDate = target
+        noteActivity()
+
+        timelineSeekCommitTask?.cancel()
+        timelineSeekCommitTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(650))
+            guard !Task.isCancelled else { return }
+
+            engine.refreshPlaybackInformation()
+            let delta = target.timeIntervalSince(engine.livePlaybackDate())
+            if delta < -NativeTimeshiftActionPlan.liveEdgeTolerance {
+                engine.skipBackward(by: -delta)
+            } else if delta > NativeTimeshiftActionPlan.liveEdgeTolerance {
+                skipForward(by: delta)
+            } else {
+                timelineSeekTargetDate = nil
+                return
+            }
+
+            for _ in 0..<150 {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard !Task.isCancelled else { return }
+                engine.refreshPlaybackInformation()
+                let health = engine.nativeTimeshiftHealthSnapshot
+                if engine.state == .playing,
+                   !engine.isPlaybackOutputConcealed,
+                   health?.isNavigating != true {
+                    timelineSeekTargetDate = nil
+                    timelineSeekCommitTask = nil
+                    return
+                }
+            }
+        }
+    }
+
+    private func cancelTimelineSeek() {
+        timelineSeekCommitTask?.cancel()
+        timelineSeekCommitTask = nil
+        timelineSeekTargetDate = nil
+        noteActivity()
     }
 
     private func returnToLive() async {
@@ -684,6 +763,7 @@ private struct ProgrammePlaybackTimeline: View {
     let channel: GuideChannel
     let fallbackProgram: GuideProgram?
     let pausedPlaybackDate: Date?
+    let seekTargetDate: Date?
     let liveDelaySeconds: TimeInterval
     let bufferStartedAt: Date?
     let canPause: Bool
@@ -715,7 +795,7 @@ private struct ProgrammePlaybackTimeline: View {
     }
 
     private func timeline(at liveDate: Date) -> some View {
-        let playbackDate = pausedPlaybackDate
+        let playbackDate = seekTargetDate ?? pausedPlaybackDate
             ?? liveDate.addingTimeInterval(-liveDelaySeconds)
         let program = channel.programs.first { $0.start <= playbackDate && playbackDate < $0.end } ?? fallbackProgram
         let next = program.flatMap { current in
@@ -791,6 +871,17 @@ private struct ProgrammePlaybackTimeline: View {
                 }
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(.white.opacity(0.76))
+
+                if let seekTargetDate {
+                    Label(
+                        seekDescription(target: seekTargetDate, liveEdge: liveDate),
+                        systemImage: "scope"
+                    )
+                    .font(.callout.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(AppTheme.accent)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .transition(.opacity)
+                }
             } else {
                 Capsule().fill(.white.opacity(0.25)).frame(height: 14)
             }
@@ -836,6 +927,15 @@ private struct ProgrammePlaybackTimeline: View {
 
     private func clock(_ date: Date) -> String {
         date.formatted(date: .omitted, time: .standard)
+    }
+
+    private func seekDescription(target: Date, liveEdge: Date) -> String {
+        let delay = max(0, Int(liveEdge.timeIntervalSince(target).rounded()))
+        if delay == 0 { return "Go to live" }
+        let minutes = delay / 60
+        let seconds = delay % 60
+        let offset = minutes > 0 ? "\(minutes)m \(seconds)s" : "\(seconds)s"
+        return "Seek to \(clock(target)) · \(offset) behind live"
     }
 }
 

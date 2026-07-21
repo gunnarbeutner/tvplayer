@@ -272,9 +272,17 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         beginNavigation()
         controlQueue.async { [weak self] in
             guard let self else { return }
-            self.pendingLiveCommand = true
-            _ = self.seekCoordinator.requestLiveEdge()
-            self.sendPendingNavigationIfPaused()
+            // Prefer an absolute seek to the known live-edge timestamp. Some
+            // TVHeadend versions can flood stale packets after
+            // subscriptionLive, which makes VLC fail and resets this session's
+            // timeshift buffer. A rejected absolute live-edge seek is still
+            // retried with subscriptionLive by recoverRejectedLiveEdgeSeek().
+            self.pendingLiveCommand = false
+            if let target = self.seekCoordinator.requestLiveEdge() {
+                self.sendSeekWhenPaused(to: target)
+            } else if self.seekCoordinator.inFlightTarget == nil {
+                self.schedulePendingNavigationTimeout()
+            }
         }
     }
 

@@ -1155,7 +1155,7 @@ final class TimeshiftActionTests: XCTestCase {
         XCTAssertNil(tracker.result)
     }
 
-    func testPostSeekBufferHasPacketCountFallbackForMissingTimestamps() {
+    func testPostSeekBufferDoesNotResumeWithoutTimestampProof() {
         var tracker = HTSPPostSeekBufferTracker()
         let result = HTSPNavigationResult(
             landingTime: 0,
@@ -1164,10 +1164,10 @@ final class TimeshiftActionTests: XCTestCase {
         )
         tracker.begin(result, hasVideo: false)
 
-        for _ in 0..<(HTSPPostSeekBufferTracker.packetFallbackCount - 1) {
+        for _ in 0..<100 {
             XCTAssertNil(tracker.observePacket(time: nil))
         }
-        XCTAssertEqual(tracker.observePacket(time: nil), result)
+        XCTAssertEqual(tracker.result, result)
     }
 
     func testPostSeekBufferIncludesPrerollThroughExactTarget() {
