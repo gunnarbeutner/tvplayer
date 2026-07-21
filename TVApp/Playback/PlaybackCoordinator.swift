@@ -116,6 +116,7 @@ final class PlaybackCoordinator: ObservableObject {
     private var cachedLivePrefetch: CachedLivePrefetch?
     private var inFlightLivePrefetch: InFlightLivePrefetch?
     private var launchStartedAt: [UUID: Date] = [:]
+    private var engineStartIntentID: UUID?
     private var playbackClient: TVHeadendClient?
     private var playbackClientConfiguration: TVHeadendConfiguration?
 #if os(tvOS)
@@ -171,6 +172,9 @@ final class PlaybackCoordinator: ObservableObject {
             prewarmTask?.cancel()
             prewarmTask = nil
             prewarmedChannelID = nil
+            if engine.state == .preparing || engine.state == .paused {
+                engine.play()
+            }
             presentation = PlaybackPresentation(
                 id: presentationID,
                 channel: channel,
@@ -225,14 +229,16 @@ final class PlaybackCoordinator: ObservableObject {
                 try Task.checkCancellation()
                 guard playbackStartIntents.isCurrent(intentID) else { return }
                 logLaunchStage("request-ready", id: intentID)
-                engine.stop()
-                presentation = PlaybackPresentation(
+                let newPresentation = PlaybackPresentation(
                     id: intentID,
                     channel: channel,
                     program: program,
                     recording: nil,
                     request: request
                 )
+                try await prepareAndPlay(request, intentID: intentID)
+                guard playbackStartIntents.isCurrent(intentID) else { return }
+                presentation = newPresentation
                 finishPlaybackStartIntent(intentID)
             } catch is CancellationError {
                 finishPlaybackStartIntent(intentID)
@@ -279,13 +285,16 @@ final class PlaybackCoordinator: ObservableObject {
                 try Task.checkCancellation()
                 guard playbackStartIntents.isCurrent(intentID) else { return }
 
-                engine.stop()
-                presentation = PlaybackPresentation(
+                let newPresentation = PlaybackPresentation(
+                    id: intentID,
                     channel: target,
                     program: program,
                     recording: nil,
                     request: request
                 )
+                try await prepareAndPlay(request, intentID: intentID)
+                guard playbackStartIntents.isCurrent(intentID) else { return }
+                presentation = newPresentation
                 navigationSelection = PlaybackNavigationSelection(
                     channelID: target.id,
                     programID: program?.id
@@ -559,6 +568,9 @@ final class PlaybackCoordinator: ObservableObject {
                 ))
                 logLaunchStage("request-ready", id: presentation.id)
             }
+            if engine.state == .preparing || engine.state == .paused {
+                engine.play()
+            }
             if let channelID = channel?.id ?? presentation?.channel.id {
                 navigationSelection = PlaybackNavigationSelection(
                     channelID: channelID,
@@ -598,20 +610,23 @@ final class PlaybackCoordinator: ObservableObject {
                 try Task.checkCancellation()
                 guard playbackStartIntents.isCurrent(intentID) else { return }
                 logLaunchStage("request-ready", id: intentID)
-                engine.stop()
-                presentation = PlaybackPresentation(
+                let request = LiveStreamRequest(
+                    url: url,
+                    networkCachingMilliseconds: 1_500,
+                    profile: "recording",
+                    kind: .recording(isGrowing: recording.state == .recording),
+                    expectedDurationSeconds: recording.duration
+                )
+                let newPresentation = PlaybackPresentation(
                     id: intentID,
                     channel: playbackChannel,
                     program: nil,
                     recording: recording,
-                    request: LiveStreamRequest(
-                        url: url,
-                        networkCachingMilliseconds: 1_500,
-                        profile: "recording",
-                        kind: .recording(isGrowing: recording.state == .recording),
-                        expectedDurationSeconds: recording.duration
-                    )
+                    request: request
                 )
+                try await prepareAndPlay(request, intentID: intentID)
+                guard playbackStartIntents.isCurrent(intentID) else { return }
+                presentation = newPresentation
                 finishPlaybackStartIntent(intentID)
             } catch is CancellationError {
                 finishPlaybackStartIntent(intentID)
@@ -665,10 +680,38 @@ final class PlaybackCoordinator: ObservableObject {
 
     private func cancelPlaybackStartIntent() {
         playbackStartIntents.cancel()
+        if engineStartIntentID != nil {
+            engineStartIntentID = nil
+            engine.stop()
+        }
     }
 
     private func finishPlaybackStartIntent(_ intentID: UUID) {
         playbackStartIntents.finish(intentID)
+    }
+
+    private func prepareAndPlay(
+        _ request: LiveStreamRequest,
+        intentID: UUID
+    ) async throws {
+        engineStartIntentID = intentID
+        engine.stop()
+        do {
+            try await engine.prepare(request)
+            try Task.checkCancellation()
+            guard playbackStartIntents.isCurrent(intentID),
+                  engineStartIntentID == intentID
+            else { throw CancellationError() }
+            logLaunchStage("prepared", id: intentID)
+            engine.play()
+            engineStartIntentID = nil
+        } catch {
+            if engineStartIntentID == intentID {
+                engineStartIntentID = nil
+                engine.stop()
+            }
+            throw error
+        }
     }
 
     private func finishLaunch(_ id: UUID, dismissPlayer: Bool) {

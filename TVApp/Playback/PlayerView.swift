@@ -303,10 +303,10 @@ struct PlaybackView: View {
         }
         .task(id: presentation.id) {
             hasStartedCurrentPresentation = false
-            if engine.state == .idle {
-                await startPlayback(with: presentation.request)
-            } else if engine.state == .paused || engine.state == .preparing {
+            if engine.state == .paused {
                 engine.play()
+                requestVideoReattachment()
+            } else if engine.state == .playing {
                 requestVideoReattachment()
             }
         }

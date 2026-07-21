@@ -160,6 +160,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private var hasStartedPlayback = false
     private var didLogCapabilities = false
     private var activeRequest: LiveStreamRequest?
+    private var activePreparationID: UUID?
     private var pendingSnapshotURL: URL?
 
     override init() {
@@ -221,6 +222,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 #endif
 
     func prepare(_ request: LiveStreamRequest) async throws {
+        let preparationID = UUID()
+        activePreparationID = preparationID
+        defer {
+            if activePreparationID == preparationID { activePreparationID = nil }
+        }
         cancelPostSeekOutputGate()
         pipelineRecoveryTask?.cancel()
         pipelineRecoveryTask = nil
@@ -249,6 +255,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                         channelID: htsp.channelID,
                         profile: request.profile
                     )
+                    guard activePreparationID == preparationID, !Task.isCancelled else {
+                        stream.close()
+                        throw CancellationError()
+                    }
                     media = VLCMedia(stream: stream)
                     media.addOption(":demux=ts")
                     nativeInputStream = stream
@@ -258,7 +268,12 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                     configureNativeCallbacks(for: stream, sessionID: sessionID)
                     activeLivePlaybackMode = .tvHeadend
                     logger.info("Using TVHeadend native timeshift over HTSP")
+                } catch is CancellationError {
+                    throw CancellationError()
                 } catch {
+                    guard activePreparationID == preparationID else {
+                        throw CancellationError()
+                    }
                     logger.error("Native timeshift unavailable; using live-only HTTP: \(error.localizedDescription, privacy: .public)")
                     media = VLCMedia(url: request.url)
                     activeLivePlaybackMode = .liveOnly(reason: error.localizedDescription)
@@ -269,6 +284,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             }
         case .recording:
             media = VLCMedia(url: request.url)
+        }
+        guard activePreparationID == preparationID, !Task.isCancelled else {
+            throw CancellationError()
         }
         addCachingOptions(to: media, milliseconds: request.networkCachingMilliseconds)
 
@@ -370,6 +388,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 
     func stop() {
+        activePreparationID = nil
         cancelPostSeekOutputGate()
         pipelineRecoveryTask?.cancel()
         pipelineRecoveryTask = nil
