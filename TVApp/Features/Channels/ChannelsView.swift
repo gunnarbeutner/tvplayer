@@ -49,69 +49,58 @@ struct ChannelsView: View {
                 )
             } else {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 28) {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("CHANNELS")
-                                .font(.caption.bold())
-                                .tracking(2.2)
-                                .foregroundStyle(AppTheme.accent)
-                            Text("Watch live TV")
-                                .font(.largeTitle.bold())
-                        }
-
-                        LazyVGrid(columns: columns, alignment: .leading, spacing: 30) {
-                            ForEach(displayedChannels) { channel in
-                                ChannelCard(
-                                    channel: channel,
-                                    currentProgram: currentProgram(for: channel),
-                                    isFavorite: channelPreferences.isFavorite(channel.id),
-                                    isFocused: focusedChannelID == channel.id,
-                                    onWatch: {
-                                        playback.start(
-                                            channel: channel,
-                                            program: currentProgram(for: channel),
-                                            configuration: settings.configuration
-                                        )
-                                    }
+                    LazyVGrid(columns: columns, alignment: .leading, spacing: 30) {
+                        ForEach(displayedChannels) { channel in
+                            ChannelCard(
+                                channel: channel,
+                                currentProgram: currentProgram(for: channel),
+                                isFavorite: channelPreferences.isFavorite(channel.id),
+                                isFocused: focusedChannelID == channel.id,
+                                onWatch: {
+                                    playback.start(
+                                        channel: channel,
+                                        program: currentProgram(for: channel),
+                                        configuration: settings.configuration
+                                    )
+                                }
+                            )
+                            .contentShape(RoundedRectangle(cornerRadius: 14))
+                            .focusable()
+                            .focused($focusedChannelID, equals: channel.id)
+                            .focusEffectDisabled()
+                            .onTapGesture {
+                                detail = ProgrammeDetailPresentation(
+                                    program: currentProgram(for: channel),
+                                    channel: channel
                                 )
-                                .contentShape(RoundedRectangle(cornerRadius: 14))
-                                .focusable()
-                                .focused($focusedChannelID, equals: channel.id)
-                                .focusEffectDisabled()
-                                .onTapGesture {
-                                    detail = ProgrammeDetailPresentation(
-                                        program: currentProgram(for: channel),
-                                        channel: channel
-                                    )
-                                }
-                                .contextMenu {
-                                    Button {
-                                        channelPreferences.toggleFavorite(channel.id)
-                                    } label: {
-                                        Label(
-                                            channelPreferences.isFavorite(channel.id)
-                                                ? "Remove Channel from Favourites"
-                                                : "Add Channel to Favourites",
-                                            systemImage: channelPreferences.isFavorite(channel.id)
-                                                ? "star.slash"
-                                                : "star"
-                                        )
-                                    }
-                                }
-                                .accessibilityAddTraits(.isButton)
-                                .accessibilityAction {
-                                    detail = ProgrammeDetailPresentation(
-                                        program: currentProgram(for: channel),
-                                        channel: channel
-                                    )
-                                }
-                                .accessibilityAction(
-                                    named: channelPreferences.isFavorite(channel.id)
-                                        ? "Remove Channel from Favourites"
-                                        : "Add Channel to Favourites"
-                                ) {
+                            }
+                            .contextMenu {
+                                Button {
                                     channelPreferences.toggleFavorite(channel.id)
+                                } label: {
+                                    Label(
+                                        channelPreferences.isFavorite(channel.id)
+                                            ? "Remove Channel from Favourites"
+                                            : "Add Channel to Favourites",
+                                        systemImage: channelPreferences.isFavorite(channel.id)
+                                            ? "star.slash"
+                                            : "star"
+                                    )
                                 }
+                            }
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityAction {
+                                detail = ProgrammeDetailPresentation(
+                                    program: currentProgram(for: channel),
+                                    channel: channel
+                                )
+                            }
+                            .accessibilityAction(
+                                named: channelPreferences.isFavorite(channel.id)
+                                    ? "Remove Channel from Favourites"
+                                    : "Add Channel to Favourites"
+                            ) {
+                                channelPreferences.toggleFavorite(channel.id)
                             }
                         }
                     }
