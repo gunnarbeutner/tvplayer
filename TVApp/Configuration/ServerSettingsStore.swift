@@ -16,7 +16,13 @@ enum TVHeadendTimeshiftStatus: Equatable {
 
 @MainActor
 final class ServerSettingsStore: ObservableObject {
-    private enum Key {
+    private struct StoredPayload: Codable {
+        var version = 1
+        var profiles: [TVHeadendServerProfile]
+        var activeProfileID: String?
+    }
+
+    private enum LegacyKey {
         static let baseURL = "tvheadend.baseURL"
         static let username = "tvheadend.username"
         static let streamProfile = "tvheadend.streamProfile"
@@ -25,140 +31,165 @@ final class ServerSettingsStore: ObservableObject {
         static let xmltvURL = "tvheadend.xmltvURL"
     }
 
-    @Published var baseURLText: String {
-        didSet { invalidateConnectionStatus() }
-    }
-    @Published var username: String {
-        didSet { invalidateConnectionStatus() }
-    }
-    @Published var password: String {
-        didSet { invalidateConnectionStatus() }
-    }
-    @Published var streamProfile: String
-    @Published var htspPortText: String {
-        didSet { invalidateConnectionStatus() }
-    }
-    @Published var guideCacheURLText: String
-    @Published var xmltvURLText: String
+    static let storageKey = "tvheadend.serverProfiles.v1"
+    static let environmentProfileID = "environment-server"
+
+    @Published private(set) var profiles: [TVHeadendServerProfile] = []
+    @Published private(set) var activeProfileID: String?
+    @Published private(set) var editingProfileID: String?
+    @Published private(set) var isAddingServer = false
+    @Published private(set) var onlineProfileIDs: Set<String> = []
     @Published private(set) var revision = 0
     @Published private(set) var connectionStatus: ServerConnectionStatus = .notTested
     @Published private(set) var timeshiftStatus: TVHeadendTimeshiftStatus = .notTested
+    @Published private(set) var draftIsDirty = false
+
+    @Published var displayNameText = "" { didSet { draftDidChange() } }
+    @Published var baseURLText = "" { didSet { draftDidChange(connectionRelevant: true) } }
+    @Published var username = "" { didSet { draftDidChange(connectionRelevant: true) } }
+    @Published var password = "" { didSet { draftDidChange(connectionRelevant: true) } }
+    @Published var streamProfile = "pass" { didSet { draftDidChange() } }
+    @Published var htspPortText = "9982" { didSet { draftDidChange(connectionRelevant: true) } }
+    @Published var guideCacheURLText = "" { didSet { draftDidChange() } }
+    @Published var xmltvURLText = "" { didSet { draftDidChange() } }
 
     private let defaults: UserDefaults
-    private let keychain: KeychainPasswordStore
-    private let sharedConfiguration: SharedTVHeadendConfigurationStore
+    private let keychain: any PasswordStoring
+    private let sharedConfiguration: SharedTVHeadendConfigurationStore?
+    private let automaticallyTestsConnections: Bool
+    private var passwords: [String: String] = [:]
     private var discovery: TVHeadendDiscovery?
+    private var latestDiscoveryByProfileID: [String: DiscoveredTVHeadendService] = [:]
+    private var profileIDByServiceIdentity: [String: String] = [:]
+    private var isLoadingDraft = false
 
     init(
         defaults: UserDefaults = .standard,
-        keychain: KeychainPasswordStore = KeychainPasswordStore(),
-        sharedConfiguration: SharedTVHeadendConfigurationStore = SharedTVHeadendConfigurationStore()
+        keychain: any PasswordStoring = KeychainPasswordStore(),
+        sharedConfiguration: SharedTVHeadendConfigurationStore? = SharedTVHeadendConfigurationStore(),
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        startsDiscovery: Bool = true,
+        automaticallyTestsConnections: Bool = true
     ) {
         self.defaults = defaults
         self.keychain = keychain
         self.sharedConfiguration = sharedConfiguration
+        self.automaticallyTestsConnections = automaticallyTestsConnections
 
-        let environment = ProcessInfo.processInfo.environment
-        let shared = sharedConfiguration.read()
-        baseURLText = environment["TVPLAYER_TVH_URL"]
-            ?? shared?.baseURL?.absoluteString
-            ?? defaults.string(forKey: Key.baseURL)
-            ?? ""
-        username = environment["TVPLAYER_TVH_USERNAME"]
-            ?? shared?.username
-            ?? defaults.string(forKey: Key.username)
-            ?? ""
-        password = environment["TVPLAYER_TVH_PASSWORD"] ?? shared?.password ?? keychain.read()
-        streamProfile = environment["TVPLAYER_TVH_PROFILE"]
-            ?? shared?.streamProfile
-            ?? defaults.string(forKey: Key.streamProfile)
-            ?? "pass"
-        htspPortText = environment["TVPLAYER_TVH_HTSP_PORT"]
-            ?? shared.map { String($0.htspPort) }
-            ?? defaults.string(forKey: Key.htspPort)
-            ?? "9982"
-        guideCacheURLText = environment["TVPLAYER_GUIDE_URL"]
-            ?? shared?.guideCacheURL?.absoluteString
-            ?? defaults.string(forKey: Key.guideCacheURL)
-            ?? ""
-        xmltvURLText = environment["TVPLAYER_XMLTV_URL"]
-            ?? shared?.xmltvURL?.absoluteString
-            ?? defaults.string(forKey: Key.xmltvURL)
-            ?? ""
-
-        // Device deployments can provide configuration at launch without putting
-        // credentials in the project. Persist that bootstrap just as Settings does,
-        // keeping the password in the device Keychain for later launches.
-        if environment["TVPLAYER_TVH_URL"] != nil {
-            defaults.set(baseURLText, forKey: Key.baseURL)
-        }
-        if environment["TVPLAYER_TVH_USERNAME"] != nil {
-            defaults.set(username, forKey: Key.username)
-        }
-        if environment["TVPLAYER_TVH_PROFILE"] != nil {
-            defaults.set(streamProfile, forKey: Key.streamProfile)
-        }
-        if environment["TVPLAYER_TVH_HTSP_PORT"] != nil {
-            defaults.set(htspPortText, forKey: Key.htspPort)
-        }
-        if environment["TVPLAYER_GUIDE_URL"] != nil {
-            defaults.set(guideCacheURLText, forKey: Key.guideCacheURL)
-        }
-        if environment["TVPLAYER_XMLTV_URL"] != nil {
-            if xmltvURLText.isEmpty {
-                defaults.removeObject(forKey: Key.xmltvURL)
-            } else {
-                defaults.set(xmltvURLText, forKey: Key.xmltvURL)
+        if let data = defaults.data(forKey: Self.storageKey),
+           let payload = try? JSONDecoder().decode(StoredPayload.self, from: data),
+           payload.version == 1 {
+            profiles = payload.profiles
+            activeProfileID = payload.activeProfileID.flatMap { id in
+                profiles.contains(where: { $0.id == id }) ? id : nil
+            } ?? profiles.first?.id
+            for profile in profiles {
+                passwords[profile.id] = keychain.read(account: Self.passwordAccount(for: profile.id))
             }
-        }
-        if let environmentPassword = environment["TVPLAYER_TVH_PASSWORD"] {
-            try? keychain.write(environmentPassword)
+        } else if let migrated = Self.legacyConfiguration(
+            defaults: defaults,
+            keychain: keychain,
+            shared: sharedConfiguration?.read(),
+            environment: [:]
+        ), let baseURL = migrated.baseURL {
+            let id = migrated.serverProfileID ?? UUID().uuidString
+            let profile = TVHeadendServerProfile(
+                id: id,
+                name: Self.defaultName(for: baseURL),
+                baseURL: baseURL,
+                username: migrated.username,
+                streamProfile: migrated.streamProfile,
+                htspPort: migrated.htspPort,
+                guideCacheURL: migrated.guideCacheURL,
+                xmltvURL: migrated.xmltvURL,
+                origin: .manual,
+                isEdited: true
+            )
+            profiles = [profile]
+            activeProfileID = id
+            passwords[id] = migrated.password
+            try? keychain.write(migrated.password, account: Self.passwordAccount(for: id))
         }
 
-#if os(tvOS)
-        // Migrate the pre-multiuser split settings/password once. The legacy
-        // values remain in place unless the independent-keychain write works.
-        if shared == nil, configuration.baseURL != nil {
-            try? sharedConfiguration.write(configuration)
-        }
-#endif
+        applyEnvironmentProfile(environment)
 
-        let persistedURL = defaults.string(forKey: Key.baseURL) ?? ""
-        let hasGuidePreference = environment["TVPLAYER_GUIDE_URL"] != nil
-            || defaults.object(forKey: Key.guideCacheURL) != nil
-        if persistedURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || !hasGuidePreference {
-            let discovery = TVHeadendDiscovery { [weak self] discovered in
-                self?.adopt(discovered)
+        editingProfileID = activeProfileID
+        if let activeProfileID {
+            loadDraft(profileID: activeProfileID)
+        } else {
+            beginAddingServer()
+        }
+        persist()
+        syncSharedConfiguration()
+
+        if startsDiscovery {
+            let discovery = TVHeadendDiscovery { [weak self] event in
+                self?.handleDiscoveryEvent(event)
             }
             self.discovery = discovery
             discovery.start()
         }
     }
 
+    var activeProfile: TVHeadendServerProfile? {
+        guard let activeProfileID else { return nil }
+        return profiles.first { $0.id == activeProfileID }
+    }
+
+    var editingProfile: TVHeadendServerProfile? {
+        guard let editingProfileID else { return nil }
+        return profiles.first { $0.id == editingProfileID }
+    }
+
     var configuration: TVHeadendConfiguration {
-        TVHeadendConfiguration(
-            baseURL: Self.httpURL(from: baseURLText),
-            username: username.trimmingCharacters(in: .whitespacesAndNewlines),
-            password: password,
-            streamProfile: normalizedProfile,
-            htspPort: normalizedHTSPPort ?? 9982,
-            guideCacheURL: Self.optionalHTTPURL(from: guideCacheURLText),
-            xmltvURL: Self.optionalHTTPURL(from: xmltvURLText)
-        )
+        guard let profile = activeProfile else { return Self.emptyConfiguration }
+        return profile.configuration(password: passwords[profile.id] ?? "")
+    }
+
+    func isOnline(_ profile: TVHeadendServerProfile) -> Bool {
+        onlineProfileIDs.contains(profile.id)
+    }
+
+    func selectServer(_ id: String) {
+        guard profiles.contains(where: { $0.id == id }) else { return }
+        let changed = activeProfileID != id
+        activeProfileID = id
+        editingProfileID = id
+        isAddingServer = false
+        loadDraft(profileID: id)
+        persist()
+        if changed {
+            revision &+= 1
+            syncSharedConfiguration()
+            scheduleConnectionTest()
+        }
+    }
+
+    func beginAddingServer() {
+        editingProfileID = nil
+        isAddingServer = true
+        loadDraft(profile: nil)
+    }
+
+    func cancelEditing() {
+        guard let activeProfileID else {
+            beginAddingServer()
+            return
+        }
+        editingProfileID = activeProfileID
+        isAddingServer = false
+        loadDraft(profileID: activeProfileID)
     }
 
     func validatedDraft() throws -> TVHeadendConfiguration {
         guard let baseURL = Self.httpURL(from: baseURLText) else {
             throw ConfigurationError.invalidServerURL
         }
-
         let trimmedGuideCache = guideCacheURLText.trimmingCharacters(in: .whitespacesAndNewlines)
         let guideCacheURL = Self.optionalHTTPURL(from: trimmedGuideCache)
         if !trimmedGuideCache.isEmpty, guideCacheURL == nil {
             throw ConfigurationError.invalidGuideCacheURL
         }
-
         let trimmedXMLTV = xmltvURLText.trimmingCharacters(in: .whitespacesAndNewlines)
         let xmltvURL = Self.optionalHTTPURL(from: trimmedXMLTV)
         if !trimmedXMLTV.isEmpty, xmltvURL == nil {
@@ -167,8 +198,8 @@ final class ServerSettingsStore: ObservableObject {
         guard let htspPort = normalizedHTSPPort else {
             throw ConfigurationError.invalidHTSPPort
         }
-
         return TVHeadendConfiguration(
+            serverProfileID: editingProfileID,
             baseURL: baseURL,
             username: username.trimmingCharacters(in: .whitespacesAndNewlines),
             password: password,
@@ -180,35 +211,96 @@ final class ServerSettingsStore: ObservableObject {
     }
 
     func save() throws {
-        let configuration = try validatedDraft()
-        defaults.set(configuration.baseURL?.absoluteString, forKey: Key.baseURL)
-        defaults.set(configuration.username, forKey: Key.username)
-        defaults.set(configuration.streamProfile, forKey: Key.streamProfile)
-        defaults.set(String(configuration.htspPort), forKey: Key.htspPort)
-        defaults.set(configuration.guideCacheURL?.absoluteString ?? "", forKey: Key.guideCacheURL)
+        let draft = try validatedDraft()
+        guard let baseURL = draft.baseURL else { throw ConfigurationError.invalidServerURL }
+        let id = editingProfileID ?? UUID().uuidString
+        try keychain.write(draft.password, account: Self.passwordAccount(for: id))
 
-        if let xmltvURL = configuration.xmltvURL {
-            defaults.set(xmltvURL.absoluteString, forKey: Key.xmltvURL)
+        let existing = editingProfileID.flatMap { id in profiles.first { $0.id == id } }
+        let name = displayNameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let profile = TVHeadendServerProfile(
+            id: id,
+            name: name.isEmpty ? Self.defaultName(for: baseURL) : name,
+            baseURL: baseURL,
+            username: draft.username,
+            streamProfile: draft.streamProfile,
+            htspPort: draft.htspPort,
+            guideCacheURL: draft.guideCacheURL,
+            xmltvURL: draft.xmltvURL,
+            origin: existing?.origin ?? .manual,
+            isEdited: existing?.origin == .discovered,
+            discoveryID: existing?.discoveryID,
+            discoveryServiceIdentity: existing?.discoveryServiceIdentity,
+            lastSeenAt: existing?.lastSeenAt
+        )
+
+        if let index = profiles.firstIndex(where: { $0.id == id }) {
+            profiles[index] = profile
         } else {
-            defaults.removeObject(forKey: Key.xmltvURL)
+            profiles.append(profile)
         }
+        passwords[id] = draft.password
+        activeProfileID = id
+        editingProfileID = id
+        isAddingServer = false
+        loadDraft(profile: profile)
+        persist()
+        revision &+= 1
+        syncSharedConfiguration()
+    }
 
-        try keychain.write(configuration.password)
-#if os(tvOS)
-        try sharedConfiguration.write(configuration)
-#endif
-        streamProfile = configuration.streamProfile
-        htspPortText = String(configuration.htspPort)
-        revision += 1
+    func canForget(_ profile: TVHeadendServerProfile) -> Bool {
+        profile.origin == .manual || !isOnline(profile)
+    }
+
+    func forget(_ id: String) {
+        guard let profile = profiles.first(where: { $0.id == id }), canForget(profile) else { return }
+        keychain.delete(account: Self.passwordAccount(for: id))
+        profiles.removeAll { $0.id == id }
+        passwords[id] = nil
+        onlineProfileIDs.remove(id)
+        latestDiscoveryByProfileID[id] = nil
+        profileIDByServiceIdentity = profileIDByServiceIdentity.filter { $0.value != id }
+
+        let activeChanged = activeProfileID == id
+        if activeChanged { activeProfileID = profiles.first?.id }
+        if let activeProfileID {
+            editingProfileID = activeProfileID
+            isAddingServer = false
+            loadDraft(profileID: activeProfileID)
+        } else {
+            beginAddingServer()
+        }
+        persist()
+        if activeChanged {
+            revision &+= 1
+            syncSharedConfiguration()
+            scheduleConnectionTest()
+        }
+    }
+
+    func restoreAutomaticUpdates(_ id: String) {
+        guard let index = profiles.firstIndex(where: { $0.id == id }),
+              profiles[index].origin == .discovered
+        else { return }
+        profiles[index].isEdited = false
+        if let service = latestDiscoveryByProfileID[id] {
+            apply(service, toProfileAt: index)
+        } else {
+            persist()
+        }
+        if editingProfileID == id { loadDraft(profileID: id) }
     }
 
     func testConnection() async {
+        let testedProfileID = editingProfileID
         connectionStatus = .checking
         timeshiftStatus = .checking
         do {
             let configuration = try validatedDraft()
             guard configuration.isComplete else { throw TVProviderError.incompleteConfiguration }
             let info = try await TVHeadendClient(configuration: configuration).serverInfo()
+            guard editingProfileID == testedProfileID else { return }
             let version = [info.name, info.version].compactMap { $0 }.joined(separator: " ")
             connectionStatus = .connected(version)
             guard info.capabilities.contains("timeshift") else {
@@ -217,19 +309,161 @@ final class ServerSettingsStore: ObservableObject {
             }
             do {
                 try await HTSPConnection.probe(configuration: configuration)
+                guard editingProfileID == testedProfileID else { return }
                 timeshiftStatus = .ready
             } catch is CancellationError {
                 timeshiftStatus = .notTested
             } catch {
+                guard editingProfileID == testedProfileID else { return }
                 timeshiftStatus = .unavailable(error.localizedDescription)
             }
         } catch is CancellationError {
             connectionStatus = .notTested
             timeshiftStatus = .notTested
         } catch {
+            guard editingProfileID == testedProfileID else { return }
             connectionStatus = .failed(error.localizedDescription)
             timeshiftStatus = .unavailable("Server connection failed")
         }
+    }
+
+    func handleDiscoveryEvent(_ event: TVHeadendDiscoveryEvent) {
+        switch event {
+        case let .upsert(service):
+            adopt(service)
+        case let .removed(serviceIdentity):
+            guard let profileID = profileIDByServiceIdentity.removeValue(forKey: serviceIdentity),
+                  !profileIDByServiceIdentity.values.contains(profileID)
+            else { return }
+            onlineProfileIDs.remove(profileID)
+        }
+    }
+
+    private func adopt(_ service: DiscoveredTVHeadendService) {
+        let settings = service.settings
+        let index = settings.discoveryID.flatMap { discoveryID in
+            profiles.firstIndex { $0.discoveryID == discoveryID }
+        } ?? profiles.firstIndex { $0.discoveryServiceIdentity == service.serviceIdentity }
+            ?? profiles.firstIndex { Self.sameServer($0.baseURL, settings.baseURL) }
+
+        if let index {
+            let profileID = profiles[index].id
+            let wasManual = profiles[index].origin == .manual
+            latestDiscoveryByProfileID[profileID] = service
+            profileIDByServiceIdentity[service.serviceIdentity] = profileID
+            onlineProfileIDs.insert(profileID)
+
+            profiles[index].origin = .discovered
+            if wasManual { profiles[index].isEdited = true }
+            profiles[index].discoveryID = settings.discoveryID ?? profiles[index].discoveryID
+            profiles[index].discoveryServiceIdentity = service.serviceIdentity
+            profiles[index].lastSeenAt = Date()
+            if profiles[index].isEdited {
+                persist()
+                return
+            }
+            apply(service, toProfileAt: index)
+            return
+        }
+
+        let profile = TVHeadendServerProfile(
+            name: service.name,
+            baseURL: settings.baseURL,
+            username: settings.username,
+            streamProfile: settings.streamProfile,
+            htspPort: settings.htspPort,
+            guideCacheURL: settings.guideCacheURL,
+            xmltvURL: settings.xmltvURL,
+            origin: .discovered,
+            isEdited: false,
+            discoveryID: settings.discoveryID,
+            discoveryServiceIdentity: service.serviceIdentity,
+            lastSeenAt: Date()
+        )
+        do {
+            try keychain.write(settings.password, account: Self.passwordAccount(for: profile.id))
+        } catch {
+            connectionStatus = .failed(error.localizedDescription)
+            return
+        }
+        profiles.append(profile)
+        passwords[profile.id] = settings.password
+        latestDiscoveryByProfileID[profile.id] = service
+        profileIDByServiceIdentity[service.serviceIdentity] = profile.id
+        onlineProfileIDs.insert(profile.id)
+
+        let becomesActive = activeProfileID == nil
+        if becomesActive {
+            activeProfileID = profile.id
+            editingProfileID = profile.id
+            isAddingServer = false
+            loadDraft(profile: profile)
+            revision &+= 1
+            syncSharedConfiguration()
+            scheduleConnectionTest()
+        }
+        persist()
+    }
+
+    private func apply(_ service: DiscoveredTVHeadendService, toProfileAt index: Int) {
+        let oldConfiguration = profiles[index].configuration(password: passwords[profiles[index].id] ?? "")
+        let profileID = profiles[index].id
+        do {
+            try keychain.write(service.settings.password, account: Self.passwordAccount(for: profileID))
+        } catch {
+            if activeProfileID == profileID { connectionStatus = .failed(error.localizedDescription) }
+            persist()
+            return
+        }
+
+        profiles[index].name = service.name
+        profiles[index].baseURL = service.settings.baseURL
+        profiles[index].username = service.settings.username
+        profiles[index].streamProfile = service.settings.streamProfile
+        profiles[index].htspPort = service.settings.htspPort
+        profiles[index].guideCacheURL = service.settings.guideCacheURL
+        profiles[index].xmltvURL = service.settings.xmltvURL
+        profiles[index].origin = .discovered
+        profiles[index].isEdited = false
+        profiles[index].discoveryID = service.settings.discoveryID ?? profiles[index].discoveryID
+        profiles[index].discoveryServiceIdentity = service.serviceIdentity
+        profiles[index].lastSeenAt = Date()
+        passwords[profileID] = service.settings.password
+
+        let newConfiguration = profiles[index].configuration(password: service.settings.password)
+        let activeChanged = activeProfileID == profileID && oldConfiguration != newConfiguration
+        if editingProfileID == profileID, !draftIsDirty { loadDraft(profile: profiles[index]) }
+        persist()
+        if activeChanged {
+            revision &+= 1
+            syncSharedConfiguration()
+            scheduleConnectionTest()
+        }
+    }
+
+    private func loadDraft(profileID: String) {
+        loadDraft(profile: profiles.first { $0.id == profileID })
+    }
+
+    private func loadDraft(profile: TVHeadendServerProfile?) {
+        isLoadingDraft = true
+        displayNameText = profile?.name ?? ""
+        baseURLText = profile?.baseURL.absoluteString ?? ""
+        username = profile?.username ?? ""
+        password = profile.flatMap { passwords[$0.id] } ?? ""
+        streamProfile = profile?.streamProfile ?? "pass"
+        htspPortText = String(profile?.htspPort ?? 9982)
+        guideCacheURLText = profile?.guideCacheURL?.absoluteString ?? ""
+        xmltvURLText = profile?.xmltvURL?.absoluteString ?? ""
+        isLoadingDraft = false
+        draftIsDirty = false
+        invalidateConnectionStatus()
+    }
+
+    private func draftDidChange(connectionRelevant: Bool = false) {
+        guard !isLoadingDraft else { return }
+        draftIsDirty = true
+        if connectionRelevant { invalidateConnectionStatus() }
     }
 
     private func invalidateConnectionStatus() {
@@ -237,82 +471,106 @@ final class ServerSettingsStore: ObservableObject {
         timeshiftStatus = .notTested
     }
 
-    private func adopt(_ discovered: DiscoveredTVHeadendSettings) {
-        if let configuredURL = Self.httpURL(from: baseURLText) {
-            guard Self.sameServer(configuredURL, discovered.baseURL) else { return }
+    private func scheduleConnectionTest() {
+        guard automaticallyTestsConnections else { return }
+        Task { await testConnection() }
+    }
 
-            var changed = false
-            if guideCacheURLText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-               let guideCacheURL = discovered.guideCacheURL {
-                guideCacheURLText = guideCacheURL.absoluteString
-                defaults.set(guideCacheURLText, forKey: Key.guideCacheURL)
-                changed = true
-            }
-            if xmltvURLText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-               let xmltvURL = discovered.xmltvURL {
-                xmltvURLText = xmltvURL.absoluteString
-                defaults.set(xmltvURLText, forKey: Key.xmltvURL)
-                changed = true
-            }
-            if htspPortText == "9982", discovered.htspPort != 9982 {
-                htspPortText = String(discovered.htspPort)
-                defaults.set(htspPortText, forKey: Key.htspPort)
-                changed = true
-            }
-
-            discovery?.stop()
-            discovery = nil
-            if changed {
-#if os(tvOS)
-                try? sharedConfiguration.write(configuration)
-#endif
-                revision += 1
-            }
-            return
-        }
-
-        do {
-            // Write the secret first: an mDNS bootstrap must never fall back to
-            // persisting its password in UserDefaults.
-            try keychain.write(discovered.password)
-
-            baseURLText = discovered.baseURL.absoluteString
-            username = discovered.username
-            password = discovered.password
-            streamProfile = discovered.streamProfile
-            htspPortText = String(discovered.htspPort)
-            guideCacheURLText = discovered.guideCacheURL?.absoluteString ?? ""
-            xmltvURLText = discovered.xmltvURL?.absoluteString ?? ""
-
-            defaults.set(baseURLText, forKey: Key.baseURL)
-            defaults.set(username, forKey: Key.username)
-            defaults.set(streamProfile, forKey: Key.streamProfile)
-            defaults.set(htspPortText, forKey: Key.htspPort)
-            defaults.set(guideCacheURLText, forKey: Key.guideCacheURL)
-            if xmltvURLText.isEmpty {
-                defaults.removeObject(forKey: Key.xmltvURL)
-            } else {
-                defaults.set(xmltvURLText, forKey: Key.xmltvURL)
-            }
-
-#if os(tvOS)
-            try? sharedConfiguration.write(configuration)
-#endif
-
-            discovery?.stop()
-            discovery = nil
-            revision += 1
-            Task { await testConnection() }
-        } catch {
-            discovery?.stop()
-            discovery = nil
-            connectionStatus = .failed(error.localizedDescription)
+    private func persist() {
+        let payload = StoredPayload(profiles: profiles, activeProfileID: activeProfileID)
+        if let data = try? JSONEncoder().encode(payload) {
+            defaults.set(data, forKey: Self.storageKey)
         }
     }
 
+    private func syncSharedConfiguration() {
+#if os(tvOS)
+        guard configuration.baseURL != nil else { return }
+        try? sharedConfiguration?.write(configuration)
+#endif
+    }
+
+    private func applyEnvironmentProfile(_ environment: [String: String]) {
+        guard let rawURL = environment["TVPLAYER_TVH_URL"],
+              let baseURL = Self.httpURL(from: rawURL)
+        else { return }
+        let existingIndex = profiles.firstIndex { $0.id == Self.environmentProfileID }
+        let existing = existingIndex.map { profiles[$0] }
+        let profile = TVHeadendServerProfile(
+            id: Self.environmentProfileID,
+            name: existing?.name ?? "Environment · \(Self.defaultName(for: baseURL))",
+            baseURL: baseURL,
+            username: environment["TVPLAYER_TVH_USERNAME"] ?? existing?.username ?? "",
+            streamProfile: environment["TVPLAYER_TVH_PROFILE"] ?? existing?.streamProfile ?? "pass",
+            htspPort: Int(environment["TVPLAYER_TVH_HTSP_PORT"] ?? "") ?? existing?.htspPort ?? 9982,
+            guideCacheURL: environment["TVPLAYER_GUIDE_URL"].flatMap { Self.optionalHTTPURL(from: $0) }
+                ?? existing?.guideCacheURL,
+            xmltvURL: environment["TVPLAYER_XMLTV_URL"].flatMap { Self.optionalHTTPURL(from: $0) }
+                ?? existing?.xmltvURL,
+            origin: .manual,
+            isEdited: true
+        )
+        let environmentPassword = environment["TVPLAYER_TVH_PASSWORD"]
+            ?? existing.flatMap { passwords[$0.id] }
+            ?? ""
+        try? keychain.write(environmentPassword, account: Self.passwordAccount(for: profile.id))
+        passwords[profile.id] = environmentPassword
+        if let existingIndex {
+            profiles[existingIndex] = profile
+        } else {
+            profiles.append(profile)
+        }
+        activeProfileID = profile.id
+    }
+
+    private static func legacyConfiguration(
+        defaults: UserDefaults,
+        keychain: any PasswordStoring,
+        shared: TVHeadendConfiguration?,
+        environment: [String: String]
+    ) -> TVHeadendConfiguration? {
+        let urlText = environment["TVPLAYER_TVH_URL"]
+            ?? shared?.baseURL?.absoluteString
+            ?? defaults.string(forKey: LegacyKey.baseURL)
+            ?? ""
+        guard let baseURL = httpURL(from: urlText) else { return nil }
+        return TVHeadendConfiguration(
+            serverProfileID: shared?.serverProfileID,
+            baseURL: baseURL,
+            username: environment["TVPLAYER_TVH_USERNAME"]
+                ?? shared?.username
+                ?? defaults.string(forKey: LegacyKey.username)
+                ?? "",
+            password: environment["TVPLAYER_TVH_PASSWORD"]
+                ?? shared?.password
+                ?? keychain.read(account: KeychainPasswordStore.legacyAccount),
+            streamProfile: environment["TVPLAYER_TVH_PROFILE"]
+                ?? shared?.streamProfile
+                ?? defaults.string(forKey: LegacyKey.streamProfile)
+                ?? "pass",
+            htspPort: Int(
+                environment["TVPLAYER_TVH_HTSP_PORT"]
+                    ?? shared.map { String($0.htspPort) }
+                    ?? defaults.string(forKey: LegacyKey.htspPort)
+                    ?? "9982"
+            ) ?? 9982,
+            guideCacheURL: optionalHTTPURL(from:
+                environment["TVPLAYER_GUIDE_URL"]
+                    ?? shared?.guideCacheURL?.absoluteString
+                    ?? defaults.string(forKey: LegacyKey.guideCacheURL)
+                    ?? ""
+            ),
+            xmltvURL: optionalHTTPURL(from:
+                environment["TVPLAYER_XMLTV_URL"]
+                    ?? shared?.xmltvURL?.absoluteString
+                    ?? defaults.string(forKey: LegacyKey.xmltvURL)
+                    ?? ""
+            )
+        )
+    }
+
     private var normalizedProfile: String {
-        let value = streamProfile.trimmingCharacters(in: .whitespacesAndNewlines)
-        return value.isEmpty ? "pass" : value
+        streamProfile.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "pass"
     }
 
     private var normalizedHTSPPort: Int? {
@@ -320,6 +578,25 @@ final class ServerSettingsStore: ObservableObject {
               (1...65_535).contains(port)
         else { return nil }
         return port
+    }
+
+    private static var emptyConfiguration: TVHeadendConfiguration {
+        TVHeadendConfiguration(
+            baseURL: nil,
+            username: "",
+            password: "",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil
+        )
+    }
+
+    private static func passwordAccount(for profileID: String) -> String {
+        "server-profile:\(profileID)"
+    }
+
+    private static func defaultName(for url: URL) -> String {
+        url.host ?? "TVHeadend"
     }
 
     private static func optionalHTTPURL(from value: String) -> URL? {
@@ -340,8 +617,30 @@ final class ServerSettingsStore: ObservableObject {
 
     private static func sameServer(_ lhs: URL, _ rhs: URL) -> Bool {
         func normalized(_ url: URL) -> String {
-            url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+                return url.absoluteString
+            }
+            components.scheme = components.scheme?.lowercased()
+            components.host = components.host?.lowercased()
+            components.user = nil
+            components.password = nil
+            components.query = nil
+            components.fragment = nil
+            if (components.scheme == "http" && components.port == 80)
+                || (components.scheme == "https" && components.port == 443) {
+                components.port = nil
+            }
+            while components.percentEncodedPath.count > 1,
+                  components.percentEncodedPath.hasSuffix("/") {
+                components.percentEncodedPath.removeLast()
+            }
+            if components.percentEncodedPath == "/" { components.percentEncodedPath = "" }
+            return components.string ?? url.absoluteString
         }
         return normalized(lhs) == normalized(rhs)
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

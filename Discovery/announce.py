@@ -10,7 +10,9 @@ import socket
 import sys
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import urlparse
 
 from zeroconf import IPVersion, ServiceInfo, Zeroconf
@@ -60,6 +62,27 @@ def advertised_address(host: str) -> ipaddress.IPv4Address:
     if address.version != 4:
         raise ValueError("TVPLAYER_MDNS_ADDRESS must be an IPv4 address")
     return address
+
+
+def discovery_id() -> str:
+    configured = os.environ.get("TVPLAYER_MDNS_ID", "").strip()
+    if configured:
+        return txt_property("id", configured)
+
+    path = Path(os.environ.get("TVPLAYER_MDNS_ID_PATH", "/data/discovery-id").strip())
+    try:
+        saved = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        saved = ""
+    if saved:
+        return txt_property("id", saved)
+
+    generated = str(uuid.uuid4())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(f"{generated}\n", encoding="utf-8")
+    temporary.replace(path)
+    return generated
 
 
 def guide_handler(cache: GuideCache) -> type[BaseHTTPRequestHandler]:
@@ -148,6 +171,7 @@ def main() -> int:
         http_server = ThreadingHTTPServer((guide_bind, guide_port), guide_handler(cache))
         properties = {
             "version": "1",
+            "id": discovery_id(),
             "url": txt_property("url", url),
             "username": txt_property("username", username),
             "password": txt_property("password", password),

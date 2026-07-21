@@ -53,13 +53,21 @@ struct RootTabView: View {
     init() {
         let settings = ServerSettingsStore()
         let configuration = settings.configuration
-        let cachedSnapshot = configuration.isComplete
-            ? GuideSnapshotStore.loadSynchronously(serverIdentifier: configuration.guideSnapshotIdentifier)
-            : GuideSnapshotStore.loadLatestSynchronously()
+        let cachedSnapshot = if configuration.isComplete {
+            GuideSnapshotStore.loadSynchronously(serverIdentifier: configuration.guideSnapshotIdentifier)
+                ?? GuideSnapshotStore.loadSynchronously(
+                    serverIdentifier: configuration.legacyGuideSnapshotIdentifier
+                )
+        } else {
+            GuideSnapshotStore.loadLatestSynchronously()
+        }
 
         _settings = StateObject(wrappedValue: settings)
         let channelPreferences = ChannelPreferencesStore()
-        channelPreferences.activate(serverIdentifier: configuration.channelPreferencesIdentifier)
+        channelPreferences.activate(
+            serverIdentifier: configuration.channelPreferencesIdentifier,
+            migratingFrom: configuration.legacyChannelPreferencesIdentifier
+        )
         _channelPreferences = StateObject(wrappedValue: channelPreferences)
         _guide = StateObject(
             wrappedValue: GuideViewModel(
@@ -210,7 +218,8 @@ struct RootTabView: View {
         }
         .task(id: settings.revision) {
             channelPreferences.activate(
-                serverIdentifier: settings.configuration.channelPreferencesIdentifier
+                serverIdentifier: settings.configuration.channelPreferencesIdentifier,
+                migratingFrom: settings.configuration.legacyChannelPreferencesIdentifier
             )
             async let guideLoad: Void = guide.load(configuration: settings.configuration, force: true)
             async let recordingLoad: Void = recordings.load(configuration: settings.configuration, force: true)

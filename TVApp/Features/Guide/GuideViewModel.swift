@@ -48,7 +48,8 @@ final class GuideViewModel: ObservableObject {
 
         guard let cachedSnapshot else { return }
         if let configuration, configuration.isComplete,
-           cachedSnapshot.serverIdentifier != configuration.guideSnapshotIdentifier {
+           cachedSnapshot.serverIdentifier != configuration.guideSnapshotIdentifier,
+           cachedSnapshot.serverIdentifier != configuration.legacyGuideSnapshotIdentifier {
             return
         }
 
@@ -64,7 +65,8 @@ final class GuideViewModel: ObservableObject {
             serverName: cachedSnapshot.serverName,
             channelCount: restoredChannels.count
         )
-        activeSnapshotIdentifier = cachedSnapshot.serverIdentifier
+        activeSnapshotIdentifier = configuration?.guideSnapshotIdentifier
+            ?? cachedSnapshot.serverIdentifier
     }
 
     func tick(at date: Date = Date()) {

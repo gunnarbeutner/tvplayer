@@ -67,6 +67,11 @@ struct PersistedGuideChannel: Codable, Sendable {
 actor GuideSnapshotStore {
     static let shared = GuideSnapshotStore()
 
+    private struct StoredSnapshots: Codable {
+        var version = 2
+        var snapshots: [String: PersistedGuideSnapshot]
+    }
+
     private let fileURL: URL
 
     private static var defaultFileURL: URL {
@@ -106,12 +111,20 @@ actor GuideSnapshotStore {
         at fileURL: URL,
         serverIdentifier: String?
     ) -> PersistedGuideSnapshot? {
-        guard let data = try? Data(contentsOf: fileURL),
-              let snapshot = try? JSONDecoder().decode(PersistedGuideSnapshot.self, from: data),
-              snapshot.version == PersistedGuideSnapshot.currentVersion,
-              serverIdentifier.map({ snapshot.serverIdentifier == $0 }) ?? true
+        guard let data = try? Data(contentsOf: fileURL) else { return nil }
+        if let stored = try? JSONDecoder().decode(StoredSnapshots.self, from: data),
+           stored.version == 2 {
+            let compatible = stored.snapshots.filter {
+                $0.value.version == PersistedGuideSnapshot.currentVersion
+            }
+            if let serverIdentifier { return compatible[serverIdentifier] }
+            return compatible.values.max { $0.savedAt < $1.savedAt }
+        }
+        guard let legacy = try? JSONDecoder().decode(PersistedGuideSnapshot.self, from: data),
+              legacy.version == PersistedGuideSnapshot.currentVersion,
+              serverIdentifier.map({ legacy.serverIdentifier == $0 }) ?? true
         else { return nil }
-        return snapshot
+        return legacy
     }
 
     func save(_ snapshot: PersistedGuideSnapshot) {
@@ -122,7 +135,21 @@ actor GuideSnapshotStore {
             )
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
-            try encoder.encode(snapshot).write(to: fileURL, options: .atomic)
+            var snapshots: [String: PersistedGuideSnapshot] = [:]
+            if let data = try? Data(contentsOf: fileURL) {
+                if let stored = try? JSONDecoder().decode(StoredSnapshots.self, from: data),
+                   stored.version == 2 {
+                    snapshots = stored.snapshots.filter {
+                        $0.value.version == PersistedGuideSnapshot.currentVersion
+                    }
+                } else if let legacy = try? JSONDecoder().decode(PersistedGuideSnapshot.self, from: data),
+                          legacy.version == PersistedGuideSnapshot.currentVersion {
+                    snapshots[legacy.serverIdentifier] = legacy
+                }
+            }
+            snapshots[snapshot.serverIdentifier] = snapshot
+            try encoder.encode(StoredSnapshots(snapshots: snapshots))
+                .write(to: fileURL, options: .atomic)
         } catch {
             // This is a performance cache. A write failure must never prevent
             // the freshly loaded guide from being shown.

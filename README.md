@@ -110,14 +110,14 @@ project files or user defaults. Server settings used during development can
 also be passed through process environment variables; they should not be added
 to tracked files.
 
-TVPlayer browses for `_tvplayer._tcp` when it needs initial server settings or
-when an existing configuration is missing its rich guide URL. The optional
+TVPlayer continuously browses for `_tvplayer._tcp`, adds discovered servers,
+and keeps their settings current until they are manually edited. The optional
 [Discovery container](Discovery/README.md) publishes a complete configuration
 from environment variables. It also polls TVheadend's EPG, retains expired
 events and native event metadata in a persistent volume, and advertises its
 JSON endpoint on configurable port `49382` by default. A discovered password is
-copied into the Keychain, the other fields are saved as app preferences, and
-the normal connection test and guide load run automatically.
+copied into a per-server Keychain entry, the other fields are saved as app
+preferences, and the normal connection test and guide load run automatically.
 
 Because mDNS TXT records are unencrypted and visible to devices on the local
 network, use discovery only on a trusted LAN and give its TVheadend account the

@@ -4,9 +4,10 @@ This container advertises one TVheadend configuration as a DNS-SD service of
 type `_tvplayer._tcp.local.`. It also retains programme metadata after
 TVheadend removes finished EPG events and serves the resulting native metadata
 through a compact JSON endpoint. TVPlayer uses the first valid service for
-initial configuration, or supplements an existing matching TVheadend
-configuration with a missing guide-cache URL. Passwords are stored in the
-tvOS Keychain.
+initial configuration and keeps every advertised server in its server list.
+Advertised settings continue to update automatically until a user edits that
+server; automatic updates can later be restored from Settings. Passwords are
+stored per server in the device Keychain.
 
 ## Run
 
@@ -35,6 +36,8 @@ file accepts:
 - `TVPLAYER_GUIDE_FUTURE_HOURS` (default `72`)
 - `TVPLAYER_GUIDE_EVENT_LIMIT` (default `50000`)
 - `TVPLAYER_MDNS_NAME` (default `TVPlayer TVHeadend`)
+- `TVPLAYER_MDNS_ID` (optional stable identity override; otherwise a UUID is
+  generated and retained in the `guide-cache` volume)
 - `TVPLAYER_MDNS_ADDRESS` (optional IPv4 override; otherwise the URL host is resolved)
 
 The generated guide is available at:

@@ -68,6 +68,23 @@ final class ChannelPreferencesTests: XCTestCase {
         XCTAssertTrue(store.favoriteChannelIDs.isEmpty)
     }
 
+    @MainActor func testLegacyServerFavoritesMigrateToStableProfileIdentifier() {
+        var store = makeStore(server: "legacy-url-and-user")
+        store.toggleFavorite("two")
+
+        store = ChannelPreferencesStore(defaults: defaults)
+        store.activate(
+            serverIdentifier: "profile:stable-id",
+            migratingFrom: "legacy-url-and-user"
+        )
+
+        XCTAssertEqual(store.favoriteChannelIDs, ["two"])
+        store.activate(serverIdentifier: "another-profile")
+        XCTAssertTrue(store.favoriteChannelIDs.isEmpty)
+        store.activate(serverIdentifier: "profile:stable-id")
+        XCTAssertEqual(store.favoriteChannelIDs, ["two"])
+    }
+
     @MainActor func testExistingOrderingAndFilterPayloadMigratesToFavoritesOnly() throws {
         let json = #"{"version":1,"profiles":{"server":{"favoriteChannelIDs":["two"],"orderedChannelIDs":["three","two","one"],"filter":"favorites"}}}"#
         defaults.set(try XCTUnwrap(json.data(using: .utf8)), forKey: "tvplayer.channelPreferences.v1")

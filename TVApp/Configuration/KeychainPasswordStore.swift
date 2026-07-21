@@ -1,11 +1,17 @@
 import Foundation
 import Security
 
-struct KeychainPasswordStore {
-    private let service = "de.beutner.TVPlayer.tvheadend"
-    private let account = "default-server"
+protocol PasswordStoring {
+    func read(account: String) -> String
+    func write(_ password: String, account: String) throws
+    func delete(account: String)
+}
 
-    func read() -> String {
+struct KeychainPasswordStore: PasswordStoring {
+    private let service = "de.beutner.TVPlayer.tvheadend"
+    static let legacyAccount = "default-server"
+
+    func read(account: String = Self.legacyAccount) -> String {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -22,9 +28,9 @@ struct KeychainPasswordStore {
         return value
     }
 
-    func write(_ password: String) throws {
+    func write(_ password: String, account: String = Self.legacyAccount) throws {
         if password.isEmpty {
-            delete()
+            delete(account: account)
             return
         }
 
@@ -50,7 +56,7 @@ struct KeychainPasswordStore {
         }
     }
 
-    private func delete() {
+    func delete(account: String = Self.legacyAccount) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

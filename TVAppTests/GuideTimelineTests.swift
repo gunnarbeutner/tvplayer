@@ -27,6 +27,7 @@ final class GuideTimelineTests: XCTestCase {
     func testDiscoveredSettingsParseBonjourTXTRecord() throws {
         let fields = [
             "version": Data("1".utf8),
+            "id": Data("server-0123".utf8),
             "url": Data("http://tvheadend.local:9981".utf8),
             "username": Data("viewer".utf8),
             "password": Data("secret".utf8),
@@ -37,12 +38,23 @@ final class GuideTimelineTests: XCTestCase {
 
         let discovered = try XCTUnwrap(DiscoveredTVHeadendSettings(fields: fields))
 
+        XCTAssertEqual(discovered.discoveryID, "server-0123")
         XCTAssertEqual(discovered.baseURL.absoluteString, "http://tvheadend.local:9981")
         XCTAssertEqual(discovered.username, "viewer")
         XCTAssertEqual(discovered.password, "secret")
         XCTAssertEqual(discovered.streamProfile, "pass")
         XCTAssertEqual(discovered.guideCacheURL?.absoluteString, "http://guide.example:49382/guide.json")
         XCTAssertEqual(discovered.xmltvURL?.absoluteString, "https://guide.example/guide.xml")
+    }
+
+    func testDiscoveredSettingsAcceptLegacyRecordWithoutStableID() throws {
+        let discovered = try XCTUnwrap(DiscoveredTVHeadendSettings(fields: [
+            "url": Data("http://tvheadend.local:9981".utf8),
+            "username": Data("viewer".utf8),
+            "password": Data("secret".utf8),
+        ]))
+
+        XCTAssertNil(discovered.discoveryID)
     }
 
     func testDiscoveredSettingsRejectInvalidOrIncompleteRecords() {
@@ -129,6 +141,32 @@ final class GuideTimelineTests: XCTestCase {
         XCTAssertEqual(restored.first?.programs.map(\.id), ["current"])
         let mismatchedSnapshot = await store.load(serverIdentifier: "another-server")
         XCTAssertNil(mismatchedSnapshot)
+    }
+
+    @MainActor
+    func testGuideSnapshotsStayAvailableForMultipleServers() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GuideSnapshotStoreTests-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let first = PersistedGuideSnapshot(
+            serverIdentifier: "profile:first",
+            serverName: "First",
+            channels: []
+        )
+        let second = PersistedGuideSnapshot(
+            serverIdentifier: "profile:second",
+            serverName: "Second",
+            channels: []
+        )
+        let store = GuideSnapshotStore(fileURL: fileURL)
+
+        await store.save(first)
+        await store.save(second)
+
+        let loadedFirst = await store.load(serverIdentifier: "profile:first")
+        let loadedSecond = await store.load(serverIdentifier: "profile:second")
+        XCTAssertEqual(loadedFirst?.serverName, "First")
+        XCTAssertEqual(loadedSecond?.serverName, "Second")
     }
 
     @MainActor

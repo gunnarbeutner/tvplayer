@@ -68,7 +68,7 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
                 path: "/api/epg/events/grid",
                 queryItems: [URLQueryItem(name: "start", value: "0"), URLQueryItem(name: "limit", value: "20000")]
             )
-            let serverIdentifier = "\(configuration.baseURL?.absoluteString ?? "tvheadend")|\(configuration.username)"
+            let serverIdentifier = configuration.dataStoreIdentifier
             let events = await EPGHistoryStore.shared.merging(
                 freshEvents: epgGrid.entries,
                 serverIdentifier: serverIdentifier

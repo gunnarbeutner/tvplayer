@@ -7,6 +7,7 @@ import Security
 struct SharedTVHeadendConfigurationStore {
     private struct Payload: Codable {
         let version: Int
+        let serverProfileID: String?
         let baseURL: String?
         let username: String
         let password: String
@@ -16,7 +17,8 @@ struct SharedTVHeadendConfigurationStore {
         let xmltvURL: String?
 
         init(configuration: TVHeadendConfiguration) {
-            version = 1
+            version = 2
+            serverProfileID = configuration.serverProfileID
             baseURL = configuration.baseURL?.absoluteString
             username = configuration.username
             password = configuration.password
@@ -27,8 +29,9 @@ struct SharedTVHeadendConfigurationStore {
         }
 
         var configuration: TVHeadendConfiguration? {
-            guard version == 1 else { return nil }
+            guard version == 1 || version == 2 else { return nil }
             return TVHeadendConfiguration(
+                serverProfileID: serverProfileID,
                 baseURL: baseURL.flatMap(URL.init(string:)),
                 username: username,
                 password: password,
@@ -37,6 +40,24 @@ struct SharedTVHeadendConfigurationStore {
                 guideCacheURL: guideCacheURL.flatMap(URL.init(string:)),
                 xmltvURL: xmltvURL.flatMap(URL.init(string:))
             )
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case version, serverProfileID, baseURL, username, password, streamProfile
+            case htspPort, guideCacheURL, xmltvURL
+        }
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            version = try values.decode(Int.self, forKey: .version)
+            serverProfileID = try values.decodeIfPresent(String.self, forKey: .serverProfileID)
+            baseURL = try values.decodeIfPresent(String.self, forKey: .baseURL)
+            username = try values.decode(String.self, forKey: .username)
+            password = try values.decode(String.self, forKey: .password)
+            streamProfile = try values.decode(String.self, forKey: .streamProfile)
+            htspPort = try values.decode(Int.self, forKey: .htspPort)
+            guideCacheURL = try values.decodeIfPresent(String.self, forKey: .guideCacheURL)
+            xmltvURL = try values.decodeIfPresent(String.self, forKey: .xmltvURL)
         }
     }
 

@@ -31,8 +31,15 @@ final class ChannelPreferencesStore: ObservableObject {
         }
     }
 
-    func activate(serverIdentifier: String?) {
+    func activate(serverIdentifier: String?, migratingFrom legacyIdentifier: String? = nil) {
         guard activeServerIdentifier != serverIdentifier else { return }
+        if let serverIdentifier,
+           payload.profiles[serverIdentifier] == nil,
+           let legacyIdentifier,
+           let legacy = payload.profiles[legacyIdentifier] {
+            payload.profiles[serverIdentifier] = legacy
+            persist()
+        }
         activeServerIdentifier = serverIdentifier
         favoriteChannelIDs = serverIdentifier
             .flatMap { payload.profiles[$0]?.favoriteChannelIDs }
@@ -65,9 +72,13 @@ final class ChannelPreferencesStore: ObservableObject {
         payload.profiles[activeServerIdentifier] = StoredProfile(
             favoriteChannelIDs: favoriteChannelIDs
         )
+        persist()
+        revision &+= 1
+    }
+
+    private func persist() {
         if let data = try? JSONEncoder().encode(payload) {
             defaults.set(data, forKey: Self.storageKey)
         }
-        revision &+= 1
     }
 }

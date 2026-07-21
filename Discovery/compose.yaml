@@ -20,6 +20,8 @@ services:
       TVPLAYER_GUIDE_EVENT_LIMIT: ${TVPLAYER_GUIDE_EVENT_LIMIT:-50000}
       TVPLAYER_GUIDE_CACHE_PATH: /data/guide-cache.json
       TVPLAYER_MDNS_NAME: ${TVPLAYER_MDNS_NAME:-TVPlayer TVHeadend}
+      TVPLAYER_MDNS_ID: ${TVPLAYER_MDNS_ID:-}
+      TVPLAYER_MDNS_ID_PATH: /data/discovery-id
       TVPLAYER_MDNS_ADDRESS: ${TVPLAYER_MDNS_ADDRESS:-}
     volumes:
       - guide-cache:/data

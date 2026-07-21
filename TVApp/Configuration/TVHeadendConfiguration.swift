@@ -1,6 +1,7 @@
 import Foundation
 
 struct TVHeadendConfiguration: Equatable, Sendable {
+    let serverProfileID: String?
     let baseURL: URL?
     let username: String
     let password: String
@@ -10,6 +11,7 @@ struct TVHeadendConfiguration: Equatable, Sendable {
     let xmltvURL: URL?
 
     init(
+        serverProfileID: String? = nil,
         baseURL: URL?,
         username: String,
         password: String,
@@ -18,6 +20,7 @@ struct TVHeadendConfiguration: Equatable, Sendable {
         guideCacheURL: URL?,
         xmltvURL: URL?
     ) {
+        self.serverProfileID = serverProfileID
         self.baseURL = baseURL
         self.username = username
         self.password = password
@@ -34,6 +37,11 @@ struct TVHeadendConfiguration: Equatable, Sendable {
     /// Separates on-device guide snapshots by source without persisting the
     /// password as part of the cache key.
     var guideSnapshotIdentifier: String {
+        if let serverProfileID { return "profile:\(serverProfileID)" }
+        return legacyGuideSnapshotIdentifier
+    }
+
+    var legacyGuideSnapshotIdentifier: String {
         [
             baseURL?.absoluteString ?? "",
             username,
@@ -45,6 +53,11 @@ struct TVHeadendConfiguration: Equatable, Sendable {
     /// Keeps device-local channel preferences isolated by TVHeadend server and
     /// account without including the password or guide-source overrides.
     var channelPreferencesIdentifier: String? {
+        if let serverProfileID { return "profile:\(serverProfileID)" }
+        return legacyChannelPreferencesIdentifier
+    }
+
+    var legacyChannelPreferencesIdentifier: String? {
         guard let baseURL else { return nil }
         var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
         components?.user = nil
@@ -65,6 +78,11 @@ struct TVHeadendConfiguration: Equatable, Sendable {
         let normalizedURL = components?.url?.absoluteString
             ?? baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         return "\(normalizedURL)|\(username.trimmingCharacters(in: .whitespacesAndNewlines))"
+    }
+
+    var dataStoreIdentifier: String {
+        serverProfileID.map { "profile:\($0)" }
+            ?? "\(baseURL?.absoluteString ?? "tvheadend")|\(username)"
     }
 }
 

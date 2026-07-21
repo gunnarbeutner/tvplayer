@@ -12,6 +12,7 @@ struct SettingsView: View {
     @FocusState private var focusedControl: FocusControl?
 
     private enum FocusControl: Hashable {
+        case server(String)
         case serverURL
     }
 
@@ -32,23 +33,39 @@ struct SettingsView: View {
                                 .tracking(2.2)
                                 .foregroundStyle(AppTheme.accent)
 
-                            Text("Server settings")
+                            Text("TVHeadend servers")
                                 .font(.largeTitle.bold())
 
-                            Text("The password is stored in this device's Keychain. Other settings use app preferences.")
+                            Text("Choose one active server for channels, guide, recordings, and playback. Passwords are stored in this device's Keychain.")
                                 .font(.callout)
                                 .foregroundStyle(AppTheme.secondaryText)
                         }
 
                         Spacer()
 
-                        VStack(alignment: .trailing, spacing: 10) {
-                            ConnectionStatusView(status: settings.connectionStatus)
-                            TimeshiftStatusView(
-                                status: settings.timeshiftStatus,
-                                engine: playback.engine
-                            )
+                        if !settings.isAddingServer {
+                            VStack(alignment: .trailing, spacing: 10) {
+                                ConnectionStatusView(status: settings.connectionStatus)
+                                TimeshiftStatusView(
+                                    status: settings.timeshiftStatus,
+                                    engine: playback.engine
+                                )
+                            }
                         }
+                    }
+
+                    serverList
+
+                    Divider()
+
+                    Text(settings.isAddingServer ? "Add server" : "Edit server")
+                        .font(.title2.bold())
+
+                    SettingsField(
+                        title: "Name",
+                        hint: "Shown only in TV Player. Discovered servers use their advertised name."
+                    ) {
+                        TextField("Living room", text: $settings.displayNameText)
                     }
 
                     SettingsField(
@@ -99,11 +116,11 @@ struct SettingsView: View {
                         TextField("https://example.net/guide.xml", text: $settings.xmltvURLText)
                     }
 
-                    HStack(spacing: 20) {
+                    adaptiveLayout {
                         Button {
                             save()
                         } label: {
-                            Label("Save", systemImage: "checkmark")
+                            Label(settings.isAddingServer ? "Add Server" : "Save", systemImage: "checkmark")
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(AppTheme.focused)
@@ -121,6 +138,37 @@ struct SettingsView: View {
                         .buttonStyle(.bordered)
                         .disabled(settings.connectionStatus == .checking)
 
+                        if settings.isAddingServer, !settings.profiles.isEmpty {
+                            Button("Cancel", role: .cancel) {
+                                settings.cancelEditing()
+                                saveError = nil
+                            }
+                            .buttonStyle(.bordered)
+                        }
+
+                        if let profile = settings.editingProfile,
+                           profile.origin == .discovered,
+                           profile.isEdited {
+                            Button {
+                                settings.restoreAutomaticUpdates(profile.id)
+                                saveError = nil
+                            } label: {
+                                Label("Use Automatic Updates", systemImage: "arrow.triangle.2.circlepath")
+                            }
+                            .buttonStyle(.bordered)
+                        }
+
+                        if let profile = settings.editingProfile {
+                            Button(role: .destructive) {
+                                settings.forget(profile.id)
+                                saveError = nil
+                            } label: {
+                                Label("Forget", systemImage: "trash")
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(!settings.canForget(profile))
+                        }
+
                         if let saveError {
                             Label(
                                 saveError,
@@ -137,7 +185,8 @@ struct SettingsView: View {
             }
         }
         .task {
-            if settings.configuration.isComplete,
+            if settings.editingProfileID == settings.activeProfileID,
+               settings.configuration.isComplete,
                settings.connectionStatus == .notTested {
                 await settings.testConnection()
             }
@@ -146,7 +195,52 @@ struct SettingsView: View {
             guard request != nil else { return }
             Task { @MainActor in
                 await Task.yield()
-                focusedControl = .serverURL
+                if let activeProfileID = settings.activeProfileID {
+                    focusedControl = .server(activeProfileID)
+                } else {
+                    focusedControl = .serverURL
+                }
+            }
+        }
+    }
+
+    private var serverList: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Servers")
+                    .font(.title2.bold())
+                Spacer()
+                Button {
+                    settings.beginAddingServer()
+                    saveError = nil
+                } label: {
+                    Label("Add Server", systemImage: "plus")
+                }
+                .buttonStyle(.bordered)
+            }
+
+            if settings.profiles.isEmpty {
+                Text("No servers saved. TV Player will also add compatible servers discovered on your local network.")
+                    .foregroundStyle(AppTheme.secondaryText)
+            } else {
+                VStack(spacing: 10) {
+                    ForEach(settings.profiles) { profile in
+                        Button {
+                            settings.selectServer(profile.id)
+                            saveError = nil
+                        } label: {
+                            ServerProfileRow(
+                                profile: profile,
+                                isActive: settings.activeProfileID == profile.id,
+                                isOnline: settings.isOnline(profile),
+                                isFocused: focusedControl == .server(profile.id)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .focused($focusedControl, equals: .server(profile.id))
+                        .focusEffectDisabled()
+                    }
+                }
             }
         }
     }
@@ -180,6 +274,67 @@ struct SettingsView: View {
             saveError = nil
             await settings.testConnection()
         }
+    }
+}
+
+private struct ServerProfileRow: View {
+    let profile: TVHeadendServerProfile
+    let isActive: Bool
+    let isOnline: Bool
+    let isFocused: Bool
+
+    private var ownership: String {
+        switch (profile.origin, profile.isEdited) {
+        case (.manual, _): "Manual"
+        case (.discovered, false): "Automatic"
+        case (.discovered, true): "Edited"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 16) {
+            Image(systemName: isActive ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(isActive ? AppTheme.accent : AppTheme.secondaryText)
+                .font(.title2)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(profile.name)
+                    .font(.headline)
+                Text(profile.baseURL.absoluteString)
+                    .font(.caption)
+                    .foregroundStyle(AppTheme.secondaryText)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            Text(ownership)
+                .font(.caption.bold())
+                .foregroundStyle(profile.isEdited ? .orange : AppTheme.secondaryText)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(AppTheme.surface, in: Capsule())
+
+            if profile.origin == .discovered {
+                Label(isOnline ? "Online" : "Offline", systemImage: isOnline ? "wifi" : "wifi.slash")
+                    .font(.caption.bold())
+                    .foregroundStyle(isOnline ? .green : AppTheme.secondaryText)
+            }
+        }
+        .padding(.horizontal, 18)
+        .frame(minHeight: 72)
+        .background(
+            isFocused ? AppTheme.focused : AppTheme.surface.opacity(isActive ? 1 : 0.72),
+            in: RoundedRectangle(cornerRadius: 12)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(
+                    isFocused ? Color.white.opacity(0.85) : isActive ? AppTheme.accent : Color.white.opacity(0.15),
+                    lineWidth: isFocused ? 4 : isActive ? 2 : 1
+                )
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 12))
     }
 }
 

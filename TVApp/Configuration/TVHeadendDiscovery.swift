@@ -3,6 +3,7 @@ import Foundation
 struct DiscoveredTVHeadendSettings: Equatable {
     static let serviceType = "_tvplayer._tcp."
 
+    let discoveryID: String?
     let baseURL: URL
     let username: String
     let password: String
@@ -49,6 +50,8 @@ struct DiscoveredTVHeadendSettings: Equatable {
         let xmltvURL = xmltvText.isEmpty ? nil : Self.httpURL(from: xmltvText)
         if !xmltvText.isEmpty, xmltvURL == nil { return nil }
 
+        let advertisedID = value("id")
+        discoveryID = advertisedID?.isEmpty == false ? advertisedID : nil
         self.baseURL = baseURL
         self.username = username
         self.password = password
@@ -68,6 +71,17 @@ struct DiscoveredTVHeadendSettings: Equatable {
     }
 }
 
+struct DiscoveredTVHeadendService: Equatable {
+    let name: String
+    let serviceIdentity: String
+    let settings: DiscoveredTVHeadendSettings
+}
+
+enum TVHeadendDiscoveryEvent: Equatable {
+    case upsert(DiscoveredTVHeadendService)
+    case removed(serviceIdentity: String)
+}
+
 @MainActor
 final class TVHeadendDiscovery: NSObject,
     @preconcurrency NetServiceBrowserDelegate,
@@ -75,11 +89,11 @@ final class TVHeadendDiscovery: NSObject,
 {
     private let browser = NetServiceBrowser()
     private var services: [NetService] = []
-    private let discovered: (DiscoveredTVHeadendSettings) -> Void
+    private let eventHandler: (TVHeadendDiscoveryEvent) -> Void
     private var isRunning = false
 
-    init(discovered: @escaping (DiscoveredTVHeadendSettings) -> Void) {
-        self.discovered = discovered
+    init(eventHandler: @escaping (TVHeadendDiscoveryEvent) -> Void) {
+        self.eventHandler = eventHandler
         super.init()
     }
 
@@ -97,7 +111,10 @@ final class TVHeadendDiscovery: NSObject,
         guard isRunning else { return }
         isRunning = false
         browser.stop()
-        services.forEach { $0.stop() }
+        services.forEach {
+            $0.stopMonitoring()
+            $0.stop()
+        }
         services.removeAll()
     }
 
@@ -118,13 +135,39 @@ final class TVHeadendDiscovery: NSObject,
         moreComing: Bool
     ) {
         services.removeAll { $0 === service }
+        service.stopMonitoring()
+        service.stop()
+        eventHandler(.removed(serviceIdentity: Self.identity(for: service)))
     }
 
     func netServiceDidResolveAddress(_ sender: NetService) {
+        sender.startMonitoring()
+        emitUpsert(for: sender, txtRecordData: sender.txtRecordData())
+    }
+
+    func netService(_ sender: NetService, didUpdateTXTRecord data: Data) {
+        emitUpsert(for: sender, txtRecordData: data)
+    }
+
+    private func emitUpsert(for service: NetService, txtRecordData: Data?) {
         guard isRunning,
-              let txtRecordData = sender.txtRecordData(),
+              let txtRecordData,
               let settings = DiscoveredTVHeadendSettings(txtRecordData: txtRecordData)
         else { return }
-        discovered(settings)
+        eventHandler(
+            .upsert(
+                DiscoveredTVHeadendService(
+                    name: service.name,
+                    serviceIdentity: Self.identity(for: service),
+                    settings: settings
+                )
+            )
+        )
+    }
+
+    private static func identity(for service: NetService) -> String {
+        [service.domain, service.type, service.name]
+            .joined(separator: "|")
+            .lowercased()
     }
 }
