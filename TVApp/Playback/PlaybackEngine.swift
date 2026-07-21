@@ -151,6 +151,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private var postSeekOutputGate = PostSeekPlaybackOutputGate()
     private var shouldRestoreAudioAfterOutputGate = false
     private var isPrimingPausedSeekFrame = false
+    private var concealsSeekAfterPausedFrameCapture = false
     private var navigationShouldResume = true
     private var pauseRequested = false
     private var livePlaybackPosition = LivePlaybackPositionTracker()
@@ -307,6 +308,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             return
         }
         isPrimingPausedSeekFrame = false
+        clearPausedFrame()
         let wasPaused = state == .paused
         if wasPaused {
             logger.info("Resuming VLC playback")
@@ -395,11 +397,18 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         guard let snapshotURL = pendingSnapshotURL else { return }
         pendingSnapshotURL = nil
         defer { try? FileManager.default.removeItem(at: snapshotURL) }
+        let shouldConcealSeek = concealsSeekAfterPausedFrameCapture
+        concealsSeekAfterPausedFrameCapture = false
 
         guard state == .paused,
               let image = PlatformImage(contentsOfFile: snapshotURL.path)
         else { return }
         pausedFrame = image
+        if shouldConcealSeek {
+            if postSeekOutputGate.concealImmediately() {
+                concealPlaybackOutput()
+            }
+        }
     }
 
     private func capturePausedFrame() {
@@ -995,6 +1004,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private func resumeLocalPlaybackAfterTimeshiftNavigation() {
         timeshiftNavigationDebugState = "resuming VLC after navigation"
         isPrimingPausedSeekFrame = false
+        concealsSeekAfterPausedFrameCapture = false
         pauseRequested = false
         nativeInputStream?.play()
         let waitsForPlaybackProgress = livePlaybackPosition.requestResume(
@@ -1067,10 +1077,15 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             playbackRate = 1
             mediaPlayer.pause()
             setState(.paused)
-            capturePausedFrame()
             timeshiftNavigationDebugState = "paused on selected frame"
+            // Reveal VLC's verified destination picture before replacing the
+            // frozen pre-seek snapshot. This prevents a transient black frame
+            // between the two published updates.
+            revealPostSeekPlaybackOutput()
+            capturePausedFrame()
+        } else {
+            revealPostSeekPlaybackOutput()
         }
-        revealPostSeekPlaybackOutput()
         logger.info("Revealed VLC output after the post-seek discontinuity")
     }
 
@@ -1082,6 +1097,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 
     private func cancelPostSeekOutputGate() {
         isPrimingPausedSeekFrame = false
+        concealsSeekAfterPausedFrameCapture = false
         postSeekOutputGate.cancel()
         revealPostSeekPlaybackOutput()
     }
@@ -1089,9 +1105,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private func primePausedFrameAfterTimeshiftNavigation() {
         timeshiftNavigationDebugState = "decoding selected frame while paused"
         isPrimingPausedSeekFrame = true
+        concealsSeekAfterPausedFrameCapture = false
         pauseRequested = true
         nativeInputStream?.pause()
-        clearPausedFrame()
         if mediaPlayer.hasVideoOut {
             postSeekOutputGate.requireDisplayedPicture()
         }
@@ -1161,9 +1177,14 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         case .resume:
             resumeLocalPlaybackAfterTimeshiftNavigation()
         case .pauseUntilNavigationCompletes:
+            let preservesCurrentPausedFrame = pauseRequested || state == .paused
             cancelPostSeekOutputGate()
+            if !preservesCurrentPausedFrame {
+                clearPausedFrame()
+            }
             postSeekOutputGate.arm(from: playbackOutputCounters)
-            if postSeekOutputGate.concealImmediately() {
+            let hasCurrentPausedFrame = preservesCurrentPausedFrame && pausedFrame != nil
+            if hasCurrentPausedFrame, postSeekOutputGate.concealImmediately() {
                 concealPlaybackOutput()
             }
             anchorLivePlaybackPositionIfNeeded()
@@ -1173,6 +1194,13 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             playbackRate = 1
             mediaPlayer.pause()
             setState(.paused)
+            if !hasCurrentPausedFrame {
+                // Keep VLC's just-paused drawable visible until its matching
+                // snapshot is ready. The snapshot then takes over before VLC
+                // is allowed to decode the destination behind it.
+                concealsSeekAfterPausedFrameCapture = true
+                capturePausedFrame()
+            }
             lastMetricsUpdate = Date()
         }
     }
@@ -1284,6 +1312,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         pauseRequested = false
         navigationShouldResume = true
         isPrimingPausedSeekFrame = false
+        concealsSeekAfterPausedFrameCapture = false
         recoveryReason = nil
         recoveryAttempt = 0
         nativeTimeshiftRecoveryCount = 0

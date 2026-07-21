@@ -74,6 +74,7 @@ struct PlaybackView: View {
     @State private var profiles: [TVHeadendStreamProfile] = []
     @State private var hasStartedCurrentPresentation = false
     @State private var timelineSeekTargetDate: Date?
+    @State private var timelineSeekTargetsLiveEdge = false
     @State private var timelineSeekCommitTask: Task<Void, Never>?
     @State private var timelineSeekRepeatTask: Task<Void, Never>?
     @State private var isRefreshingGrowingRecording = false
@@ -99,6 +100,14 @@ struct PlaybackView: View {
 #endif
     }
 
+    private func platformImage(_ image: PlatformImage) -> Image {
+#if canImport(UIKit)
+        Image(uiImage: image)
+#else
+        Image(nsImage: image)
+#endif
+    }
+
     var body: some View {
         ZStack {
             if showsVideoSurface {
@@ -114,10 +123,26 @@ struct PlaybackView: View {
             }
 
             if engine.isPlaybackOutputConcealed {
-                Color.black
-                    .ignoresSafeArea()
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
+                Group {
+                    if let pausedFrame = engine.pausedFrame {
+                        GeometryReader { geometry in
+                            platformImage(pausedFrame)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(
+                                    width: geometry.size.width,
+                                    height: geometry.size.height
+                                )
+                                .clipped()
+                        }
+                        .background(Color.black)
+                    } else {
+                        Color.black
+                    }
+                }
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
             }
 
             if chromeMode == .hidden {
@@ -155,6 +180,7 @@ struct PlaybackView: View {
                                 ? engine.livePlaybackDate()
                                 : nil,
                             seekTargetDate: timelineSeekTargetDate,
+                            seekTargetsLiveEdge: timelineSeekTargetsLiveEdge,
                             liveDelaySeconds: engine.liveDelaySeconds,
                             bufferStartedAt: engine.bufferStartedAt,
                             canPause: engine.canPause,
@@ -543,13 +569,19 @@ struct PlaybackView: View {
     private func stageTimelineSeek(by seconds: TimeInterval) -> Bool {
         guard !presentation.isRecording, engine.isSeekable, seconds != 0 else { return false }
         let liveEdge = Date()
-        let current = timelineSeekTargetDate ?? engine.livePlaybackDate(at: liveEdge)
+        let current = timelineSeekTargetsLiveEdge
+            ? liveEdge
+            : (timelineSeekTargetDate ?? engine.livePlaybackDate(at: liveEdge))
         let availableStart = engine.bufferStartedAt ?? liveEdge
         let target = min(max(current.addingTimeInterval(seconds), availableStart), liveEdge)
         guard abs(target.timeIntervalSince(current)) > NativeTimeshiftActionPlan.liveEdgeTolerance else {
             return false
         }
         timelineSeekTargetDate = target
+        let targetsLiveEdge = target >= liveEdge.addingTimeInterval(
+            -NativeTimeshiftActionPlan.liveEdgeTolerance
+        )
+        timelineSeekTargetsLiveEdge = targetsLiveEdge
         noteActivity()
 
         timelineSeekCommitTask?.cancel()
@@ -558,14 +590,19 @@ struct PlaybackView: View {
             guard !Task.isCancelled else { return }
 
             engine.refreshPlaybackInformation()
-            let delta = target.timeIntervalSince(engine.livePlaybackDate())
-            if delta < -NativeTimeshiftActionPlan.liveEdgeTolerance {
-                engine.skipBackward(by: -delta)
-            } else if delta > NativeTimeshiftActionPlan.liveEdgeTolerance {
-                skipForward(by: delta)
+            if targetsLiveEdge {
+                engine.returnToLive()
             } else {
-                timelineSeekTargetDate = nil
-                return
+                let delta = target.timeIntervalSince(engine.livePlaybackDate())
+                if delta < -NativeTimeshiftActionPlan.liveEdgeTolerance {
+                    engine.skipBackward(by: -delta)
+                } else if delta > NativeTimeshiftActionPlan.liveEdgeTolerance {
+                    skipForward(by: delta)
+                } else {
+                    timelineSeekTargetDate = nil
+                    timelineSeekTargetsLiveEdge = false
+                    return
+                }
             }
 
             for _ in 0..<150 {
@@ -573,10 +610,11 @@ struct PlaybackView: View {
                 guard !Task.isCancelled else { return }
                 engine.refreshPlaybackInformation()
                 let health = engine.nativeTimeshiftHealthSnapshot
-                if engine.state == .playing,
+                if (engine.state == .playing || engine.state == .paused),
                    !engine.isPlaybackOutputConcealed,
                    health?.isNavigating != true {
                     timelineSeekTargetDate = nil
+                    timelineSeekTargetsLiveEdge = false
                     timelineSeekCommitTask = nil
                     return
                 }
@@ -627,6 +665,7 @@ struct PlaybackView: View {
         timelineSeekRepeatTask?.cancel()
         timelineSeekRepeatTask = nil
         timelineSeekTargetDate = nil
+        timelineSeekTargetsLiveEdge = false
         noteActivity()
     }
 
@@ -818,6 +857,7 @@ private struct ProgrammePlaybackTimeline: View {
     let fallbackProgram: GuideProgram?
     let pausedPlaybackDate: Date?
     let seekTargetDate: Date?
+    let seekTargetsLiveEdge: Bool
     let liveDelaySeconds: TimeInterval
     let bufferStartedAt: Date?
     let canPause: Bool
@@ -849,8 +889,10 @@ private struct ProgrammePlaybackTimeline: View {
     }
 
     private func timeline(at liveDate: Date) -> some View {
-        let playbackDate = seekTargetDate ?? pausedPlaybackDate
-            ?? liveDate.addingTimeInterval(-liveDelaySeconds)
+        let playbackDate = seekTargetsLiveEdge
+            ? liveDate
+            : (seekTargetDate ?? pausedPlaybackDate
+                ?? liveDate.addingTimeInterval(-liveDelaySeconds))
         let program = channel.programs.first { $0.start <= playbackDate && playbackDate < $0.end } ?? fallbackProgram
         let next = program.flatMap { current in
             channel.programs.first { $0.start >= current.end && $0.id != current.id }
@@ -928,7 +970,9 @@ private struct ProgrammePlaybackTimeline: View {
 
                 if let seekTargetDate {
                     Label(
-                        seekDescription(target: seekTargetDate, liveEdge: liveDate),
+                        seekTargetsLiveEdge
+                            ? "Go to live"
+                            : seekDescription(target: seekTargetDate, liveEdge: liveDate),
                         systemImage: "scope"
                     )
                     .font(.callout.weight(.semibold).monospacedDigit())
