@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -68,21 +69,21 @@ class GuideCache:
         with self._lock:
             self._channels.update(fresh_channels)
 
-            # TVHeadend reassigns an event's id when its EPG grabber
-            # re-parses schedule data, even though the broadcast itself
-            # hasn't changed. Keying purely by event id then retains both
-            # the stale cached entry and its fresh replacement, and clients
-            # render two overlapping cards for one programme. Drop a cached
-            # event once this refresh already has a fresh event for the
-            # same broadcast slot under a different id.
+            # A successful TVHeadend response is authoritative for every
+            # event that has not ended yet. The grabber can amend a current
+            # or future broadcast by moving its start substantially and
+            # assigning a new id; retaining the now-absent cached version
+            # then creates overlapping guide entries. Only absent events
+            # which have already ended belong to our history cache.
             fresh_broadcast_keys = {
                 self._broadcast_key(event) for event in fresh_events.values()
             }
             self._events = {
                 key: event
                 for key, event in self._events.items()
-                if key in fresh_events
-                or self._broadcast_key(event) not in fresh_broadcast_keys
+                if event["stop"] <= now
+                and key not in fresh_events
+                and self._broadcast_key(event) not in fresh_broadcast_keys
             }
             self._events.update(fresh_events)
             self._events = {
@@ -95,19 +96,40 @@ class GuideCache:
             return len(self._channels), len(self._events)
 
     def json_guide(self) -> bytes:
+        body, _ = self.guide_response()
+        return body
+
+    def guide_response(self) -> tuple[bytes, str]:
         with self._lock:
             channels = sorted(self._channels.values(), key=lambda item: item["name"].casefold())
             events = sorted(
                 self._events.values(),
                 key=lambda item: (item["start"], item["channelUuid"], item["title"]),
             )
-            payload = {
+            guide_content = {
                 "version": 1,
-                "lastRefresh": self._last_refresh,
                 "channels": channels,
                 "events": events,
             }
-        return (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+            payload = {
+                "version": guide_content["version"],
+                "lastRefresh": self._last_refresh,
+                "channels": guide_content["channels"],
+                "events": guide_content["events"],
+            }
+
+        compact_content = json.dumps(
+            guide_content,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+        digest = hashlib.sha256(compact_content).hexdigest()
+        # lastRefresh is observational metadata rather than guide content. A
+        # weak validator lets clients retain the existing representation when
+        # a successful TVHeadend poll found no channel or event changes.
+        etag = f'W/"{digest}"'
+        body = (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+        return body, etag
 
     def status(self) -> dict[str, Any]:
         with self._lock:

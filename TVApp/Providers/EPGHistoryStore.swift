@@ -31,22 +31,15 @@ actor EPGHistoryStore {
         serverIdentifier: String,
         now: Date = Date()
     ) -> [TVHeadendEPGEvent] {
-        // TVHeadend reassigns an event's id when its EPG grabber re-parses
-        // schedule data, even though the broadcast itself hasn't changed.
-        // Keying purely by id then retains both the stale cached copy and
-        // its fresh replacement, and the guide renders two overlapping
-        // cards for the same programme. Drop a cached event once this
-        // fetch already has a fresh event for the same broadcast slot.
-        let freshEventIDs = Set(freshEvents.compactMap(\.eventID))
-        let freshBroadcastKeys = Set(freshEvents.map(broadcastKey(for:)))
         let cachedEvents = payload.eventsByServer[serverIdentifier, default: []]
-            .filter { cached in
-                guard let eventID = cached.eventID, !freshEventIDs.contains(eventID) else { return true }
-                return !freshBroadcastKeys.contains(broadcastKey(for: cached))
-            }
+        let retainedHistory = Self.retainedCachedEvents(
+            cachedEvents,
+            freshEvents: freshEvents,
+            now: now
+        )
 
         var eventsByKey: [String: TVHeadendEPGEvent] = [:]
-        for event in cachedEvents + freshEvents {
+        for event in retainedHistory + freshEvents {
             eventsByKey[key(for: event)] = event
         }
 
@@ -64,6 +57,27 @@ actor EPGHistoryStore {
         return retained
     }
 
+    static func retainedCachedEvents(
+        _ cachedEvents: [TVHeadendEPGEvent],
+        freshEvents: [TVHeadendEPGEvent],
+        now: Date
+    ) -> [TVHeadendEPGEvent] {
+        let freshEventIDs = Set(freshEvents.compactMap(\.eventID))
+        let freshBroadcastKeys = Set(freshEvents.map(broadcastKey(for:)))
+        let nowTimestamp = Int64(now.timeIntervalSince1970)
+
+        return cachedEvents.filter { cached in
+            // A successful fetch is authoritative for current and future
+            // events. Retain an absent event only after it has ended, when
+            // TVHeadend normally removes it from the live EPG response.
+            guard cached.stop <= nowTimestamp else { return false }
+            if let eventID = cached.eventID, freshEventIDs.contains(eventID) {
+                return false
+            }
+            return !freshBroadcastKeys.contains(broadcastKey(for: cached))
+        }
+    }
+
     private func key(for event: TVHeadendEPGEvent) -> String {
         if let eventID = event.eventID { return "event-\(eventID)" }
         return "\(event.channelUUID ?? "unknown")-\(event.start)"
@@ -73,7 +87,7 @@ actor EPGHistoryStore {
     /// id. Start times for the same broadcast have been observed to drift
     /// by a few seconds between grabber runs, so this rounds to the
     /// nearest minute.
-    private func broadcastKey(for event: TVHeadendEPGEvent) -> String {
+    private static func broadcastKey(for event: TVHeadendEPGEvent) -> String {
         let roundedStart = Int64((Double(event.start) / 60).rounded()) * 60
         let title = event.title?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
         return "\(event.channelUUID ?? "unknown")-\(title)-\(roundedStart)"

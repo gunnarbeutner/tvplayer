@@ -46,7 +46,7 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
 
         let programmesByChannel: [String: [GuideProgram]]
         if let guideCacheURL = configuration.guideCacheURL {
-            let data = try await fetchData(at: guideCacheURL)
+            let data = try await fetchConditionalGuideData(at: guideCacheURL)
             let document = try JSONDecoder().decode(TVPlayerGuideCacheDocument.self, from: data)
             guard document.version == 1 else { throw TVProviderError.invalidResponse }
             programmesByChannel = Self.mapEPG(
@@ -444,6 +444,35 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
         return data
     }
 
+    private func fetchConditionalGuideData(at url: URL) async throws -> Data {
+        let cached = await GuideHTTPResponseCache.shared.response(for: url)
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        if let cached {
+            request.setValue(cached.etag, forHTTPHeaderField: "If-None-Match")
+        }
+
+        let (data, response) = try await session.data(for: request)
+        guard let response = response as? HTTPURLResponse else {
+            throw TVProviderError.invalidResponse
+        }
+
+        if response.statusCode == 304 {
+            guard let cached else { throw TVProviderError.invalidResponse }
+            return cached.data
+        }
+        guard (200..<300).contains(response.statusCode) else {
+            throw TVProviderError.httpStatus(response.statusCode)
+        }
+
+        await GuideHTTPResponseCache.shared.store(
+            data: data,
+            etag: response.value(forHTTPHeaderField: "ETag"),
+            for: url
+        )
+        return data
+    }
+
     private func endpointURL(path: String, queryItems: [URLQueryItem] = []) throws -> URL {
         guard let baseURL = configuration.baseURL,
               var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
@@ -786,6 +815,29 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
         guard let value = channel.iconPublicURL ?? channel.icon, !value.isEmpty else { return nil }
         if let absolute = URL(string: value), absolute.scheme != nil { return absolute }
         return baseURL?.appending(path: value.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
+    }
+}
+
+private actor GuideHTTPResponseCache {
+    struct Response: Sendable {
+        let data: Data
+        let etag: String
+    }
+
+    static let shared = GuideHTTPResponseCache()
+
+    private var responses: [URL: Response] = [:]
+
+    func response(for url: URL) -> Response? {
+        responses[url]
+    }
+
+    func store(data: Data, etag: String?, for url: URL) {
+        guard let etag, !etag.isEmpty else {
+            responses[url] = nil
+            return
+        }
+        responses[url] = Response(data: data, etag: etag)
     }
 }
 

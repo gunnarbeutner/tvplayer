@@ -22,6 +22,40 @@ class FakeOpener:
 
 
 class GuideCacheTests(unittest.TestCase):
+    def test_guide_etag_changes_only_when_guide_content_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            now = 100_000
+            opener = FakeOpener(
+                channels=[{"uuid": "channel-1", "name": "Test"}],
+                events=[{
+                    "eventId": 1,
+                    "channelUuid": "channel-1",
+                    "title": "Current Show",
+                    "start": now - 300,
+                    "stop": now + 1_500,
+                }],
+            )
+            cache = GuideCache(
+                base_url="http://tvheadend.test:9981",
+                username="",
+                password="",
+                cache_path=str(Path(directory) / "guide-cache.json"),
+                opener=opener,
+            )
+
+            cache.refresh(now=now)
+            first_body, first_etag = cache.guide_response()
+            cache.refresh(now=now + 60)
+            second_body, second_etag = cache.guide_response()
+
+            self.assertNotEqual(first_body, second_body)
+            self.assertEqual(first_etag, second_etag)
+
+            opener.events[0]["title"] = "Amended Show"
+            cache.refresh(now=now + 120)
+            _, amended_etag = cache.guide_response()
+            self.assertNotEqual(amended_etag, second_etag)
+
     def test_anonymous_cache_uses_an_unauthenticated_opener(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch(
             "guide_cache.urllib.request.build_opener"
@@ -150,6 +184,83 @@ class GuideCacheTests(unittest.TestCase):
             self.assertEqual(
                 [programme["eventId"] for programme in document["events"]],
                 [2],
+            )
+
+    def test_large_schedule_amendment_drops_absent_future_event(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            now = 100_000
+            opener = FakeOpener(
+                channels=[{"uuid": "channel-1", "name": "Test"}],
+                events=[
+                    {
+                        "eventId": 1,
+                        "channelUuid": "channel-1",
+                        "title": "phoenix vor ort",
+                        "start": now + 1_000,
+                        "stop": now + 2_800,
+                    }
+                ],
+            )
+            cache = GuideCache(
+                base_url="http://tvheadend.test:9981",
+                username="viewer",
+                password="secret",
+                cache_path=str(Path(directory) / "guide-cache.json"),
+                opener=opener,
+            )
+            cache.refresh(now=now)
+
+            # The amended event begins 30 minutes earlier, keeps the same
+            # end, and receives a new id. The old future slot is absent from
+            # TVHeadend's successful refresh and must not survive in cache.
+            opener.events = [
+                {
+                    "eventId": 2,
+                    "channelUuid": "channel-1",
+                    "title": "phoenix vor ort",
+                    "start": now - 800,
+                    "stop": now + 2_800,
+                }
+            ]
+            cache.refresh(now=now + 60)
+            document = json.loads(cache.json_guide())
+
+            self.assertEqual(
+                [programme["eventId"] for programme in document["events"]],
+                [2],
+            )
+
+    def test_absent_finished_event_remains_as_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            now = 100_000
+            opener = FakeOpener(
+                channels=[{"uuid": "channel-1", "name": "Test"}],
+                events=[
+                    {
+                        "eventId": 1,
+                        "channelUuid": "channel-1",
+                        "title": "Finished Show",
+                        "start": now - 1_800,
+                        "stop": now - 300,
+                    }
+                ],
+            )
+            cache = GuideCache(
+                base_url="http://tvheadend.test:9981",
+                username="viewer",
+                password="secret",
+                cache_path=str(Path(directory) / "guide-cache.json"),
+                opener=opener,
+            )
+            cache.refresh(now=now)
+
+            opener.events = []
+            cache.refresh(now=now + 60)
+            document = json.loads(cache.json_guide())
+
+            self.assertEqual(
+                [programme["eventId"] for programme in document["events"]],
+                [1],
             )
 
     def test_cache_survives_process_restart(self) -> None:

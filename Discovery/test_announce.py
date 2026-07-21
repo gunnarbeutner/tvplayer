@@ -22,6 +22,7 @@ from announce import (
     addresses_served_by_guide,
     credential_txt_properties,
     discovery_id,
+    etag_matches,
     guide_advertised_addresses,
     resolved_addresses,
     service_target,
@@ -30,6 +31,15 @@ from announce import (
 
 
 class AnnounceTests(unittest.TestCase):
+    def test_if_none_match_uses_weak_etag_comparison(self) -> None:
+        current = 'W/"guide-content"'
+
+        self.assertTrue(etag_matches(current, current))
+        self.assertTrue(etag_matches('"other", "guide-content"', current))
+        self.assertTrue(etag_matches("*", current))
+        self.assertFalse(etag_matches(None, current))
+        self.assertFalse(etag_matches('W/"different"', current))
+
     def test_tvheadend_credentials_allow_authenticated_access(self) -> None:
         with patch.dict(
             os.environ,

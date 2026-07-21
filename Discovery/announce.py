@@ -247,11 +247,18 @@ def guide_handler(cache: GuideCache) -> type[BaseHTTPRequestHandler]:
         def do_GET(self) -> None:
             path = self.path.partition("?")[0]
             if path == "/guide.json":
-                body = cache.json_guide()
+                body, etag = cache.guide_response()
+                if etag_matches(self.headers.get("If-None-Match"), etag):
+                    self.send_response(304)
+                    self.send_header("ETag", etag)
+                    self.send_header("Cache-Control", "public, max-age=30")
+                    self.end_headers()
+                    return
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "public, max-age=30")
+                self.send_header("ETag", etag)
                 self.end_headers()
                 self.wfile.write(body)
                 return
@@ -269,6 +276,21 @@ def guide_handler(cache: GuideCache) -> type[BaseHTTPRequestHandler]:
             print(f"Guide HTTP: {format % args}", flush=True)
 
     return GuideRequestHandler
+
+
+def etag_matches(if_none_match: str | None, current_etag: str) -> bool:
+    if if_none_match is None:
+        return False
+
+    def weak_value(etag: str) -> str:
+        etag = etag.strip()
+        return etag[2:] if etag.startswith("W/") else etag
+
+    current_value = weak_value(current_etag)
+    return any(
+        candidate.strip() == "*" or weak_value(candidate) == current_value
+        for candidate in if_none_match.split(",")
+    )
 
 
 def main() -> int:

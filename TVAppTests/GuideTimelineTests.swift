@@ -592,6 +592,71 @@ final class GuideTimelineTests: XCTestCase {
         XCTAssertEqual(event.seriesLink, "crid://example.test/series/7")
     }
 
+    func testEPGHistoryDropsAbsentCurrentEventAfterLargeScheduleAmendment() throws {
+        let now = Date(timeIntervalSince1970: 100_000)
+        let stale = try JSONDecoder().decode(
+            TVHeadendEPGEvent.self,
+            from: Data(
+                """
+                {
+                  "eventId": 1,
+                  "channelUuid": "channel-uuid",
+                  "title": "phoenix vor ort",
+                  "start": 101000,
+                  "stop": 102800
+                }
+                """.utf8
+            )
+        )
+        let amended = try JSONDecoder().decode(
+            TVHeadendEPGEvent.self,
+            from: Data(
+                """
+                {
+                  "eventId": 2,
+                  "channelUuid": "channel-uuid",
+                  "title": "phoenix vor ort",
+                  "start": 99200,
+                  "stop": 102800
+                }
+                """.utf8
+            )
+        )
+
+        let retained = EPGHistoryStore.retainedCachedEvents(
+            [stale],
+            freshEvents: [amended],
+            now: now.addingTimeInterval(60)
+        )
+
+        XCTAssertTrue(retained.isEmpty)
+    }
+
+    func testEPGHistoryRetainsAbsentFinishedEvent() throws {
+        let finished = try JSONDecoder().decode(
+            TVHeadendEPGEvent.self,
+            from: Data(
+                """
+                {
+                  "eventId": 1,
+                  "channelUuid": "channel-uuid",
+                  "title": "Finished Show",
+                  "start": 98200,
+                  "stop": 99700
+                }
+                """.utf8
+            )
+        )
+
+        let retained = EPGHistoryStore.retainedCachedEvents(
+            [finished],
+            freshEvents: [],
+            now: Date(timeIntervalSince1970: 100_060)
+        )
+
+        XCTAssertEqual(retained.map(\.eventID), [1])
+    }
+
     func testRichGuideDocumentRetainsEpisodeRatingsAndRecordingState() throws {
         let json = """
         {
