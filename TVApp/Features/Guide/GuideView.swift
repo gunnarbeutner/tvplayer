@@ -208,6 +208,10 @@ struct GuideView: View {
         }
         .onChange(of: playback.focusReturnRevision) { _, _ in
             guard isSelected else { return }
+            // The guide clock normally advances on a low-frequency timer.
+            // Refresh it at the player boundary so a programme that ended
+            // during playback cannot retain focus for up to another tick.
+            model.tick()
             restorePlaybackFocusIfAvailable()
         }
         .onChange(of: focusRequest) { _, request in
