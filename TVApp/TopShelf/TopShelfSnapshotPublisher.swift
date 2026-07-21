@@ -4,6 +4,52 @@ import Foundation
 import TVServices
 import UIKit
 
+enum TopShelfOnNowPolicy {
+    typealias Candidate = (channel: GuideChannel, program: GuideProgram)
+
+    private enum Identity: Hashable {
+        case episode(String)
+        case schedule(title: String, subtitle: String, start: Date, end: Date)
+    }
+
+    static func uniquePrograms(
+        from candidates: [Candidate],
+        limit: Int
+    ) -> [Candidate] {
+        guard limit > 0 else { return [] }
+        var seen = Set<Identity>()
+        var result: [Candidate] = []
+        result.reserveCapacity(min(limit, candidates.count))
+
+        for candidate in candidates {
+            guard seen.insert(identity(for: candidate.program)).inserted else { continue }
+            result.append(candidate)
+            if result.count == limit { break }
+        }
+        return result
+    }
+
+    private static func identity(for program: GuideProgram) -> Identity {
+        if let episodeURI = program.metadata.episodeURI?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !episodeURI.isEmpty {
+            return .episode(episodeURI)
+        }
+        return .schedule(
+            title: normalized(program.title),
+            subtitle: normalized(program.subtitle ?? ""),
+            start: program.start,
+            end: program.end
+        )
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value.split(whereSeparator: \Character.isWhitespace)
+            .joined(separator: " ")
+            .lowercased()
+    }
+}
+
 actor TopShelfSnapshotPublisher {
     static let shared = TopShelfSnapshotPublisher()
 
@@ -22,15 +68,18 @@ actor TopShelfSnapshotPublisher {
         configuration: TVHeadendConfiguration,
         now: Date
     ) async {
-        let favoritePrograms = channels
+        let favoriteProgramCandidates = channels
             .filter { favoriteChannelIDs.contains($0.id) }
-            .compactMap { channel -> (GuideChannel, GuideProgram)? in
+            .compactMap { channel -> TopShelfOnNowPolicy.Candidate? in
                 guard let program = channel.programs.first(where: { $0.isAiring(at: now) }) else {
                     return nil
                 }
-                return (channel, program)
+                return (channel: channel, program: program)
             }
-            .prefix(12)
+        let favoritePrograms = TopShelfOnNowPolicy.uniquePrograms(
+            from: favoriteProgramCandidates,
+            limit: 12
+        )
 
         let playableRecordings = recordings
             .filter(\.isPlayable)
