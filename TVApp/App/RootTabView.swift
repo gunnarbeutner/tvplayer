@@ -382,7 +382,7 @@ struct RootTabView: View {
                 trailingClearWidth: guideHeaderTint == nil
                     ? 0
                     : GuideArtworkStyle.backgroundClearWidth(
-                        for: GuideArtworkStyle.televisionWidth
+                        for: GuideArtworkStyle.artworkWidth
                     )
             )
             .frame(width: GuideArtworkStyle.televisionCanvasWidth, height: 84)
@@ -392,10 +392,6 @@ struct RootTabView: View {
         tabs
 #endif
     }
-
-#if !os(tvOS)
-    private var showsGuideLivePreview: Bool { false }
-#endif
 
 #if os(tvOS)
     private var sectionNavigator: some View {
@@ -421,8 +417,12 @@ struct RootTabView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .ignoresSafeArea(.container, edges: .top)
     }
+#endif
 
     private var showsGuideLivePreview: Bool {
+#if os(iOS)
+        false
+#else
         guard selection == .guide,
               !playback.isPlayerPresented,
               playback.isUserInitiatedLivePlayback,
@@ -438,8 +438,10 @@ struct RootTabView: View {
         case .idle, .paused, .failed:
             return false
         }
+#endif
     }
 
+#if os(tvOS)
     private var exitToSectionNavigator: (() -> Void)? {
         guard !isSectionNavigatorFocused, !playback.isPlayerPresented else { return nil }
         return { navigationFocusRequest = selection }
@@ -764,14 +766,24 @@ private struct PersistentPlaybackSurface: View {
     let showsGuidePreview: Bool
     @State private var attachmentRevision = 0
 
-    private let guidePreviewHeight: CGFloat = 424
+    private var guidePreviewHeight: CGFloat {
+        GuideArtworkStyle.previewHeight
+    }
 
     private var guideVideoWidth: CGFloat {
         guidePreviewHeight * 16 / 9
     }
 
     private var guideLeadingCrop: CGFloat {
-        max(0, guideVideoWidth - GuideArtworkStyle.televisionWidth)
+        max(0, guideVideoWidth - GuideArtworkStyle.artworkWidth)
+    }
+
+    private var ignoredSafeAreaEdges: Edge.Set {
+#if os(macOS)
+        isPresented ? .all : []
+#else
+        .all
+#endif
     }
 
     var body: some View {
@@ -809,14 +821,14 @@ private struct PersistentPlaybackSurface: View {
             // guide artwork region is not. Render at the source aspect and
             // crop the leading side instead of asking VLC to letterbox it.
             .frame(
-                width: isPresented ? proxy.size.width : GuideArtworkStyle.televisionWidth,
+                width: isPresented ? proxy.size.width : GuideArtworkStyle.artworkWidth,
                 height: isPresented ? proxy.size.height : guidePreviewHeight,
                 alignment: .trailing
             )
             .clipped()
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         }
-        .ignoresSafeArea()
+        .ignoresSafeArea(.container, edges: ignoredSafeAreaEdges)
         .opacity(isPresented || showsGuidePreview ? 1 : 0)
         .allowsHitTesting(false)
         .onChange(of: isPresented) { _, presented in

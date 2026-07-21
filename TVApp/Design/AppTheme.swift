@@ -18,7 +18,16 @@ enum GuideArtworkStyle {
     // tvOS lays out full-screen content in a 1920-point coordinate space,
     // including on 4K hardware where the backing scale is higher.
     static let televisionCanvasWidth: CGFloat = 1920
-    static let televisionWidth: CGFloat = 680
+#if os(tvOS)
+    static let artworkWidth: CGFloat = 680
+    static let panelHeight: CGFloat = 340
+    static let artworkTopBleed: CGFloat = 84
+#else
+    static let artworkWidth: CGFloat = 440
+    static let panelHeight: CGFloat = 270
+    static let artworkTopBleed: CGFloat = 0
+#endif
+    static let previewHeight = panelHeight + artworkTopBleed
     static let fadeMidpoint: CGFloat = 0.14
     static let fadeCompletion: CGFloat = 0.28
 

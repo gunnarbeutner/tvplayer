@@ -1434,7 +1434,8 @@ struct VLCVideoSurface: NSViewRepresentable {
             mediaPlayer: mediaPlayer,
             attachmentRevision: attachmentRevision,
             isActive: isActive,
-            fadesLeadingEdge: fadesLeadingEdge
+            fadesLeadingEdge: fadesLeadingEdge,
+            leadingFadeInset: leadingFadeInset
         )
     }
 
@@ -1442,7 +1443,8 @@ struct VLCVideoSurface: NSViewRepresentable {
         (nsView as? VLCVideoContainerView)?.updateAttachment(
             revision: attachmentRevision,
             isActive: isActive,
-            fadesLeadingEdge: fadesLeadingEdge
+            fadesLeadingEdge: fadesLeadingEdge,
+            leadingFadeInset: leadingFadeInset
         )
     }
 
@@ -1456,20 +1458,27 @@ private final class VLCVideoContainerView: NSView {
     private var attachmentRevision: Int
     private var isActive: Bool
     private var fadesLeadingEdge: Bool
+    private var leadingFadeInset: CGFloat
+    private var attachedBoundsSize = CGSize.zero
+    private let leadingFadeMask = CAGradientLayer()
 
     init(
         mediaPlayer: VLCMediaPlayer,
         attachmentRevision: Int,
         isActive: Bool,
-        fadesLeadingEdge: Bool
+        fadesLeadingEdge: Bool,
+        leadingFadeInset: CGFloat
     ) {
         self.mediaPlayer = mediaPlayer
         self.attachmentRevision = attachmentRevision
         self.isActive = isActive
         self.fadesLeadingEdge = fadesLeadingEdge
+        self.leadingFadeInset = leadingFadeInset
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
+        layer?.masksToBounds = true
+        updateLeadingFadeMask()
     }
 
     @available(*, unavailable)
@@ -1486,16 +1495,73 @@ private final class VLCVideoContainerView: NSView {
         }
     }
 
-    func updateAttachment(revision: Int, isActive: Bool, fadesLeadingEdge: Bool) {
+    override func layout() {
+        super.layout()
+        guard attachedBoundsSize != bounds.size else { return }
+
+        attachedBoundsSize = bounds.size
+        updateLeadingFadeMask()
+        guard isActive, bounds.width > 1, bounds.height > 1 else { return }
+
+        // SwiftUI can resize the persistent drawable from full-screen player
+        // dimensions to the guide preview without replacing its NSView. Force
+        // VLC to bind again once AppKit has assigned the new frame.
+        attachIfVisible(force: true)
+    }
+
+    func updateAttachment(
+        revision: Int,
+        isActive: Bool,
+        fadesLeadingEdge: Bool,
+        leadingFadeInset: CGFloat
+    ) {
         let mustReattach = revision != attachmentRevision
         attachmentRevision = revision
         self.isActive = isActive
-        self.fadesLeadingEdge = fadesLeadingEdge
+        if self.fadesLeadingEdge != fadesLeadingEdge || self.leadingFadeInset != leadingFadeInset {
+            self.fadesLeadingEdge = fadesLeadingEdge
+            self.leadingFadeInset = leadingFadeInset
+            updateLeadingFadeMask()
+        }
         guard isActive else {
             detachIfOwned()
             return
         }
         attachIfVisible(force: mustReattach)
+    }
+
+    private func updateLeadingFadeMask() {
+        guard fadesLeadingEdge else {
+            layer?.mask = nil
+            return
+        }
+        leadingFadeMask.frame = bounds
+        leadingFadeMask.startPoint = CGPoint(x: 0, y: 0.5)
+        leadingFadeMask.endPoint = CGPoint(x: 1, y: 0.5)
+        leadingFadeMask.colors = [
+            NSColor.clear.cgColor,
+            NSColor.black.withAlphaComponent(0.48).cgColor,
+            NSColor.black.cgColor,
+            NSColor.black.cgColor,
+        ]
+        let width = max(1, bounds.width)
+        let visibleWidth = max(1, width - leadingFadeInset)
+        let fadeStart = min(1, max(0, leadingFadeInset / width))
+        let fadeMidpoint = min(
+            1,
+            max(fadeStart, (leadingFadeInset + visibleWidth * GuideArtworkStyle.fadeMidpoint) / width)
+        )
+        let fadeCompletion = min(
+            1,
+            max(fadeMidpoint, (leadingFadeInset + visibleWidth * GuideArtworkStyle.fadeCompletion) / width)
+        )
+        leadingFadeMask.locations = [
+            NSNumber(value: Double(fadeStart)),
+            NSNumber(value: Double(fadeMidpoint)),
+            NSNumber(value: Double(fadeCompletion)),
+            1,
+        ]
+        layer?.mask = leadingFadeMask
     }
 
     private func attachIfVisible(force: Bool = false) {

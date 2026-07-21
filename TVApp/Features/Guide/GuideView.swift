@@ -475,19 +475,11 @@ private struct GuideLoadingSkeleton: View {
 
     private var informationPanelHeight: CGFloat {
         guard !usesCompactLayout else { return 100 }
-#if os(tvOS)
-        return 340
-#else
-        return 270
-#endif
+        return GuideArtworkStyle.panelHeight
     }
 
     private var artworkPlaceholderWidth: CGFloat {
-#if os(tvOS)
-        GuideArtworkStyle.televisionWidth
-#else
-        440
-#endif
+        GuideArtworkStyle.artworkWidth
     }
 
     var body: some View {
@@ -738,27 +730,15 @@ private struct GuideInformationPanel: View {
     }
 
     private var regularPanelHeight: CGFloat {
-#if os(tvOS)
-        340
-#else
-        270
-#endif
+        GuideArtworkStyle.panelHeight
     }
 
     private var regularArtworkWidth: CGFloat {
-#if os(tvOS)
-        680
-#else
-        440
-#endif
+        GuideArtworkStyle.artworkWidth
     }
 
     private var artworkTopBleed: CGFloat {
-#if os(tvOS)
-        84
-#else
-        0
-#endif
+        GuideArtworkStyle.artworkTopBleed
     }
 
     private var regularLeadingPadding: CGFloat {
