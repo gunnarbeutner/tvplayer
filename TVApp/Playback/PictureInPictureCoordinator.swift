@@ -8,6 +8,10 @@ final class PictureInPictureCoordinator: NSObject,
     @preconcurrency AVPictureInPictureControllerDelegate,
     @preconcurrency AVPictureInPictureSampleBufferPlaybackDelegate
 {
+    // Keep the implementation wired in while PiP is temporarily unavailable.
+    // Flip this flag to restore the control and controller setup.
+    private static let isFeatureEnabled = false
+
     private weak var playback: PlaybackCoordinator?
     private let engine: VLCPlaybackEngine
     private var controller: AVPictureInPictureController?
@@ -28,7 +32,9 @@ final class PictureInPictureCoordinator: NSObject,
     }
 
     var isActive: Bool { controller?.isPictureInPictureActive == true }
-    var isSupported: Bool { AVPictureInPictureController.isPictureInPictureSupported() }
+    var isSupported: Bool {
+        Self.isFeatureEnabled && AVPictureInPictureController.isPictureInPictureSupported()
+    }
     var isPossible: Bool {
         engine.isPictureInPictureReady && controller?.isPictureInPicturePossible == true
     }
@@ -57,7 +63,10 @@ final class PictureInPictureCoordinator: NSObject,
     }
 
     private func configureIfReady() {
-        guard controller == nil, engine.isPictureInPictureReady else { return }
+        guard Self.isFeatureEnabled,
+              controller == nil,
+              engine.isPictureInPictureReady
+        else { return }
         let source = AVPictureInPictureController.ContentSource(
             sampleBufferDisplayLayer: engine.sampleBufferBridge.displayLayer,
             playbackDelegate: self
