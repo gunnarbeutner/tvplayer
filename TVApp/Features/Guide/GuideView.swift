@@ -1116,7 +1116,15 @@ private struct ProgrammeArtworkView: View {
                     }
                 }
                 .mask { artworkMask }
-                .animation(.easeOut(duration: 0.24), value: artworkTransitionKey)
+                // A cache miss has two state changes: old artwork -> empty,
+                // then empty -> newly decoded artwork. Animating both lets
+                // their opacity transitions overlap and briefly brings the
+                // previous channel's image back over the new one. Remove a
+                // stale image immediately; animate only a ready replacement.
+                .animation(
+                    displayedArtwork == nil ? nil : .easeOut(duration: 0.24),
+                    value: artworkTransitionKey
+                )
             }
         }
         .clipped()
