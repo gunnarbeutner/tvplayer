@@ -41,6 +41,30 @@ final class TVHeadendClientTests: XCTestCase {
         XCTAssertEqual(PlaybackURLProtocol.requestCount(for: "/playlist/ticket/channels"), 1)
     }
 
+    func testHTSPPrewarmingAuthenticatesWithoutSubscribing() async throws {
+        let configuration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://tvheadend.test:9981")!,
+            username: "viewer",
+            password: "secret",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil
+        )
+        let connection = PrewarmHTSPConnection()
+        let prewarmer = HTSPConnectionPrewarmer()
+
+        await prewarmer.preconnect(
+            configuration: configuration,
+            connectionFactory: { connection }
+        )
+        let warmed = await prewarmer.takeConnection(configuration: configuration)
+
+        XCTAssertNotNil(warmed)
+        XCTAssertEqual(connection.handshakeCount, 1)
+        XCTAssertEqual(connection.subscribeCount, 0)
+        warmed?.close()
+    }
+
     @MainActor
     func testPlaybackStartIntentSupersedesAndCancelsPreviousTask() {
         let intents = PlaybackStartIntentTracker()
@@ -62,6 +86,37 @@ final class TVHeadendClientTests: XCTestCase {
         intents.finish(secondID)
         XCTAssertFalse(intents.isCurrent(secondID))
     }
+}
+
+private final class PrewarmHTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
+    let capabilities: Set<String> = ["timeshift"]
+    private let lock = NSLock()
+    private var handshakes = 0
+    private var subscriptions = 0
+
+    var handshakeCount: Int { lock.withLock { handshakes } }
+    var subscribeCount: Int { lock.withLock { subscriptions } }
+
+    func handshake(username: String, password: String) throws {
+        lock.withLock { handshakes += 1 }
+    }
+
+    func subscribe(channelID: UInt32, profile: String) throws -> (Int64, [HTSPStreamInfo]) {
+        lock.withLock { subscriptions += 1 }
+        return (60, [])
+    }
+
+    func reserveSequence() -> Int64 { 1 }
+
+    func sendRequest(
+        method: String,
+        sequence: Int64,
+        fields: [String: HTSPValue],
+        includesSubscriptionID: Bool
+    ) throws {}
+
+    func readMessage() throws -> [String: HTSPValue] { throw HTSPError.disconnected }
+    func close() {}
 }
 
 private final class PlaybackURLProtocol: URLProtocol, @unchecked Sendable {

@@ -115,7 +115,28 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         let connectionFactory: HTSPConnectionFactory = suppliedFactory ?? {
             try HTSPConnection.openSynchronously(host: host, port: configuration.htspPort)
         }
+        let preconnected: (any HTSPConnectionTransport)?
+        if suppliedFactory == nil {
+            preconnected = await HTSPConnectionPrewarmer.shared.takeConnection(
+                configuration: configuration
+            )
+        } else {
+            preconnected = nil
+        }
         let connected = try await Task.detached(priority: .userInitiated) {
+            if let preconnected {
+                do {
+                    let subscription = try preconnected.subscribe(
+                        channelID: channelID,
+                        profile: profile
+                    )
+                    return (preconnected, subscription)
+                } catch {
+                    // An idle socket may be closed by the server before Play.
+                    // Fall through to the normal fresh connection path.
+                    preconnected.close()
+                }
+            }
             let connection = try connectionFactory()
             try connection.handshake(username: configuration.username, password: configuration.password)
             guard connection.capabilities.contains("timeshift") else {

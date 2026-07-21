@@ -255,6 +255,95 @@ protocol HTSPConnectionTransport: AnyObject, Sendable {
 
 typealias HTSPConnectionFactory = @Sendable () throws -> any HTSPConnectionTransport
 
+actor HTSPConnectionPrewarmer {
+    static let shared = HTSPConnectionPrewarmer()
+
+    private struct Key: Hashable {
+        let host: String
+        let port: Int
+        let username: String
+        let password: String
+    }
+
+    private struct Entry {
+        let id: UUID
+        let connectionTask: Task<any HTSPConnectionTransport, Error>
+        let expirationTask: Task<Void, Never>
+    }
+
+    private let lifetime: Duration
+    private var entries: [Key: Entry] = [:]
+
+    init(lifetime: Duration = .seconds(8)) {
+        self.lifetime = lifetime
+    }
+
+    func preconnect(
+        configuration: TVHeadendConfiguration,
+        connectionFactory suppliedFactory: HTSPConnectionFactory? = nil
+    ) {
+        guard let key = key(for: configuration), entries[key] == nil else { return }
+        let factory: HTSPConnectionFactory = suppliedFactory ?? {
+            try HTSPConnection.openSynchronously(host: key.host, port: key.port)
+        }
+        let id = UUID()
+        let connectionTask = Task.detached(priority: .userInitiated) {
+            let connection = try factory()
+            do {
+                try connection.handshake(
+                    username: configuration.username,
+                    password: configuration.password
+                )
+                guard connection.capabilities.contains("timeshift") else {
+                    throw HTSPError.timeshiftUnavailable
+                }
+                return connection
+            } catch {
+                connection.close()
+                throw error
+            }
+        }
+        let expirationLifetime = lifetime
+        let expirationTask = Task { [weak self] in
+            try? await Task.sleep(for: expirationLifetime)
+            guard !Task.isCancelled else { return }
+            await self?.expire(key: key, id: id)
+        }
+        entries[key] = Entry(
+            id: id,
+            connectionTask: connectionTask,
+            expirationTask: expirationTask
+        )
+    }
+
+    func takeConnection(
+        configuration: TVHeadendConfiguration
+    ) async -> (any HTSPConnectionTransport)? {
+        guard let key = key(for: configuration), let entry = entries.removeValue(forKey: key)
+        else { return nil }
+        entry.expirationTask.cancel()
+        return try? await entry.connectionTask.value
+    }
+
+    private func expire(key: Key, id: UUID) async {
+        guard let entry = entries[key], entry.id == id else { return }
+        entries[key] = nil
+        if let connection = try? await entry.connectionTask.value {
+            connection.close()
+        }
+    }
+
+    private func key(for configuration: TVHeadendConfiguration) -> Key? {
+        guard let host = configuration.baseURL?.host else { return nil }
+        return Key(
+            host: host,
+            port: configuration.htspPort,
+            username: configuration.username,
+            password: configuration.password
+        )
+    }
+}
+
 final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
     static let protocolVersion: Int64 = 44
 

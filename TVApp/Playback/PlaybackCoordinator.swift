@@ -373,8 +373,12 @@ final class PlaybackCoordinator: ObservableObject {
         let id = UUID()
         let task = Task { @MainActor [weak self] in
             guard let self else { throw CancellationError() }
-            return try await client(for: configuration)
+            let request = try await client(for: configuration)
                 .livePlaybackRequest(channelID: channelID)
+            if case .live(.nativeTimeshift) = request.kind {
+                await HTSPConnectionPrewarmer.shared.preconnect(configuration: configuration)
+            }
+            return request
         }
         inFlightLivePrefetch = InFlightLivePrefetch(id: id, key: key, task: task)
 
