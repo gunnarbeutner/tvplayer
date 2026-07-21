@@ -3,6 +3,7 @@ import OSLog
 import SwiftUI
 #if os(tvOS)
 @preconcurrency import TVVLCKit
+import UIKit
 #elseif os(iOS)
 @preconcurrency import MobileVLCKit
 import UIKit
@@ -403,17 +404,22 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         guard state == .paused,
               let image = PlatformImage(contentsOfFile: snapshotURL.path)
         else { return }
-        pausedFrame = image
-        if shouldConcealSeek {
-            if postSeekOutputGate.concealImmediately() {
-                concealPlaybackOutput()
-            }
-        }
+        installPausedFrame(image, shouldConcealSeek: shouldConcealSeek)
     }
 
     private func capturePausedFrame() {
         guard state == .paused, pendingSnapshotURL == nil else { return }
         pausedFrame = nil
+
+#if canImport(UIKit)
+        if let drawable = mediaPlayer.drawable as? UIView,
+           let image = captureRenderedVideoSurface(drawable) {
+            let shouldConcealSeek = concealsSeekAfterPausedFrameCapture
+            concealsSeekAfterPausedFrameCapture = false
+            installPausedFrame(image, shouldConcealSeek: shouldConcealSeek)
+            return
+        }
+#endif
 
         let snapshotURL = FileManager.default.temporaryDirectory
             .appending(path: "tvplayer-paused-frame-\(UUID().uuidString)")
@@ -424,6 +430,33 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             withWidth: 1_280,
             andHeight: 0
         )
+    }
+
+#if canImport(UIKit)
+    private func captureRenderedVideoSurface(_ view: UIView) -> UIImage? {
+        guard view.bounds.width > 0, view.bounds.height > 0, view.window != nil else { return nil }
+
+        let format = UIGraphicsImageRendererFormat.preferred()
+        format.opaque = true
+        format.scale = view.traitCollection.displayScale
+        format.preferredRange = .extended
+        let renderer = UIGraphicsImageRenderer(bounds: view.bounds, format: format)
+        var captured = false
+        let image = renderer.image { _ in
+            captured = view.drawHierarchy(in: view.bounds, afterScreenUpdates: false)
+        }
+        return captured ? image : nil
+    }
+#endif
+
+    private func installPausedFrame(
+        _ image: PlatformImage,
+        shouldConcealSeek: Bool
+    ) {
+        pausedFrame = image
+        if shouldConcealSeek, postSeekOutputGate.concealImmediately() {
+            concealPlaybackOutput()
+        }
     }
 
     private func clearPausedFrame() {
@@ -1015,6 +1048,13 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         // hidden and muted, then restore normal rate when the new epoch is
         // ready to reveal.
         let drainsQueuedOutput = postSeekOutputGate.isArmed
+        if drainsQueuedOutput, mediaPlayer.hasVideoOut {
+            // A few pictures can already be decoded behind VLC's demux
+            // discontinuity. Drain that bounded vout queue while the frozen
+            // seek frame remains visible. Paused seeks use a separate path
+            // which stops on the first verified target picture.
+            postSeekOutputGate.requireDisplayedPictures(6)
+        }
         playbackRate = 1
         beginPostSeekOutputConcealmentIfNeeded()
         mediaPlayer.play()
@@ -1032,12 +1072,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         at date: Date = Date()
     ) {
         postSeekOutputGate.requirePlaybackProgress(navigation.prerollDuration)
-        let previousPlaybackDate = livePlaybackDate(at: date)
         let liveEdge = date
         let landingDate = liveEdge.addingTimeInterval(-navigation.liveDelay)
-        postSeekOutputGate.requirePlaybackClockShift(
-            landingDate.timeIntervalSince(previousPlaybackDate)
-        )
         livePlaybackPosition.moveAnchor(
             to: landingDate,
             liveEdge: liveEdge,

@@ -1197,7 +1197,7 @@ final class TimeshiftActionTests: XCTestCase {
         )
     }
 
-    func testPostSeekOutputGateRejectsDecodedOldPicturesUntilPlaybackClockReachesSeekEpoch() {
+    func testPostSeekOutputGateDrainsBoundedDecodedPictureQueueAfterDiscontinuity() {
         var gate = PostSeekPlaybackOutputGate()
         let beforeSeek = PlaybackOutputCounters(
             displayedPictures: 20,
@@ -1206,8 +1206,7 @@ final class TimeshiftActionTests: XCTestCase {
             playbackTimeMilliseconds: 20_000
         )
         gate.arm(from: beforeSeek)
-        gate.requirePlaybackClockShift(-10)
-        gate.requireDisplayedPicture()
+        gate.requireDisplayedPictures(3)
         XCTAssertTrue(gate.beginConcealing(from: beforeSeek))
 
         XCTAssertFalse(
@@ -1226,17 +1225,27 @@ final class TimeshiftActionTests: XCTestCase {
                     displayedPictures: 22,
                     playedAudioBuffers: 32,
                     demuxDiscontinuities: 5,
-                    playbackTimeMilliseconds: 20_080
+                    playbackTimeMilliseconds: 10_000
+                )
+            )
+        )
+        XCTAssertFalse(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 23,
+                    playedAudioBuffers: 33,
+                    demuxDiscontinuities: 5,
+                    playbackTimeMilliseconds: 10_040
                 )
             )
         )
         XCTAssertTrue(
             gate.observe(
                 PlaybackOutputCounters(
-                    displayedPictures: 23,
-                    playedAudioBuffers: 33,
+                    displayedPictures: 24,
+                    playedAudioBuffers: 34,
                     demuxDiscontinuities: 5,
-                    playbackTimeMilliseconds: 10_000
+                    playbackTimeMilliseconds: 10_080
                 )
             )
         )
