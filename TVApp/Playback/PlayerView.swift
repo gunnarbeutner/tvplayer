@@ -561,7 +561,7 @@ struct PlaybackView: View {
 
         timelineSeekCommitTask?.cancel()
         timelineSeekCommitTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(650))
+            try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
 
             engine.refreshPlaybackInformation()

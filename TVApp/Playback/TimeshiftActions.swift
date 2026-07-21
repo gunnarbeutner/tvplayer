@@ -884,7 +884,7 @@ enum HTSPNavigationRecoveryPolicy {
 }
 
 struct HTSPPostSeekBufferTracker {
-    static let requiredDuration: Int64 = 1_000_000
+    static let requiredDuration: Int64 = 500_000
 
     private(set) var result: HTSPNavigationResult?
     private var waitsForVideoKeyframe = false

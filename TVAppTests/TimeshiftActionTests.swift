@@ -1425,7 +1425,7 @@ final class TimeshiftActionTests: XCTestCase {
         )
     }
 
-    func testPostSeekBufferWaitsForVideoKeyframeAndOneSecondOfMedia() {
+    func testPostSeekBufferWaitsForVideoKeyframeAndHalfSecondOfMedia() {
         var tracker = HTSPPostSeekBufferTracker()
         let result = HTSPNavigationResult(
             landingTime: 45_000_000,
@@ -1453,8 +1453,8 @@ final class TimeshiftActionTests: XCTestCase {
             )
         )
         XCTAssertNil(tracker.observePacket(time: 45_000_000))
-        XCTAssertNil(tracker.observePacket(time: 45_900_000))
-        XCTAssertEqual(tracker.observePacket(time: 46_000_000), result)
+        XCTAssertNil(tracker.observePacket(time: 45_499_000))
+        XCTAssertEqual(tracker.observePacket(time: 45_500_000), result)
         XCTAssertNil(tracker.result)
     }
 
