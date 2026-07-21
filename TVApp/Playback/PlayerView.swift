@@ -1407,7 +1407,7 @@ private struct PlayerTabbedOverlay: View {
                     systemImage: "captions.bubble.fill"
                 ) {
                     trackChoices(
-                        tracks: engine.subtitleTracks,
+                        tracks: subtitleTrackChoices,
                         selectedTrackID: engine.selectedSubtitleTrackID,
                         emptyMessage: "No subtitles available",
                         selectTrack: engine.selectSubtitleTrack
@@ -1446,8 +1446,8 @@ private struct PlayerTabbedOverlay: View {
             columns: [
                 GridItem(
                     .adaptive(
-                        minimum: usesCompactLayout ? 190 : 250,
-                        maximum: usesCompactLayout ? 320 : 300
+                        minimum: usesCompactLayout ? 190 : 300,
+                        maximum: usesCompactLayout ? 320 : 360
                     ),
                     spacing: 12
                 )
@@ -1460,7 +1460,9 @@ private struct PlayerTabbedOverlay: View {
                 choiceButton(
                     title: labels.title,
                     subtitle: labels.subtitle,
-                    selected: selectedTrackID == track.id
+                    selected: isDisabledTrack(track)
+                        ? selectedTrackID == nil
+                        : selectedTrackID == track.id
                 ) {
                     selectTrack(track.id)
                     noteActivity()
@@ -1475,6 +1477,14 @@ private struct PlayerTabbedOverlay: View {
 
     private func isDisabledTrack(_ track: PlaybackTrack) -> Bool {
         track.id < 0 || track.name.localizedCaseInsensitiveContains("disable")
+    }
+
+    private var subtitleTrackChoices: [PlaybackTrack] {
+        guard !engine.subtitleTracks.isEmpty else { return [] }
+        if engine.subtitleTracks.contains(where: isDisabledTrack) {
+            return engine.subtitleTracks
+        }
+        return [PlaybackTrack(id: -1, name: "Off")] + engine.subtitleTracks
     }
 
     private func selectedTrackIsEnabled(
@@ -1564,7 +1574,7 @@ private struct PlayerTabbedOverlay: View {
         } else {
             HStack(alignment: .top, spacing: 34) {
                 playbackSettingsLabel(title: title, systemImage: systemImage)
-                    .frame(width: 210, alignment: .leading)
+                    .frame(width: 260, alignment: .leading)
                 content()
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -1576,6 +1586,7 @@ private struct PlayerTabbedOverlay: View {
         Label(title, systemImage: systemImage)
             .font(.headline.weight(.semibold))
             .foregroundStyle(.white.opacity(0.86))
+            .lineLimit(usesCompactLayout ? 2 : 1)
             .padding(.top, 10)
     }
 
@@ -1593,6 +1604,7 @@ private struct PlayerTabbedOverlay: View {
             title: title,
             subtitle: subtitle,
             selected: selected,
+            height: usesCompactLayout ? 72 : 128,
             action: action
         )
     }
@@ -1627,6 +1639,7 @@ private struct PlayerChoiceButton: View {
     let title: String
     let subtitle: String?
     let selected: Bool
+    let height: CGFloat
     let action: () -> Void
 
     @FocusState private var isFocused: Bool
@@ -1642,13 +1655,16 @@ private struct PlayerChoiceButton: View {
                 if selected { Image(systemName: "checkmark.circle.fill") }
             }
             if let subtitle {
-                Text(subtitle).font(.caption).foregroundStyle(.white.opacity(0.7))
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .lineLimit(1)
             }
         }
         .foregroundStyle(.white)
         .padding(.horizontal, 18)
-        .padding(.vertical, 12)
-        .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+        .frame(height: height)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             isFocused
                 ? AppTheme.focused
@@ -1681,24 +1697,25 @@ private struct PlayerStepButton: View {
     @FocusState private var isFocused: Bool
 
     var body: some View {
-        Button(action: action) {
-            Image(systemName: systemImage)
-                .font(.headline.bold())
-                .foregroundStyle(.white)
-                .frame(width: 48, height: 38)
-                .background(
-                    isFocused ? AppTheme.focused : Color.white.opacity(0.1),
-                    in: RoundedRectangle(cornerRadius: 9)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 9)
-                        .strokeBorder(isFocused ? AppTheme.focusBorder : Color.clear, lineWidth: 2)
-                }
-                .contentShape(RoundedRectangle(cornerRadius: 9))
-        }
-            .buttonStyle(.plain)
+        Image(systemName: systemImage)
+            .font(.headline.bold())
+            .foregroundStyle(.white)
+            .frame(width: 48, height: 38)
+            .background(
+                isFocused ? AppTheme.focused : Color.white.opacity(0.1),
+                in: RoundedRectangle(cornerRadius: 9)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 9)
+                    .strokeBorder(isFocused ? AppTheme.focusBorder : Color.clear, lineWidth: 2)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 9))
+            .focusable()
             .focused($isFocused)
             .focusEffectDisabled()
+            .onTapGesture(perform: action)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { action() }
             .accessibilityLabel(systemImage == "minus" ? "Decrease delay" : "Increase delay")
     }
 }

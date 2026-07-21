@@ -574,6 +574,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 
     func selectSubtitleTrack(_ id: Int) {
+        guard id >= 0 else {
+            mediaPlayer.deselectAllTextTracks()
+            selectedSubtitleTrackID = nil
+            return
+        }
         mediaPlayer.selectTrack(at: id, type: .text)
         selectedSubtitleTrackID = id
     }
