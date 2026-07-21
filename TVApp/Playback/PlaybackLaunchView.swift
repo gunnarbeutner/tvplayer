@@ -29,23 +29,47 @@ struct PlaybackLaunchView: View {
 
             if let artwork {
                 GeometryReader { geometry in
-                    platformImage(artwork.image)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: geometry.size.width, height: geometry.size.height)
-                        .clipped()
+                    let edgeRadius = max(geometry.size.width, geometry.size.height) * 0.72
+                    let labelRadius = max(geometry.size.width, geometry.size.height) * 0.56
+
+                    ZStack {
+                        platformImage(artwork.image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: geometry.size.width, height: geometry.size.height)
+                            .clipped()
+
+                        RadialGradient(
+                            stops: [
+                                .init(color: .clear, location: 0.56),
+                                .init(color: .black.opacity(0.28), location: 1),
+                            ],
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: edgeRadius
+                        )
+
+                        RadialGradient(
+                            colors: [
+                                .black.opacity(0.58),
+                                .black.opacity(0.24),
+                                .clear,
+                            ],
+                            center: .topLeading,
+                            startRadius: 0,
+                            endRadius: labelRadius
+                        )
+                    }
                 }
                 .ignoresSafeArea()
+            } else {
+                LinearGradient(
+                    colors: [presentation.channel.tint.opacity(0.34), AppTheme.background, .black],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .ignoresSafeArea()
             }
-
-            LinearGradient(
-                colors: artwork == nil
-                    ? [presentation.channel.tint.opacity(0.34), AppTheme.background, .black]
-                    : [.black.opacity(0.3), .black.opacity(0.66), .black.opacity(0.92)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            .ignoresSafeArea()
 
             VStack(alignment: .leading, spacing: 14) {
                 ChannelBadge(channel: presentation.channel, diameter: 112)
@@ -54,8 +78,8 @@ struct PlaybackLaunchView: View {
                     .font(.headline.bold())
                     .lineLimit(1)
             }
-            .padding(.horizontal, 72)
-            .padding(.vertical, 64)
+            .padding(.horizontal, 48)
+            .padding(.vertical, 48)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
             Color.clear
