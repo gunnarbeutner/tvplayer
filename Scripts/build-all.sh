@@ -14,7 +14,7 @@ xcodebuild \
   -sdk appletvos \
   -configuration "$configuration" \
   -derivedDataPath "$derived_data/tvOS" \
-  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_ALLOWED=YES \
   build
 
 xcodebuild \
@@ -23,7 +23,7 @@ xcodebuild \
   -sdk iphoneos \
   -configuration "$configuration" \
   -derivedDataPath "$derived_data/iOS" \
-  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_ALLOWED=YES \
   build
 
 xcodebuild \
@@ -31,5 +31,5 @@ xcodebuild \
   -scheme TVApp-macOS \
   -configuration "$configuration" \
   -derivedDataPath "$derived_data/macOS" \
-  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_ALLOWED=YES \
   build

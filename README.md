@@ -83,13 +83,12 @@ xcodebuild \
   build
 ```
 
-For a signing-free compile check of all three application targets, run
+For a code-signed build of all three application targets, run
 `bash Scripts/build-all.sh`. The iOS target includes both iPhone and iPad device
-families; iPadOS does not require a separate Xcode target.
-
-Keep each simulator's normal local ad-hoc signing enabled. TV Player's Keychain
-access group is supplied through a signing entitlement, so an unsigned build
-cannot save discovered or manually entered passwords.
+families; iPadOS does not require a separate Xcode target. Do not disable code
+signing for local verification: TV Player's Keychain access group is supplied
+through a signing entitlement, so unsigned builds cannot exercise server
+credential storage correctly.
 
 `TVApp.xcodeproj` is generated from `project.yml` and is intentionally not
 tracked.
