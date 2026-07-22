@@ -36,6 +36,74 @@ enum GuideGridMetrics {
     }
 }
 
+enum GuideFocusScrollPosition {
+    /// SwiftUI can update the representable before UIKit has assigned its
+    /// final bounds. Treating that zero/tiny viewport as real would scroll the
+    /// first row down, only for the next focus retry to move it back to zero.
+    static func targetOffset(
+        itemFrame: CGRect,
+        currentOffset: CGPoint,
+        viewportSize: CGSize,
+        contentSize: CGSize
+    ) -> CGPoint? {
+        guard hasStableViewport(viewportSize) else { return nil }
+
+        var target = currentOffset
+        let visibleTop = target.y + GuideGridMetrics.headerHeight
+        let visibleBottom = target.y + viewportSize.height
+        if itemFrame.minY < visibleTop {
+            target.y = max(
+                0,
+                itemFrame.minY - GuideGridMetrics.headerHeight - GuideGridMetrics.rowInset
+            )
+        } else if itemFrame.maxY > visibleBottom {
+            target.y = min(
+                max(0, contentSize.height - viewportSize.height),
+                itemFrame.maxY - viewportSize.height + GuideGridMetrics.rowInset
+            )
+        }
+
+        let pinnedTrailingEdge = target.x + GuideGridMetrics.channelWidth + 8
+        if itemFrame.minX < pinnedTrailingEdge {
+            target.x = max(0, itemFrame.minX - GuideGridMetrics.channelWidth - 8)
+        }
+
+        let focusTargetWidth = min(itemFrame.width, GuideGridMetrics.focusTargetWidth)
+        let focusTargetTrailingEdge = itemFrame.minX + focusTargetWidth + 8
+        let visibleTrailingEdge = target.x + viewportSize.width
+        if focusTargetTrailingEdge > visibleTrailingEdge {
+            target.x = min(
+                max(0, contentSize.width - viewportSize.width),
+                focusTargetTrailingEdge - viewportSize.width
+            )
+        }
+        return target
+    }
+
+    static func hasStableViewport(_ viewportSize: CGSize) -> Bool {
+        viewportSize.width > 0
+            && viewportSize.height >= GuideGridMetrics.headerHeight + GuideGridMetrics.rowHeight
+    }
+}
+
+enum GuideFocusPresentation {
+    static func selectionProgramID(
+        requested: GuideProgram.ID?,
+        pending: GuideProgram.ID?,
+        preferred: GuideProgram.ID?
+    ) -> GuideProgram.ID? {
+        pending ?? requested ?? preferred
+    }
+
+    static func showsPendingFocus(
+        programID: GuideProgram.ID,
+        pendingProgramID: GuideProgram.ID?,
+        currentlyFocusedProgramID: GuideProgram.ID?
+    ) -> Bool {
+        currentlyFocusedProgramID == nil && programID == pendingProgramID
+    }
+}
+
 enum GuideCollectionNavigationDirection: Equatable {
     case up
     case down
@@ -638,6 +706,11 @@ private final class GuideCollectionView: UICollectionView,
     private var guideSnapshot: GuideGridSnapshot?
     private var snapshotBuildTask: Task<Void, Never>?
     private var focusRetryTask: Task<Void, Never>?
+    private var focusRequestAwaitingStableLayout: (
+        programID: GuideProgram.ID,
+        retriesRemaining: Int,
+        directly: Bool
+    )?
     private var channelFocusRetryTask: Task<Void, Never>?
     private var requestedGuideRevision: Int?
     private var requestedChannelPreferencesRevision: Int?
@@ -760,6 +833,21 @@ private final class GuideCollectionView: UICollectionView,
         fatalError("init(coder:) has not been implemented")
     }
 
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard GuideFocusScrollPosition.hasStableViewport(bounds.size),
+              let request = focusRequestAwaitingStableLayout
+        else { return }
+
+        focusRequestAwaitingStableLayout = nil
+        requestFocus(
+            on: request.programID,
+            animated: false,
+            retriesRemaining: request.retriesRemaining,
+            directly: request.directly
+        )
+    }
+
     override var preferredFocusEnvironments: [UIFocusEnvironment] {
         if let pendingChannelProgramID,
            let section = guideSnapshot?.indexPath(for: pendingChannelProgramID)?.section,
@@ -875,6 +963,7 @@ private final class GuideCollectionView: UICollectionView,
         snapshotBuildTask?.cancel()
         focusRetryTask?.cancel()
         channelFocusRetryTask?.cancel()
+        focusRequestAwaitingStableLayout = nil
 #if os(tvOS)
         if let pageCommandObserver {
             NotificationCenter.default.removeObserver(pageCommandObserver)
@@ -1039,6 +1128,8 @@ private final class GuideCollectionView: UICollectionView,
         else { return }
         if currentlyFocusedProgramID == programID {
             pendingFocusProgramID = nil
+            focusRequestAwaitingStableLayout = nil
+            updateFocusAvailability()
             return
         }
 
@@ -1053,7 +1144,31 @@ private final class GuideCollectionView: UICollectionView,
         // otherwise every retry can expire while the cell still does not
         // exist (most visibly when navigating horizontally).
         let destinationIsRealized = cellForItem(at: indexPath) != nil
-        reveal(item: item, animated: animated && destinationIsRealized)
+        guard reveal(item: item, animated: animated && destinationIsRealized) else {
+            // UIKit will lay out the collection before its first visible
+            // frame. Resume there instead of waiting for a timer, so the
+            // correct focus appearance is present in that frame too.
+            focusRetryTask?.cancel()
+            focusRetryTask = nil
+            let previousRequest = focusRequestAwaitingStableLayout
+            focusRequestAwaitingStableLayout = (
+                programID: programID,
+                retriesRemaining: max(
+                    retriesRemaining,
+                    previousRequest?.programID == programID
+                        ? previousRequest?.retriesRemaining ?? 0
+                        : 0
+                ),
+                directly: directly || (
+                    previousRequest?.programID == programID
+                        ? previousRequest?.directly ?? false
+                        : false
+                )
+            )
+            setNeedsLayout()
+            return
+        }
+        focusRequestAwaitingStableLayout = nil
         layoutIfNeeded()
         if directly,
            let targetCell = cellForItem(at: indexPath),
@@ -1066,9 +1181,22 @@ private final class GuideCollectionView: UICollectionView,
         }
 
         guard currentlyFocusedProgramID != programID else { return }
+        scheduleFocusRetry(
+            on: programID,
+            retriesRemaining: retriesRemaining,
+            directly: directly
+        )
+    }
+
+    private func scheduleFocusRetry(
+        on programID: GuideProgram.ID,
+        retriesRemaining: Int,
+        directly: Bool
+    ) {
         guard retriesRemaining > 0 else {
             if pendingFocusProgramID == programID {
                 pendingFocusProgramID = nil
+                focusRequestAwaitingStableLayout = nil
                 updateFocusAvailability()
             }
             return
@@ -1090,36 +1218,17 @@ private final class GuideCollectionView: UICollectionView,
         }
     }
 
-    private func reveal(item: GuideGridSnapshot.Item, animated: Bool) {
-        var target = contentOffset
-        let visibleTop = target.y + GuideGridMetrics.headerHeight
-        let visibleBottom = target.y + bounds.height
-        if item.frame.minY < visibleTop {
-            target.y = max(0, item.frame.minY - GuideGridMetrics.headerHeight - GuideGridMetrics.rowInset)
-        } else if item.frame.maxY > visibleBottom {
-            target.y = min(
-                max(0, contentSize.height - bounds.height),
-                item.frame.maxY - bounds.height + GuideGridMetrics.rowInset
-            )
-        }
-
-        let pinnedTrailingEdge = target.x + GuideGridMetrics.channelWidth + 8
-        if item.frame.minX < pinnedTrailingEdge {
-            target.x = max(0, item.frame.minX - GuideGridMetrics.channelWidth - 8)
-        }
-
-        let focusTargetWidth = min(item.frame.width, GuideGridMetrics.focusTargetWidth)
-        let focusTargetTrailingEdge = item.frame.minX + focusTargetWidth + 8
-        let visibleTrailingEdge = target.x + bounds.width
-        if focusTargetTrailingEdge > visibleTrailingEdge {
-            target.x = min(
-                max(0, contentSize.width - bounds.width),
-                focusTargetTrailingEdge - bounds.width
-            )
-        }
+    private func reveal(item: GuideGridSnapshot.Item, animated: Bool) -> Bool {
+        guard let target = GuideFocusScrollPosition.targetOffset(
+            itemFrame: item.frame,
+            currentOffset: contentOffset,
+            viewportSize: bounds.size,
+            contentSize: contentSize
+        ) else { return false }
         if target != contentOffset {
             setContentOffset(target, animated: animated)
         }
+        return true
     }
 
     private func handleDirectionalPress(
@@ -1212,6 +1321,7 @@ private final class GuideCollectionView: UICollectionView,
         }
 
         pendingFocusProgramID = nil
+        focusRequestAwaitingStableLayout = nil
         pendingChannelProgramID = programID
         focusedChannelID = channelID
         focusedChannelReturnProgramID = programID
@@ -1328,6 +1438,7 @@ private final class GuideCollectionView: UICollectionView,
         let previousProgramID = requestedFocusedProgramID
         requestedFocusedProgramID = programID
         pendingFocusProgramID = nil
+        focusRequestAwaitingStableLayout = nil
         updateFocusAvailability()
         if previousProgramID != programID {
             // didFocus updates the collection's selection before SwiftUI
@@ -1357,8 +1468,22 @@ private final class GuideCollectionView: UICollectionView,
     }
 
     private func updateFocusAvailability() {
+        let currentProgramID = currentlyFocusedProgramID
+        let selectionProgramID = GuideFocusPresentation.selectionProgramID(
+            requested: requestedFocusedProgramID,
+            pending: pendingFocusProgramID,
+            preferred: preferredProgramID
+        )
         for case let cell as GuideProgrammeCollectionCell in visibleCells {
-            cell.isFocusAllowed = allowsFocus(on: cell.programID)
+            cell.updateFocusState(
+                isFocusAllowed: allowsFocus(on: cell.programID),
+                isHeaderSelection: cell.programID == selectionProgramID,
+                showsPendingFocusAppearance: GuideFocusPresentation.showsPendingFocus(
+                    programID: cell.programID,
+                    pendingProgramID: pendingFocusProgramID,
+                    currentlyFocusedProgramID: currentProgramID
+                )
+            )
         }
         if !isGuideEnabled, currentlyFocusedProgramID != nil {
             setNeedsFocusUpdate()
@@ -1366,11 +1491,22 @@ private final class GuideCollectionView: UICollectionView,
     }
 
     private func configure(_ cell: GuideProgrammeCollectionCell, with item: GuideGridSnapshot.Item) {
+        let currentProgramID = currentlyFocusedProgramID
+        let selectionProgramID = GuideFocusPresentation.selectionProgramID(
+            requested: requestedFocusedProgramID,
+            pending: pendingFocusProgramID,
+            preferred: preferredProgramID
+        )
         cell.configure(
             item: item,
             now: currentNow,
             recordingState: recordingState(item.program),
-            isHeaderSelection: item.id == requestedFocusedProgramID,
+            isHeaderSelection: item.id == selectionProgramID,
+            showsPendingFocusAppearance: GuideFocusPresentation.showsPendingFocus(
+                programID: item.id,
+                pendingProgramID: pendingFocusProgramID,
+                currentlyFocusedProgramID: currentProgramID
+            ),
             isFocusAllowed: allowsFocus(on: item.id),
             leadingOcclusion: leadingOcclusion(for: item),
             onFocused: { [weak self] in self?.didFocus(programID: item.id) },
@@ -1559,6 +1695,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
     private var now = Date()
     private var recordingState: TVRecordingState?
     private var isHeaderSelection = false
+    private var showsPendingFocusAppearance = false
     private var leadingOcclusion: CGFloat = 0
     private var consumedDirectionalPressTypes: Set<Int> = []
     private var onFocused: () -> Void = {}
@@ -1608,6 +1745,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
         timeLabel.text = nil
         recordingImageView.image = nil
         isHeaderSelection = false
+        showsPendingFocusAppearance = false
         onFocused = {}
         onActivate = {}
         onPlay = {}
@@ -1620,6 +1758,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
         now: Date,
         recordingState: TVRecordingState?,
         isHeaderSelection: Bool,
+        showsPendingFocusAppearance: Bool,
         isFocusAllowed: Bool,
         leadingOcclusion: CGFloat,
         onFocused: @escaping () -> Void,
@@ -1631,6 +1770,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
         self.now = now
         self.recordingState = recordingState
         self.isHeaderSelection = isHeaderSelection
+        self.showsPendingFocusAppearance = showsPendingFocusAppearance
         self.isFocusAllowed = isFocusAllowed
         self.leadingOcclusion = leadingOcclusion
         self.onFocused = onFocused
@@ -1642,6 +1782,19 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
         accessibilityLabel = accessibilityLabel(for: item.program, timeText: item.accessibilityTimeText)
         updateAppearance(animated: false)
         setNeedsLayout()
+    }
+
+    func updateFocusState(
+        isFocusAllowed: Bool,
+        isHeaderSelection: Bool,
+        showsPendingFocusAppearance: Bool
+    ) {
+        let appearanceChanged = self.isHeaderSelection != isHeaderSelection
+            || self.showsPendingFocusAppearance != showsPendingFocusAppearance
+        self.isFocusAllowed = isFocusAllowed
+        self.isHeaderSelection = isHeaderSelection
+        self.showsPendingFocusAppearance = showsPendingFocusAppearance
+        if appearanceChanged { updateAppearance(animated: false) }
     }
 
     func updateLeadingOcclusion(_ inset: CGFloat) {
@@ -1754,8 +1907,9 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
     private func updateAppearance(animated: Bool) {
         guard let item else { return }
         let phase = item.program.phase(at: now)
+        let presentsFocus = isFocused || showsPendingFocusAppearance
         let background: UIColor
-        if isFocused {
+        if presentsFocus {
             background = UIColor(AppTheme.focused)
         } else {
             background = switch phase {
@@ -1767,7 +1921,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
         contentView.backgroundColor = background
         let borderColor: Color
         let borderWidth: CGFloat
-        if isFocused {
+        if presentsFocus {
             borderColor = AppTheme.focusBorder
             borderWidth = 4
         } else if isHeaderSelection {
@@ -1779,7 +1933,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
         }
         contentView.layer.borderColor = UIColor(borderColor).cgColor
         contentView.layer.borderWidth = borderWidth
-        timeLabel.textColor = isFocused ? .white : UIColor(AppTheme.secondaryText)
+        timeLabel.textColor = presentsFocus ? .white : UIColor(AppTheme.secondaryText)
         switch recordingState {
         case .recording:
             recordingImageView.image = UIImage(systemName: "record.circle.fill")

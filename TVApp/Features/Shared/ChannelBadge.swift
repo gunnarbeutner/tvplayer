@@ -193,6 +193,22 @@ final class ChannelLogoImageCache: @unchecked Sendable {
         return artwork
     }
 
+    /// Hydrates a bounded set of persisted images before the first view is
+    /// constructed. Callers should keep this to images that will actually be
+    /// visible in the first frame; normal scrolling continues to use the
+    /// asynchronous loader below.
+    @discardableResult
+    func warmMemoryFromDisk(
+        for urls: [URL],
+        kind: CachedArtworkKind = .channelLogo
+    ) -> Int {
+        urls.reduce(into: 0) { loadedCount, url in
+            if loadArtworkFromDisk(for: url, kind: kind) != nil {
+                loadedCount += 1
+            }
+        }
+    }
+
     /// Safe to call from view construction and other latency-sensitive paths.
     /// This never reads or decodes a file synchronously on the caller.
     func memoryArtwork(

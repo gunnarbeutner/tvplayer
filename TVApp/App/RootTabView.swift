@@ -3,6 +3,8 @@ import SwiftUI
 import TVServices
 #endif
 
+private let initialGuideLogoPreloadLimit = 12
+
 enum AppTab: Hashable, CaseIterable {
     case channels
     case guide
@@ -69,6 +71,18 @@ struct RootTabView: View {
                 ?? cachedSnapshot?.startupChannelPreferencesIdentifier,
             migratingFrom: configuration.legacyChannelPreferencesIdentifier
         )
+        if let cachedSnapshot {
+            let favoriteChannels = cachedSnapshot.channels.filter {
+                channelPreferences.isFavorite($0.id)
+            }
+            let otherChannels = cachedSnapshot.channels.filter {
+                !channelPreferences.isFavorite($0.id)
+            }
+            let initialLogoURLs = (favoriteChannels + otherChannels)
+                .prefix(initialGuideLogoPreloadLimit)
+                .compactMap(\.iconURL)
+            ChannelLogoImageCache.shared.warmMemoryFromDisk(for: initialLogoURLs)
+        }
         _channelPreferences = StateObject(wrappedValue: channelPreferences)
         _guide = StateObject(
             wrappedValue: GuideViewModel(

@@ -56,6 +56,28 @@ final class GuideGridLayoutTests: XCTestCase {
         XCTAssertNil(cache.memoryArtwork(for: url, kind: .channelLogo))
     }
 
+    func testPersistedChannelLogoCanBeWarmedForTheFirstFrame() throws {
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(
+            at: directoryURL,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+
+        let url = try XCTUnwrap(URL(string: "https://example.test/imagecache/42"))
+        let data = try solidPNGData(width: 48, height: 48)
+        let fileURL = directoryURL
+            .appending(path: ChannelLogoImageCache.cacheKey(for: url))
+            .appendingPathExtension("image")
+        try data.write(to: fileURL)
+
+        let cache = ChannelLogoImageCache(directoryURL: directoryURL)
+        XCTAssertNil(cache.memoryArtwork(for: url))
+        XCTAssertEqual(cache.warmMemoryFromDisk(for: [url]), 1)
+        XCTAssertNotNil(cache.memoryArtwork(for: url))
+    }
+
     func testPlaybackFocusRestoresThePlayingChannelAndCurrentProgramme() throws {
         let now = Date(timeIntervalSince1970: 10_000)
         let firstChannel = channel(
@@ -182,6 +204,61 @@ final class GuideGridLayoutTests: XCTestCase {
             GuideGridMetrics.cardHeight + (GuideGridMetrics.rowInset * 2),
             GuideGridMetrics.rowHeight
         )
+    }
+
+    func testInitialFocusDoesNotScrollBeforeTheGridHasStableBounds() throws {
+        let firstRowFrame = CGRect(
+            x: GuideGridMetrics.channelWidth + 100,
+            y: GuideGridMetrics.headerHeight + GuideGridMetrics.rowInset,
+            width: 180,
+            height: GuideGridMetrics.cardHeight
+        )
+        let contentSize = CGSize(width: 2_000, height: 2_000)
+
+        XCTAssertNil(GuideFocusScrollPosition.targetOffset(
+            itemFrame: firstRowFrame,
+            currentOffset: .zero,
+            viewportSize: .zero,
+            contentSize: contentSize
+        ))
+        XCTAssertNil(GuideFocusScrollPosition.targetOffset(
+            itemFrame: firstRowFrame,
+            currentOffset: .zero,
+            viewportSize: CGSize(
+                width: 1_920,
+                height: GuideGridMetrics.headerHeight + GuideGridMetrics.rowHeight - 1
+            ),
+            contentSize: contentSize
+        ))
+
+        let stableOffset = try XCTUnwrap(GuideFocusScrollPosition.targetOffset(
+            itemFrame: firstRowFrame,
+            currentOffset: .zero,
+            viewportSize: CGSize(width: 1_920, height: 600),
+            contentSize: contentSize
+        ))
+        XCTAssertEqual(stableOffset.y, 0)
+    }
+
+    func testInitialFocusPresentationUsesPendingTargetBeforeUIKitFocusArrives() {
+        XCTAssertEqual(
+            GuideFocusPresentation.selectionProgramID(
+                requested: nil,
+                pending: "favorite-current-show",
+                preferred: "fallback-show"
+            ),
+            "favorite-current-show"
+        )
+        XCTAssertTrue(GuideFocusPresentation.showsPendingFocus(
+            programID: "favorite-current-show",
+            pendingProgramID: "favorite-current-show",
+            currentlyFocusedProgramID: nil
+        ))
+        XCTAssertFalse(GuideFocusPresentation.showsPendingFocus(
+            programID: "favorite-current-show",
+            pendingProgramID: "favorite-current-show",
+            currentlyFocusedProgramID: "previous-show"
+        ))
     }
 
     func testDirectionalInputUsesItsEventCellDuringFocusTransitions() {
