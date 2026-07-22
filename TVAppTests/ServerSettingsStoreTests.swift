@@ -190,6 +190,38 @@ final class ServerSettingsStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testSelectingActiveServerForEditingPreservesConnectionStatus() async throws {
+        let serverInfo = try JSONDecoder().decode(
+            TVHeadendServerInfo.self,
+            from: Data(#"{"name":"TVHeadend","version":"4.3","capabilities":["timeshift"]}"#.utf8)
+        )
+        let store = ServerSettingsStore(
+            defaults: defaults,
+            keychain: keychain,
+            sharedConfiguration: nil,
+            environment: [:],
+            startsDiscovery: false,
+            automaticallyTestsConnections: false,
+            serverInfoLoader: { _ in serverInfo },
+            timeshiftProbe: { _ in }
+        )
+        store.handleDiscoveryEvent(.upsert(service(
+            id: "active",
+            name: "Active",
+            host: "active.test"
+        )))
+        let activeID = try XCTUnwrap(store.activeProfileID)
+        await store.testConnection()
+        let connectionStatus = store.connectionStatus
+        let timeshiftStatus = store.timeshiftStatus
+
+        store.selectServer(activeID)
+
+        XCTAssertEqual(store.connectionStatus, connectionStatus)
+        XCTAssertEqual(store.timeshiftStatus, timeshiftStatus)
+    }
+
+    @MainActor
     func testDiscoveredAddressesPersistAndRefreshForAnEditedProfile() throws {
         var store = makeStore()
         store.handleDiscoveryEvent(.upsert(service(

@@ -4,28 +4,35 @@ import TVServices
 @preconcurrency import VLCKit
 import UIKit
 
-actor RecordingThumbnailGenerator {
+@MainActor
+final class RecordingThumbnailGenerator {
     static let shared = RecordingThumbnailGenerator()
 
-    private final class Request: NSObject, VLCMediaThumbnailerDelegate {
+    private final class Request: NSObject, VLCMediaThumbnailerDelegate, @unchecked Sendable {
         private let completion: @Sendable (Data?) -> Void
         private let outputSize: CGSize
+        private let media: VLCMedia
+        private let library: VLCLibrary
         private var thumbnailer: VLCMediaThumbnailer?
+        private var hasFinished = false
 
         init(
             media: VLCMedia,
+            library: VLCLibrary,
             snapshotPosition: Float,
             outputSize: CGSize,
             completion: @escaping @Sendable (Data?) -> Void
         ) {
             self.completion = completion
             self.outputSize = outputSize
+            self.media = media
+            self.library = library
             super.init()
 
             let thumbnailer = VLCMediaThumbnailer(
                 media: media,
                 delegate: self,
-                andVLCLibrary: nil
+                andVLCLibrary: library
             )
             thumbnailer.thumbnailWidth = outputSize.width
             thumbnailer.thumbnailHeight = outputSize.height
@@ -49,9 +56,18 @@ actor RecordingThumbnailGenerator {
         }
 
         private func finish(with data: Data?) {
+            guard !hasFinished else { return }
+            hasFinished = true
             thumbnailer?.delegate = nil
-            thumbnailer = nil
             completion(data)
+            // VLC invokes its delegate while the parser task is still
+            // unwinding. Releasing VLCMediaThumbnailer from inside that
+            // callback destroys the parser before VLCKit releases the task,
+            // corrupting the next thumbnail request. Defer the final release
+            // until the delegate stack has returned to VLCKit.
+            DispatchQueue.main.async { [self] in
+                thumbnailer = nil
+            }
         }
 
         private static func jpegData(from image: CGImage, outputSize: CGSize) -> Data? {
@@ -90,6 +106,7 @@ actor RecordingThumbnailGenerator {
     }
 
     private var activeRequests: [UUID: ActiveRequest] = [:]
+    private let library = VLCLibrary.shared()
 
     func thumbnailData(
         for recording: TVRecording,
@@ -111,6 +128,7 @@ actor RecordingThumbnailGenerator {
             let id = UUID()
             let request = Request(
                 media: media,
+                library: library,
                 snapshotPosition: position,
                 outputSize: outputSize
             ) { [weak self] data in

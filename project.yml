@@ -25,6 +25,10 @@ targetTemplates:
           - Resources/TVApp.entitlements
           - Resources/TVApp-iOS.entitlements
           - Resources/TVApp-macOS.entitlements
+      - path: LICENSES/LGPL-2.1.txt
+        buildPhase: resources
+      - path: LICENSE
+        buildPhase: resources
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

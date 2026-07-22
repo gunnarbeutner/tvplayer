@@ -4,6 +4,74 @@ import OSLog
 import AVFAudio
 #endif
 
+enum PreferredAudioLanguage: String, CaseIterable, Identifiable {
+    case system
+    case german = "de"
+    case english = "en"
+    case french = "fr"
+    case spanish = "es"
+    case italian = "it"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .system: "System default"
+        case .german: "German"
+        case .english: "English"
+        case .french: "French"
+        case .spanish: "Spanish"
+        case .italian: "Italian"
+        }
+    }
+
+    var resolvedLanguageCode: String? {
+        if self != .system { return rawValue }
+        guard let identifier = Locale.preferredLanguages.first else { return nil }
+        return Locale(identifier: identifier).language.languageCode?.identifier
+    }
+}
+
+enum SubtitlePreference: String, CaseIterable, Identifiable {
+    case off
+    case automatic
+    case always
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .off: "Off"
+        case .automatic: "Automatic"
+        case .always: "Always"
+        }
+    }
+}
+
+enum StartupBehavior: String, CaseIterable, Identifiable {
+    case lastUsed
+    case guide
+    case channels
+    case recordings
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .lastUsed: "Last used"
+        case .guide: "Guide"
+        case .channels: "Channels"
+        case .recordings: "Recordings"
+        }
+    }
+}
+
+enum AppStartupSection: String {
+    case guide
+    case channels
+    case recordings
+}
+
 struct PlaybackPresentation: Identifiable {
     let id: UUID
     let channel: GuideChannel
@@ -99,6 +167,10 @@ final class PlaybackCoordinator: ObservableObject {
 
     private static let livePrefetchLifetime: TimeInterval = 8
     private static let commercialDetectionModeKey = "commercialDetectionMode"
+    private static let preferredAudioLanguageKey = "preferredAudioLanguage"
+    private static let subtitlePreferenceKey = "subtitlePreference"
+    private static let startupBehaviorKey = "startupBehavior"
+    private static let lastStartupSectionKey = "lastStartupSection"
     private let logger = Logger(subsystem: "de.beutner.TVPlayer", category: "PlaybackCoordinator")
     @Published var presentation: PlaybackPresentation? {
         didSet { synchronizeCommercialAnalysis() }
@@ -115,6 +187,23 @@ final class PlaybackCoordinator: ObservableObject {
         didSet {
             defaults.set(commercialDetectionMode.rawValue, forKey: Self.commercialDetectionModeKey)
             synchronizeCommercialAnalysis(forceRestart: true)
+        }
+    }
+    @Published var preferredAudioLanguage: PreferredAudioLanguage {
+        didSet {
+            defaults.set(preferredAudioLanguage.rawValue, forKey: Self.preferredAudioLanguageKey)
+            applyTrackPreferences()
+        }
+    }
+    @Published var subtitlePreference: SubtitlePreference {
+        didSet {
+            defaults.set(subtitlePreference.rawValue, forKey: Self.subtitlePreferenceKey)
+            applyTrackPreferences()
+        }
+    }
+    @Published var startupBehavior: StartupBehavior {
+        didSet {
+            defaults.set(startupBehavior.rawValue, forKey: Self.startupBehaviorKey)
         }
     }
     @Published private(set) var commercialDetectionNetworkConditions =
@@ -162,12 +251,19 @@ final class PlaybackCoordinator: ObservableObject {
         self.commercialNetworkMonitor = commercialNetworkMonitor
         commercialDetectionMode = defaults.string(forKey: Self.commercialDetectionModeKey)
             .flatMap(CommercialDetectionMode.init(rawValue:)) ?? .automatic
+        preferredAudioLanguage = defaults.string(forKey: Self.preferredAudioLanguageKey)
+            .flatMap(PreferredAudioLanguage.init(rawValue:)) ?? .system
+        subtitlePreference = defaults.string(forKey: Self.subtitlePreferenceKey)
+            .flatMap(SubtitlePreference.init(rawValue:)) ?? .off
+        startupBehavior = defaults.string(forKey: Self.startupBehaviorKey)
+            .flatMap(StartupBehavior.init(rawValue:)) ?? .guide
         self.engine = engine
         self.commercialAnalyzer = commercialAnalyzer
 #if os(tvOS)
         pictureInPicture = PictureInPictureCoordinator(engine: engine)
         pictureInPicture.connect(to: self)
 #endif
+        applyTrackPreferences()
         commercialAnalyzer.breaksChanged = { [weak self] breaks in
             self?.commercialBreaks = breaks
         }
@@ -180,6 +276,28 @@ final class PlaybackCoordinator: ObservableObject {
                 self.synchronizeCommercialAnalysis(forceRestart: true)
             }
         }
+    }
+
+    var initialStartupSection: AppStartupSection {
+        switch startupBehavior {
+        case .guide: .guide
+        case .channels: .channels
+        case .recordings: .recordings
+        case .lastUsed:
+            defaults.string(forKey: Self.lastStartupSectionKey)
+                .flatMap(AppStartupSection.init(rawValue:)) ?? .guide
+        }
+    }
+
+    func recordVisitedSection(_ section: AppStartupSection) {
+        defaults.set(section.rawValue, forKey: Self.lastStartupSectionKey)
+    }
+
+    private func applyTrackPreferences() {
+        engine.configureTrackPreferences(
+            audioLanguageCode: preferredAudioLanguage.resolvedLanguageCode,
+            subtitles: subtitlePreference
+        )
     }
 
     var isUserInitiatedLivePlayback: Bool {

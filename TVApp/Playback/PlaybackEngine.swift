@@ -316,6 +316,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private var navigationShouldResume = true
     private var isReplacingPipelineForTimeshiftSeek = false
     private var pauseRequested = false
+    private var preferredAudioLanguageCode: String?
+    private var subtitlePreference: SubtitlePreference = .off
+    private var hasAppliedAudioPreference = false
+    private var hasAppliedSubtitlePreference = false
     private var livePlaybackPosition = LivePlaybackPositionTracker()
     private var lastMetricsUpdate = Date()
     private var hasStartedPlayback = false
@@ -758,6 +762,17 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     func selectAudioTrack(_ id: Int) {
         mediaPlayer.selectTrack(at: id, type: .audio)
         selectedAudioTrackID = id
+    }
+
+    func configureTrackPreferences(
+        audioLanguageCode: String?,
+        subtitles: SubtitlePreference
+    ) {
+        preferredAudioLanguageCode = audioLanguageCode
+        subtitlePreference = subtitles
+        hasAppliedAudioPreference = false
+        hasAppliedSubtitlePreference = false
+        refreshTracks()
     }
 
     func selectSubtitleTrack(_ id: Int) {
@@ -1884,6 +1899,79 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         if selectedSubtitleTrackID != updatedSubtitleTrackID {
             selectedSubtitleTrackID = updatedSubtitleTrackID
         }
+        applyTrackPreferencesIfPossible()
+    }
+
+    private func applyTrackPreferencesIfPossible() {
+        if !hasAppliedAudioPreference, !audioTracks.isEmpty {
+            if let languageCode = preferredAudioLanguageCode,
+               let track = audioTracks.first(where: { candidate in
+                   !Self.isDisabledTrack(candidate)
+                       && Self.track(candidate, matches: languageCode)
+               }) {
+                selectAudioTrack(track.id)
+            }
+            // Keep VLC's selected default when no matching track exists.
+            hasAppliedAudioPreference = true
+        }
+
+        guard !hasAppliedSubtitlePreference else { return }
+        switch subtitlePreference {
+        case .off:
+            mediaPlayer.deselectAllTextTracks()
+            selectedSubtitleTrackID = nil
+            hasAppliedSubtitlePreference = true
+        case .always:
+            guard !subtitleTracks.isEmpty else { return }
+            let enabledTracks = subtitleTracks.filter { !Self.isDisabledTrack($0) }
+            let matchingTrack = preferredAudioLanguageCode.flatMap { languageCode in
+                enabledTracks.first { Self.track($0, matches: languageCode) }
+            }
+            if let track = matchingTrack ?? enabledTracks.first {
+                selectSubtitleTrack(track.id)
+            }
+            hasAppliedSubtitlePreference = true
+        case .automatic:
+            guard !audioTracks.isEmpty, !subtitleTracks.isEmpty else { return }
+            guard let selectedAudio = selectedAudioTrackID.flatMap({ id in
+                audioTracks.first { $0.id == id }
+            }) else { return }
+            let audioMatchesPreference = preferredAudioLanguageCode.map { languageCode in
+                Self.track(selectedAudio, matches: languageCode)
+            } ?? true
+            if audioMatchesPreference {
+                mediaPlayer.deselectAllTextTracks()
+                selectedSubtitleTrackID = nil
+            } else if let track = subtitleTracks.first(where: { candidate in
+                guard !Self.isDisabledTrack(candidate) else { return false }
+                return preferredAudioLanguageCode.map {
+                    Self.track(candidate, matches: $0)
+                } ?? true
+            }) {
+                selectSubtitleTrack(track.id)
+            }
+            hasAppliedSubtitlePreference = true
+        }
+    }
+
+    private static func isDisabledTrack(_ track: PlaybackTrack) -> Bool {
+        let name = track.name.lowercased()
+        return name.contains("disable") || name == "off"
+    }
+
+    private static func track(_ track: PlaybackTrack, matches languageCode: String) -> Bool {
+        let normalizedCode = languageCode.lowercased()
+        let aliases: [String: [String]] = [
+            "de": ["german", "deutsch", "deu", "ger", "[de]"],
+            "en": ["english", "englisch", "eng", "[en]"],
+            "fr": ["french", "français", "fra", "fre", "[fr]"],
+            "es": ["spanish", "español", "spa", "[es]"],
+            "it": ["italian", "italiano", "ita", "[it]"]
+        ]
+        let name = track.name.lowercased()
+        return (aliases[normalizedCode] ?? [normalizedCode]).contains {
+            name.contains($0)
+        }
     }
 
     private func refreshTechnicalDetails() {
@@ -1956,6 +2044,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         subtitleTracks = []
         selectedAudioTrackID = nil
         selectedSubtitleTrackID = nil
+        hasAppliedAudioPreference = false
+        hasAppliedSubtitlePreference = false
         liveDelaySeconds = 0
         timeshiftWindowSeconds = 0
         playbackRate = 1

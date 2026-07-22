@@ -169,10 +169,16 @@ final class ServerSettingsStore: ObservableObject {
     func selectServer(_ id: String) {
         guard profiles.contains(where: { $0.id == id }) else { return }
         let changed = activeProfileID != id
+        let previousConnectionStatus = connectionStatus
+        let previousTimeshiftStatus = timeshiftStatus
         activeProfileID = id
         editingProfileID = id
         isAddingServer = false
         loadDraft(profileID: id)
+        if !changed {
+            connectionStatus = previousConnectionStatus
+            timeshiftStatus = previousTimeshiftStatus
+        }
         persist()
         if changed {
             revision &+= 1

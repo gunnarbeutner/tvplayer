@@ -78,12 +78,12 @@ private struct LiveChannelOrderSynchronization: ViewModifier {
 
 struct RootTabView: View {
     @Environment(\.scenePhase) private var scenePhase
-    @State private var selection: AppTab = .guide
+    @State private var selection: AppTab
     @StateObject private var settings: ServerSettingsStore
     @StateObject private var guide: GuideViewModel
     @StateObject private var channelPreferences: ChannelPreferencesStore
     @StateObject private var recordings = RecordingStore()
-    @StateObject private var playback = PlaybackCoordinator()
+    @StateObject private var playback: PlaybackCoordinator
     @State private var playbackAlertMessage: String?
     @State private var recordingAlertMessage: String?
     @State private var pendingRoute: AppRoute?
@@ -99,6 +99,9 @@ struct RootTabView: View {
 #endif
 
     init() {
+        let playback = PlaybackCoordinator()
+        _playback = StateObject(wrappedValue: playback)
+        _selection = State(initialValue: Self.appTab(for: playback.initialStartupSection))
         let settings = ServerSettingsStore()
         let configuration = settings.configuration
         let cachedSnapshot = if configuration.isComplete {
@@ -151,6 +154,23 @@ struct RootTabView: View {
                 cachedSnapshot: cachedSnapshot
             )
         )
+    }
+
+    private static func appTab(for section: AppStartupSection) -> AppTab {
+        switch section {
+        case .guide: .guide
+        case .channels: .channels
+        case .recordings: .recordings
+        }
+    }
+
+    private static func startupSection(for tab: AppTab) -> AppStartupSection? {
+        switch tab {
+        case .guide: .guide
+        case .channels: .channels
+        case .recordings: .recordings
+        case .settings: nil
+        }
     }
 
     var body: some View {
@@ -367,6 +387,9 @@ struct RootTabView: View {
             NowPlayingCoordinator.shared.disconnect()
         }
         .onChange(of: selection) { _, tab in
+            if let startupSection = Self.startupSection(for: tab) {
+                playback.recordVisitedSection(startupSection)
+            }
             guard tab == .recordings else { return }
             Task { await recordings.load(configuration: settings.configuration, force: true) }
         }
