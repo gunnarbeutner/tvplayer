@@ -742,6 +742,12 @@ final class PlaybackCoordinator: ObservableObject {
         )
         let presentationID = presentation.id
         let channelID = presentation.channel.id
+        let commercialContext = CommercialChannelContext(
+            serverIdentifier: htsp.configuration.dataStoreIdentifier,
+            channelID: channelID,
+            channelIconURL: presentation.channel.iconURL,
+            programmes: presentation.channel.programs
+        )
         let profile = presentation.request.profile
         commercialAnalysisStartTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -750,7 +756,7 @@ final class PlaybackCoordinator: ObservableObject {
                     .canonicalLiveStreamURL(channelID: channelID, profile: profile)
                 try Task.checkCancellation()
                 guard self.presentation?.id == presentationID else { return }
-                self.commercialAnalyzer.start(channelID: channelID, url: url)
+                await self.commercialAnalyzer.start(context: commercialContext, url: url)
             } catch is CancellationError {
                 return
             } catch {

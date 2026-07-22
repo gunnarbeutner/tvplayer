@@ -1048,9 +1048,11 @@ private struct CommercialDetectionDebugOverlay: View {
                 HStack(spacing: 8) {
                     if let similarity = diagnostics.logoSimilarity {
                         Text("Logo \(similarity.formatted(.percent.precision(.fractionLength(0))))")
-                        Text(diagnostics.logoIsPresent == true ? "present" : "absent")
+                        Text(presenceDescription)
                             .foregroundStyle(
-                                diagnostics.logoIsPresent == true ? .green : .orange
+                                diagnostics.logoIsPresent == true
+                                    ? .green
+                                    : (diagnostics.logoIsPresent == false ? .orange : .yellow)
                             )
                     } else {
                         Text("Learning \(diagnostics.learningProgress.formatted(.percent.precision(.fractionLength(0))))")
@@ -1061,6 +1063,28 @@ private struct CommercialDetectionDebugOverlay: View {
                 Text(modelDescription)
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.72))
+                ForEach(Array(diagnostics.candidates.prefix(4).enumerated()), id: \.element.id) {
+                    item in
+                    let index = item.offset
+                    let candidate = item.element
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(candidateColor(candidate.role))
+                            .frame(width: 7, height: 7)
+                        Text("\(index + 1) \(candidate.role.rawValue)")
+                        Spacer(minLength: 8)
+                        Text(candidate.similarity?.formatted(
+                            .percent.precision(.fractionLength(0))
+                        ) ?? "—")
+                    }
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.78))
+                }
+                if let reason = diagnostics.abstentionReason {
+                    Text(reason)
+                        .font(.caption.bold())
+                        .foregroundStyle(.yellow)
+                }
             } else {
                 Text("No native timeshift analyser is active.")
                     .font(.caption)
@@ -1088,12 +1112,27 @@ private struct CommercialDetectionDebugOverlay: View {
     }
 
     private var modelDescription: String {
-        guard let corner = diagnostics.logoCorner else {
-            return "No logo mask learned yet"
+        guard !diagnostics.candidates.isEmpty else { return "No logo candidates learned yet" }
+        let trusted = diagnostics.candidates.filter { $0.role == .channelIdentity }.count
+        let auxiliary = diagnostics.candidates.filter { $0.role == .auxiliary }.count
+        let untrusted = diagnostics.candidates.filter { $0.role == .untrusted }.count
+        return "\(trusted) trusted · \(auxiliary) auxiliary · \(untrusted) untrusted"
+    }
+
+    private var presenceDescription: String {
+        switch diagnostics.logoIsPresent {
+        case true: "present"
+        case false: "absent"
+        case nil: "uncertain"
         }
-        let side = corner == 0 ? "Upper-left" : "Upper-right"
-        let edgeCount = diagnostics.logoMask.reduce(0) { $0 + Int($1) }
-        return "\(side) mask · \(edgeCount) learned edges"
+    }
+
+    private func candidateColor(_ role: CommercialLogoRole) -> Color {
+        switch role {
+        case .channelIdentity: .green
+        case .auxiliary: .cyan
+        case .untrusted: .yellow
+        }
     }
 
     private var accessibilitySummary: String {
@@ -1104,6 +1143,7 @@ private struct CommercialDetectionDebugOverlay: View {
             parts.append("learning \(diagnostics.learningProgress.formatted(.percent))")
         }
         parts.append(modelDescription)
+        if let reason = diagnostics.abstentionReason { parts.append(reason) }
         return parts.joined(separator: ", ")
     }
 }
@@ -1164,42 +1204,43 @@ private struct CommercialDetectionDebugFrame: View {
     }
 
     private func drawLogoMask(context: inout GraphicsContext, size: CGSize) {
-        guard let corner = diagnostics.logoCorner else { return }
         let sourceWidth = CGFloat(CommercialFrameFeatures.width)
         let sourceHeight = CGFloat(CommercialFrameFeatures.height)
         let scaleX = size.width / sourceWidth
         let scaleY = size.height / sourceHeight
-        let cornerWidth = CommercialFrameFeatures.cornerWidth
-        let cornerHeight = CommercialFrameFeatures.cornerHeight
-        let originX = corner == 0
-            ? 0
-            : CommercialFrameFeatures.width - cornerWidth
-
-        let region = CGRect(
-            x: CGFloat(originX) * scaleX,
-            y: 0,
-            width: CGFloat(cornerWidth) * scaleX,
-            height: CGFloat(cornerHeight) * scaleY
-        )
-        context.stroke(
-            Path(roundedRect: region, cornerRadius: 3),
-            with: .color(.orange),
-            lineWidth: 2
-        )
-
-        guard diagnostics.logoMask.count == cornerWidth * cornerHeight else { return }
-        for index in diagnostics.logoMask.indices where diagnostics.logoMask[index] != 0 {
-            let x = originX + index % cornerWidth
-            let y = index / cornerWidth
-            context.fill(
-                Path(CGRect(
-                    x: CGFloat(x) * scaleX,
-                    y: CGFloat(y) * scaleY,
-                    width: max(1, scaleX),
-                    height: max(1, scaleY)
-                )),
-                with: .color(.green.opacity(0.9))
+        for candidate in diagnostics.candidates {
+            let bounds = candidate.bounds
+            let color: Color = switch candidate.role {
+            case .channelIdentity: .green
+            case .auxiliary: .cyan
+            case .untrusted: .yellow
+            }
+            let region = CGRect(
+                x: CGFloat(bounds.x) * scaleX,
+                y: CGFloat(bounds.y) * scaleY,
+                width: CGFloat(bounds.width) * scaleX,
+                height: CGFloat(bounds.height) * scaleY
             )
+            context.stroke(
+                Path(roundedRect: region, cornerRadius: 3),
+                with: .color(color),
+                lineWidth: candidate.role == .channelIdentity ? 3 : 2
+            )
+
+            guard candidate.edgeMask.count == bounds.width * bounds.height else { continue }
+            for index in candidate.edgeMask.indices where candidate.edgeMask[index] != 0 {
+                let x = bounds.x + index % bounds.width
+                let y = bounds.y + index / bounds.width
+                context.fill(
+                    Path(CGRect(
+                        x: CGFloat(x) * scaleX,
+                        y: CGFloat(y) * scaleY,
+                        width: max(1, scaleX),
+                        height: max(1, scaleY)
+                    )),
+                    with: .color(color.opacity(0.9))
+                )
+            }
         }
     }
 }

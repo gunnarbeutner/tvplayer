@@ -29,21 +29,132 @@ struct CommercialBreak: Identifiable, Equatable, Sendable {
 }
 
 struct CommercialFrameFeatures: Equatable, Sendable {
-    static let width = 160
-    static let height = 90
-    static let cornerWidth = 40
-    static let cornerHeight = 18
+    static let width = 320
+    static let height = 180
+    static let cornerWidth = 80
+    static let cornerHeight = 36
 
     let pixels: [UInt8]
     let meanLuma: Double
     let darkPixelFraction: Double
     let cornerEdges: [[UInt8]]
+    let perimeterEdges: [UInt8]
+
+    init(
+        pixels: [UInt8],
+        meanLuma: Double,
+        darkPixelFraction: Double,
+        cornerEdges: [[UInt8]],
+        perimeterEdges: [UInt8]? = nil
+    ) {
+        self.pixels = pixels
+        self.meanLuma = meanLuma
+        self.darkPixelFraction = darkPixelFraction
+        self.cornerEdges = cornerEdges
+        if let perimeterEdges {
+            self.perimeterEdges = perimeterEdges
+        } else {
+            self.perimeterEdges = Self.perimeterMask(from: cornerEdges)
+        }
+    }
 
     var isDark: Bool { meanLuma < 20 || darkPixelFraction > 0.90 }
+
+    private static func perimeterMask(from corners: [[UInt8]]) -> [UInt8] {
+        var result = [UInt8](repeating: 0, count: width * height)
+        for corner in corners.indices.prefix(2) {
+            guard corners[corner].count == cornerWidth * cornerHeight else { continue }
+            let originX = corner == 0 ? 0 : width - cornerWidth
+            for y in 0..<cornerHeight {
+                for x in 0..<cornerWidth {
+                    result[y * width + originX + x] = corners[corner][y * cornerWidth + x]
+                }
+            }
+        }
+        return result
+    }
 }
 
-struct CommercialLogoModel: Equatable, Sendable {
-    let corner: Int
+struct CommercialLogoBounds: Codable, Equatable, Sendable {
+    var x: Int
+    var y: Int
+    var width: Int
+    var height: Int
+}
+
+enum CommercialLogoRole: String, Codable, Equatable, Sendable {
+    case channelIdentity
+    case auxiliary
+    case untrusted
+}
+
+struct CommercialLogoCandidateModel: Codable, Equatable, Identifiable, Sendable {
+    let id: UUID
+    var bounds: CommercialLogoBounds
+    var edgeMask: [UInt8]
+    var role: CommercialLogoRole
+    var observedSeconds: Int
+    var sceneCount: Int
+    var programmeIDs: Set<String>
+    var lastSeenAt: Date?
+}
+
+struct CommercialLogoModel: Codable, Equatable, Sendable {
+    static let currentVersion = 2
+
+    var version = currentVersion
+    var candidates: [CommercialLogoCandidateModel]
+    var savedAt = Date()
+
+    init(candidates: [CommercialLogoCandidateModel]) {
+        self.candidates = candidates
+    }
+
+    // Compatibility with the original corner model and deterministic tests.
+    init(corner: Int, edgeMask: [UInt8]) {
+        let bounds = CommercialLogoBounds(
+            x: corner == 0 ? 0 : CommercialFrameFeatures.width - CommercialFrameFeatures.cornerWidth,
+            y: 0,
+            width: CommercialFrameFeatures.cornerWidth,
+            height: CommercialFrameFeatures.cornerHeight
+        )
+        candidates = [CommercialLogoCandidateModel(
+            id: UUID(),
+            bounds: bounds,
+            edgeMask: edgeMask,
+            role: .channelIdentity,
+            observedSeconds: 300,
+            sceneCount: 10,
+            programmeIDs: ["legacy"],
+            lastSeenAt: nil
+        )]
+    }
+
+    var trustedCandidates: [CommercialLogoCandidateModel] {
+        candidates.filter { $0.role == .channelIdentity }
+    }
+
+    var corner: Int {
+        guard let first = trustedCandidates.first ?? candidates.first else { return 0 }
+        return first.bounds.x < CommercialFrameFeatures.width / 2 ? 0 : 1
+    }
+
+    var edgeMask: [UInt8] {
+        (trustedCandidates.first ?? candidates.first)?.edgeMask ?? []
+    }
+}
+
+struct CommercialLogoDiagnostic: Equatable, Identifiable, Sendable {
+    let id: UUID
+    let bounds: CommercialLogoBounds
+    let edgeMask: [UInt8]
+    let role: CommercialLogoRole
+    let similarity: Double?
+    let isPresent: Bool?
+}
+
+struct CommercialArtworkFingerprint: Equatable, Sendable {
+    static let size = 32
     let edgeMask: [UInt8]
 }
 
@@ -57,7 +168,9 @@ struct CommercialDetectionDiagnostics: Equatable, Sendable {
         logoCorner: nil,
         logoMask: [],
         logoSimilarity: nil,
-        logoIsPresent: nil
+        logoIsPresent: nil,
+        candidates: [],
+        abstentionReason: "No analyser is active"
     )
 
     let isActive: Bool
@@ -69,6 +182,8 @@ struct CommercialDetectionDiagnostics: Equatable, Sendable {
     let logoMask: [UInt8]
     let logoSimilarity: Double?
     let logoIsPresent: Bool?
+    let candidates: [CommercialLogoDiagnostic]
+    let abstentionReason: String?
 }
 
 enum CommercialFrameFeatureExtractor {
@@ -110,8 +225,66 @@ enum CommercialFrameFeatureExtractor {
                     pixels,
                     startsAtX: width - CommercialFrameFeatures.cornerWidth
                 )
-            ]
+            ],
+            perimeterEdges: perimeterEdgeMask(pixels)
         )
+    }
+
+    static func artworkFingerprint(from data: Data) -> CommercialArtworkFingerprint? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        else { return nil }
+        let size = CommercialArtworkFingerprint.size
+        var pixels = [UInt8](repeating: 0, count: size * size)
+        let rendered = pixels.withUnsafeMutableBytes { storage -> Bool in
+            guard let context = CGContext(
+                data: storage.baseAddress,
+                width: size,
+                height: size,
+                bitsPerComponent: 8,
+                bytesPerRow: size,
+                space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGImageAlphaInfo.none.rawValue
+            ) else { return false }
+            context.interpolationQuality = .high
+            context.draw(image, in: CGRect(x: 0, y: 0, width: size, height: size))
+            return true
+        }
+        guard rendered else { return nil }
+        var edges = [UInt8](repeating: 0, count: pixels.count)
+        for y in 1..<(size - 1) {
+            for x in 1..<(size - 1) {
+                let horizontal = abs(Int(pixels[y * size + x + 1]) - Int(pixels[y * size + x - 1]))
+                let vertical = abs(Int(pixels[(y + 1) * size + x]) - Int(pixels[(y - 1) * size + x]))
+                if horizontal + vertical >= 40 { edges[y * size + x] = 1 }
+            }
+        }
+        guard edges.contains(1) else { return nil }
+        return CommercialArtworkFingerprint(edgeMask: edges)
+    }
+
+    private static func perimeterEdgeMask(_ pixels: [UInt8]) -> [UInt8] {
+        let width = CommercialFrameFeatures.width
+        let height = CommercialFrameFeatures.height
+        let horizontalBand = max(1, Int(Double(height) * 0.20))
+        let verticalBand = max(1, Int(Double(width) * 0.20))
+        var mask = [UInt8](repeating: 0, count: width * height)
+
+        for y in 1..<(height - 1) {
+            for x in 1..<(width - 1) {
+                guard y < horizontalBand || y >= height - horizontalBand
+                        || x < verticalBand || x >= width - verticalBand
+                else { continue }
+                let horizontal = abs(
+                    Int(pixels[y * width + x + 1]) - Int(pixels[y * width + x - 1])
+                )
+                let vertical = abs(
+                    Int(pixels[(y + 1) * width + x]) - Int(pixels[(y - 1) * width + x])
+                )
+                if horizontal + vertical >= 52 { mask[y * width + x] = 1 }
+            }
+        }
+        return mask
     }
 
     private static func cornerEdgeMask(
@@ -142,14 +315,22 @@ enum CommercialFrameFeatureExtractor {
     }
 }
 
+struct CommercialObservationContext: Equatable, Sendable {
+    let programmeID: String?
+
+    static let unknown = CommercialObservationContext(programmeID: nil)
+}
+
 struct CommercialBreakDetector: Sendable {
-    static let logoLearningSampleCount = 60
+    static let logoLearningSampleCount = 90
+    static let requiredSceneChanges = 8
     static let commercialConfirmationDuration: TimeInterval = 15
     static let logoReturnDuration: TimeInterval = 2
     static let maximumCommercialDuration: TimeInterval = 600
     static let mergeGap: TimeInterval = 5
     static let discontinuityTolerance: TimeInterval = 5
-    static let logoSimilarityThreshold = 0.62
+    static let logoPresentThreshold = 0.72
+    static let logoAbsentThreshold = 0.48
 
     private enum State: Sendable {
         case programme
@@ -159,22 +340,23 @@ struct CommercialBreakDetector: Sendable {
 
     private(set) var breaks: [CommercialBreak] = []
     private var state: State = .programme
-    private var learningCounts = [
-        [Int](repeating: 0, count: CommercialFrameFeatures.cornerWidth
-            * CommercialFrameFeatures.cornerHeight),
-        [Int](repeating: 0, count: CommercialFrameFeatures.cornerWidth
-            * CommercialFrameFeatures.cornerHeight)
-    ]
+    private var learningCounts = [Int](
+        repeating: 0,
+        count: CommercialFrameFeatures.width * CommercialFrameFeatures.height
+    )
     private var learningSamples = 0
-    private var logoCorner: Int?
-    private var logoMask: [UInt8] = []
+    private var sceneChanges = 0
+    private var previousPixels: [UInt8]?
+    private var candidates: [CommercialLogoCandidateModel] = []
     private var lastTimestamp: Date?
-    private var lastLogoSimilarity: Double?
+    private var lastMatches: [UUID: Double] = [:]
+    private var lastPresence: [UUID: Bool?] = [:]
+    private var artworkFingerprint: CommercialArtworkFingerprint?
 
-    var hasLearnedLogo: Bool { logoCorner != nil && !logoMask.isEmpty }
+    var hasLearnedLogo: Bool { candidates.contains { $0.role == .channelIdentity } }
     var learnedLogoModel: CommercialLogoModel? {
-        guard let logoCorner, !logoMask.isEmpty else { return nil }
-        return CommercialLogoModel(corner: logoCorner, edgeMask: logoMask)
+        guard !candidates.isEmpty else { return nil }
+        return CommercialLogoModel(candidates: candidates)
     }
 
     var diagnosticsPhase: String {
@@ -187,19 +369,27 @@ struct CommercialBreakDetector: Sendable {
     }
 
     var learningProgress: Double {
-        hasLearnedLogo
-            ? 1
-            : min(1, Double(learningSamples) / Double(Self.logoLearningSampleCount))
+        if hasLearnedLogo { return 1 }
+        let samples = Double(learningSamples) / Double(Self.logoLearningSampleCount)
+        let scenes = Double(sceneChanges) / Double(Self.requiredSceneChanges)
+        return min(1, min(samples, scenes))
     }
 
     init(logoModel: CommercialLogoModel? = nil) {
-        logoCorner = logoModel?.corner
-        logoMask = logoModel?.edgeMask ?? []
+        if logoModel?.version == CommercialLogoModel.currentVersion {
+            candidates = logoModel?.candidates ?? []
+        }
+    }
+
+    mutating func setArtworkFingerprint(_ fingerprint: CommercialArtworkFingerprint?) {
+        artworkFingerprint = fingerprint
+        promoteArtworkMatchIfUnambiguous()
     }
 
     mutating func consume(
         _ features: CommercialFrameFeatures,
-        at timestamp: Date
+        at timestamp: Date,
+        context: CommercialObservationContext = .unknown
     ) -> [CommercialBreak] {
         if let lastTimestamp {
             let elapsed = timestamp.timeIntervalSince(lastTimestamp)
@@ -209,15 +399,37 @@ struct CommercialBreakDetector: Sendable {
         }
         lastTimestamp = timestamp
 
-        guard hasLearnedLogo else {
-            lastLogoSimilarity = nil
-            learn(from: features)
+        guard !features.isDark else {
+            if case .candidate = state { state = .programme }
             return breaks
         }
 
-        let similarity = logoSimilarity(in: features)
-        lastLogoSimilarity = similarity
-        let logoIsPresent = similarity >= Self.logoSimilarityThreshold
+        if candidates.isEmpty {
+            learn(from: features, at: timestamp)
+            return breaks
+        }
+
+        observeCandidates(in: features, at: timestamp, context: context)
+        let trusted = candidates.filter { $0.role == .channelIdentity }
+        guard !trusted.isEmpty else {
+            resetTemporalState()
+            return breaks
+        }
+
+        let trustedStates = trusted.map { lastPresence[$0.id] ?? nil }
+        let logoIsPresent: Bool?
+        if trustedStates.contains(where: { $0 == true }) {
+            logoIsPresent = true
+        } else if trustedStates.allSatisfy({ $0 == false }) {
+            logoIsPresent = false
+        } else {
+            logoIsPresent = nil
+        }
+        guard let logoIsPresent else {
+            if case .candidate = state { state = .programme }
+            return breaks
+        }
+        let similarity = trusted.compactMap { lastMatches[$0.id] }.max() ?? 0
         switch state {
         case .programme:
             if !logoIsPresent, !features.isDark {
@@ -293,18 +505,41 @@ struct CommercialBreakDetector: Sendable {
         for features: CommercialFrameFeatures,
         sampledAt: Date
     ) -> CommercialDetectionDiagnostics {
-        CommercialDetectionDiagnostics(
+        let trusted = candidates.filter { $0.role == .channelIdentity }
+        let best = trusted.max { (lastMatches[$0.id] ?? 0) < (lastMatches[$1.id] ?? 0) }
+            ?? candidates.first
+        let candidateDiagnostics = candidates.map { candidate in
+            CommercialLogoDiagnostic(
+                id: candidate.id,
+                bounds: candidate.bounds,
+                edgeMask: candidate.edgeMask,
+                role: candidate.role,
+                similarity: lastMatches[candidate.id],
+                isPresent: lastPresence[candidate.id] ?? nil
+            )
+        }
+        let abstentionReason: String?
+        if candidates.isEmpty {
+            abstentionReason = "Learning persistent perimeter graphics"
+        } else if trusted.isEmpty {
+            abstentionReason = candidates.count > 1
+                ? "Logo identity is ambiguous"
+                : "Waiting for programme-spanning evidence"
+        } else {
+            abstentionReason = nil
+        }
+        return CommercialDetectionDiagnostics(
             isActive: true,
             phase: diagnosticsPhase,
             learningProgress: learningProgress,
             sampledAt: sampledAt,
             sampledPixels: features.pixels,
-            logoCorner: logoCorner,
-            logoMask: logoMask,
-            logoSimilarity: lastLogoSimilarity,
-            logoIsPresent: lastLogoSimilarity.map {
-                $0 >= Self.logoSimilarityThreshold
-            }
+            logoCorner: best.map { $0.bounds.x < CommercialFrameFeatures.width / 2 ? 0 : 1 },
+            logoMask: best?.edgeMask ?? [],
+            logoSimilarity: best.flatMap { lastMatches[$0.id] },
+            logoIsPresent: best.flatMap { lastPresence[$0.id] ?? nil },
+            candidates: candidateDiagnostics,
+            abstentionReason: abstentionReason
         )
     }
 
@@ -313,52 +548,269 @@ struct CommercialBreakDetector: Sendable {
         lastTimestamp = nil
     }
 
-    private mutating func learn(from features: CommercialFrameFeatures) {
-        guard features.cornerEdges.count == learningCounts.count else { return }
-        for corner in learningCounts.indices {
-            for index in learningCounts[corner].indices
-                where features.cornerEdges[corner][index] != 0 {
-                learningCounts[corner][index] += 1
-            }
+    private mutating func learn(from features: CommercialFrameFeatures, at timestamp: Date) {
+        guard features.perimeterEdges.count == learningCounts.count else { return }
+        registerSceneChange(features.pixels)
+        for index in learningCounts.indices where features.perimeterEdges[index] != 0 {
+            learningCounts[index] += 1
         }
         learningSamples += 1
-        guard learningSamples >= Self.logoLearningSampleCount else { return }
+        guard learningSamples >= Self.logoLearningSampleCount,
+              sceneChanges >= Self.requiredSceneChanges
+        else { return }
 
-        let required = Int(Double(learningSamples) * 0.78)
-        let candidates = learningCounts.enumerated().map { corner, counts in
-            let mask = counts.map { $0 >= required ? UInt8(1) : UInt8(0) }
-            return (corner: corner, mask: mask, edges: mask.reduce(0) { $0 + Int($1) })
-        }
-        guard let best = candidates
-            .filter({ (8...220).contains($0.edges) })
-            .max(by: { $0.edges < $1.edges })
-        else {
-            // Try another learning window rather than treating arbitrary
-            // static imagery as a channel logo.
-            learningCounts = learningCounts.map { _ in
-                [Int](repeating: 0, count: CommercialFrameFeatures.cornerWidth
-                    * CommercialFrameFeatures.cornerHeight)
-            }
+        let required = Int(ceil(Double(learningSamples) * 0.65))
+        let stable = learningCounts.map { $0 >= required ? UInt8(1) : UInt8(0) }
+        let discovered = Self.connectedCandidates(in: stable, at: timestamp)
+        guard !discovered.isEmpty else {
+            learningCounts = [Int](repeating: 0, count: learningCounts.count)
             learningSamples = 0
+            sceneChanges = 0
             return
         }
-        logoCorner = best.corner
-        logoMask = best.mask
+        candidates = discovered
+        lastMatches.removeAll()
+        lastPresence.removeAll()
     }
 
-    private func logoSimilarity(in features: CommercialFrameFeatures) -> Double {
-        guard let logoCorner,
-              features.cornerEdges.indices.contains(logoCorner),
-              features.cornerEdges[logoCorner].count == logoMask.count
-        else { return 1 }
-        var referenceCount = 0
-        var intersection = 0
-        for index in logoMask.indices where logoMask[index] != 0 {
-            referenceCount += 1
-            if features.cornerEdges[logoCorner][index] != 0 { intersection += 1 }
+    private mutating func observeCandidates(
+        in features: CommercialFrameFeatures,
+        at timestamp: Date,
+        context: CommercialObservationContext
+    ) {
+        registerSceneChange(features.pixels)
+        for index in candidates.indices {
+            let score = Self.match(candidates[index], in: features.perimeterEdges)
+            lastMatches[candidates[index].id] = score
+            let presence: Bool?
+            if score >= Self.logoPresentThreshold {
+                presence = true
+                candidates[index].observedSeconds += 1
+                candidates[index].sceneCount = max(candidates[index].sceneCount, sceneChanges)
+                if let programmeID = context.programmeID {
+                    candidates[index].programmeIDs.insert(programmeID)
+                }
+                candidates[index].lastSeenAt = timestamp
+            } else if score <= Self.logoAbsentThreshold {
+                presence = false
+            } else {
+                presence = nil
+            }
+            lastPresence[candidates[index].id] = presence
         }
-        guard referenceCount > 0 else { return 1 }
-        return Double(intersection) / Double(referenceCount)
+
+        let eligible = candidates.indices.filter {
+            candidates[$0].observedSeconds >= 300
+                && candidates[$0].sceneCount >= 10
+                && candidates[$0].programmeIDs.count >= 2
+        }
+        promoteArtworkMatchIfUnambiguous()
+        if candidates.filter({ $0.role == .channelIdentity }).isEmpty,
+           eligible.count == 1,
+           let index = eligible.first {
+            candidates[index].role = .channelIdentity
+            for other in candidates.indices where other != index {
+                candidates[other].role = .auxiliary
+            }
+        }
+    }
+
+    private mutating func promoteArtworkMatchIfUnambiguous() {
+        guard candidates.allSatisfy({ $0.role != .channelIdentity }),
+              let artworkFingerprint
+        else { return }
+        let scores = candidates.indices.map {
+            (index: $0, score: Self.artworkSimilarity(candidates[$0], artworkFingerprint))
+        }.sorted { $0.score > $1.score }
+        guard let best = scores.first, best.score >= 0.75,
+              scores.dropFirst().first.map({ best.score - $0.score >= 0.10 }) ?? true
+        else { return }
+        candidates[best.index].role = .channelIdentity
+        for index in candidates.indices where index != best.index {
+            candidates[index].role = .auxiliary
+        }
+    }
+
+    private static func artworkSimilarity(
+        _ candidate: CommercialLogoCandidateModel,
+        _ fingerprint: CommercialArtworkFingerprint
+    ) -> Double {
+        let size = CommercialArtworkFingerprint.size
+        guard candidate.bounds.width > 0, candidate.bounds.height > 0 else { return 0 }
+        var normalized = [UInt8](repeating: 0, count: size * size)
+        for y in 0..<size {
+            for x in 0..<size {
+                let sourceX = min(candidate.bounds.width - 1, x * candidate.bounds.width / size)
+                let sourceY = min(candidate.bounds.height - 1, y * candidate.bounds.height / size)
+                normalized[y * size + x] = candidate.edgeMask[
+                    sourceY * candidate.bounds.width + sourceX
+                ] == 0 ? 0 : 1
+            }
+        }
+        var best = 0.0
+        for offsetY in -2...2 {
+            for offsetX in -2...2 {
+                var lhs = 0
+                var rhs = 0
+                var intersection = 0
+                for y in 0..<size {
+                    for x in 0..<size {
+                        let left = normalized[y * size + x]
+                        if left != 0 { lhs += 1 }
+                        let rx = x + offsetX
+                        let ry = y + offsetY
+                        guard rx >= 0, rx < size, ry >= 0, ry < size else { continue }
+                        let right = fingerprint.edgeMask[ry * size + rx]
+                        if right != 0 { rhs += 1 }
+                        if left != 0, right != 0 { intersection += 1 }
+                    }
+                }
+                guard lhs > 0, rhs > 0 else { continue }
+                best = max(best, 2 * Double(intersection) / Double(lhs + rhs))
+            }
+        }
+        return best
+    }
+
+    private mutating func registerSceneChange(_ pixels: [UInt8]) {
+        defer { previousPixels = pixels }
+        guard pixels.count == CommercialFrameFeatures.width * CommercialFrameFeatures.height,
+              let previousPixels, previousPixels.count == pixels.count
+        else { return }
+        var difference = 0
+        var samples = 0
+        let width = CommercialFrameFeatures.width
+        let height = CommercialFrameFeatures.height
+        for y in stride(from: height / 4, to: height * 3 / 4, by: 4) {
+            for x in stride(from: width / 4, to: width * 3 / 4, by: 4) {
+                difference += abs(Int(pixels[y * width + x]) - Int(previousPixels[y * width + x]))
+                samples += 1
+            }
+        }
+        if samples > 0, Double(difference) / Double(samples) >= 10 { sceneChanges += 1 }
+    }
+
+    private static func connectedCandidates(
+        in stable: [UInt8],
+        at timestamp: Date
+    ) -> [CommercialLogoCandidateModel] {
+        let width = CommercialFrameFeatures.width
+        let height = CommercialFrameFeatures.height
+        guard stable.count == width * height else { return [] }
+        var visited = [Bool](repeating: false, count: stable.count)
+        var components: [(CommercialLogoBounds, [Int])] = []
+
+        for seed in stable.indices where stable[seed] != 0 && !visited[seed] {
+            var queue = [seed]
+            visited[seed] = true
+            var indices: [Int] = []
+            var cursor = 0
+            while cursor < queue.count {
+                let current = queue[cursor]
+                cursor += 1
+                indices.append(current)
+                let x = current % width
+                let y = current / width
+                for ny in max(0, y - 1)...min(height - 1, y + 1) {
+                    for nx in max(0, x - 1)...min(width - 1, x + 1) {
+                        let next = ny * width + nx
+                        if stable[next] != 0, !visited[next] {
+                            visited[next] = true
+                            queue.append(next)
+                        }
+                    }
+                }
+            }
+            guard indices.count >= 3 else { continue }
+            let xs = indices.map { $0 % width }
+            let ys = indices.map { $0 / width }
+            components.append((
+                CommercialLogoBounds(
+                    x: xs.min()!, y: ys.min()!,
+                    width: xs.max()! - xs.min()! + 1,
+                    height: ys.max()! - ys.min()! + 1
+                ),
+                indices
+            ))
+        }
+
+        var merged: [(CommercialLogoBounds, [Int])] = []
+        for component in components {
+            if let index = merged.firstIndex(where: { boxesAreNear($0.0, component.0) }) {
+                let old = merged[index]
+                let minX = min(old.0.x, component.0.x)
+                let minY = min(old.0.y, component.0.y)
+                let maxX = max(old.0.x + old.0.width, component.0.x + component.0.width)
+                let maxY = max(old.0.y + old.0.height, component.0.y + component.0.height)
+                merged[index] = (
+                    CommercialLogoBounds(x: minX, y: minY, width: maxX - minX, height: maxY - minY),
+                    old.1 + component.1
+                )
+            } else {
+                merged.append(component)
+            }
+        }
+
+        return merged.compactMap { bounds, indices in
+            guard bounds.width <= width / 3, bounds.height <= height / 3,
+                  bounds.width * bounds.height <= width * height / 12,
+                  indices.count >= 8, indices.count <= 1_500
+            else { return nil }
+            var local = [UInt8](repeating: 0, count: bounds.width * bounds.height)
+            for source in indices {
+                let x = source % width - bounds.x
+                let y = source / width - bounds.y
+                local[y * bounds.width + x] = stable[source]
+            }
+            return CommercialLogoCandidateModel(
+                id: UUID(), bounds: bounds, edgeMask: local, role: .untrusted,
+                observedSeconds: 0, sceneCount: 0, programmeIDs: [], lastSeenAt: timestamp
+            )
+        }
+    }
+
+    private static func boxesAreNear(_ lhs: CommercialLogoBounds, _ rhs: CommercialLogoBounds) -> Bool {
+        let expanded = CommercialLogoBounds(
+            x: lhs.x - 4, y: lhs.y - 4, width: lhs.width + 8, height: lhs.height + 8
+        )
+        return expanded.x < rhs.x + rhs.width && expanded.x + expanded.width > rhs.x
+            && expanded.y < rhs.y + rhs.height && expanded.y + expanded.height > rhs.y
+    }
+
+    private static func match(
+        _ candidate: CommercialLogoCandidateModel,
+        in frame: [UInt8]
+    ) -> Double {
+        let width = CommercialFrameFeatures.width
+        guard frame.count == width * CommercialFrameFeatures.height else { return 0 }
+        var best = 0.0
+        for offsetY in -3...3 {
+            for offsetX in -3...3 {
+                var reference = 0
+                var observed = 0
+                var intersection = 0
+                for y in 0..<candidate.bounds.height {
+                    for x in 0..<candidate.bounds.width {
+                        let template = candidate.edgeMask[y * candidate.bounds.width + x]
+                        if template != 0 { reference += 1 }
+                        let frameX = candidate.bounds.x + x + offsetX
+                        let frameY = candidate.bounds.y + y + offsetY
+                        guard frameX >= 0, frameX < width,
+                              frameY >= 0, frameY < CommercialFrameFeatures.height
+                        else { continue }
+                        let current = frame[frameY * width + frameX]
+                        if current != 0 { observed += 1 }
+                        if template != 0, current == template { intersection += 1 }
+                    }
+                }
+                guard reference > 0, observed > 0 else { continue }
+                let recall = Double(intersection) / Double(reference)
+                let precision = Double(intersection) / Double(observed)
+                let score = 2 * recall * precision / max(0.0001, recall + precision)
+                best = max(best, score)
+            }
+        }
+        return best
     }
 
     private func confidence(
@@ -372,15 +824,89 @@ struct CommercialBreakDetector: Sendable {
     private mutating func resetModel(preservingBreaks: Bool) {
         if !preservingBreaks { breaks.removeAll() }
         state = .programme
-        learningCounts = learningCounts.map { _ in
-            [Int](repeating: 0, count: CommercialFrameFeatures.cornerWidth
-                * CommercialFrameFeatures.cornerHeight)
-        }
+        learningCounts = [Int](repeating: 0, count: learningCounts.count)
         learningSamples = 0
-        logoCorner = nil
-        logoMask.removeAll()
+        sceneChanges = 0
+        previousPixels = nil
+        candidates.removeAll()
         lastTimestamp = nil
-        lastLogoSimilarity = nil
+        lastMatches.removeAll()
+        lastPresence.removeAll()
+    }
+}
+
+struct CommercialChannelContext: Sendable {
+    let serverIdentifier: String
+    let channelID: String
+    let channelIconURL: URL?
+    let programmes: [GuideProgram]
+
+    func observation(at date: Date) -> CommercialObservationContext {
+        CommercialObservationContext(
+            programmeID: programmes.first(where: { $0.isAiring(at: date) })?.id
+        )
+    }
+
+    var cacheKey: String { "\(serverIdentifier)|\(channelID)" }
+}
+
+actor CommercialLogoProfileStore {
+    static let shared = CommercialLogoProfileStore()
+
+    private struct Payload: Codable {
+        var version = 1
+        var profiles: [String: CommercialLogoModel] = [:]
+    }
+
+    private let fileURL: URL
+    private var payload: Payload
+
+    init(fileURL: URL? = nil) {
+        let defaultURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
+            .first?
+            .appending(path: "TVPlayer", directoryHint: .isDirectory)
+            .appending(path: "commercial-logo-profiles-v1.json")
+            ?? FileManager.default.temporaryDirectory
+                .appending(path: "commercial-logo-profiles-v1.json")
+        let resolvedURL = fileURL ?? defaultURL
+        self.fileURL = resolvedURL
+        if let data = try? Data(contentsOf: resolvedURL),
+           let decoded = try? JSONDecoder().decode(Payload.self, from: data),
+           decoded.version == 1 {
+            payload = decoded
+        } else {
+            payload = Payload()
+        }
+        let expiry = Date().addingTimeInterval(-90 * 86_400)
+        payload.profiles = payload.profiles.filter { $0.value.savedAt >= expiry }
+    }
+
+    func load(key: String, now: Date = Date()) -> CommercialLogoModel? {
+        guard var model = payload.profiles[key],
+              model.version == CommercialLogoModel.currentVersion,
+              model.savedAt >= now.addingTimeInterval(-90 * 86_400)
+        else { return nil }
+        if model.savedAt < now.addingTimeInterval(-30 * 86_400) {
+            for index in model.candidates.indices {
+                model.candidates[index].role = .untrusted
+            }
+        }
+        return model
+    }
+
+    func save(_ model: CommercialLogoModel, key: String) {
+        var updated = model
+        updated.savedAt = Date()
+        payload.profiles[key] = updated
+        do {
+            try FileManager.default.createDirectory(
+                at: fileURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try JSONEncoder().encode(payload).write(to: fileURL, options: .atomic)
+        } catch {
+            // This is a disposable performance cache. Detection continues in memory.
+        }
     }
 }
 
@@ -388,8 +914,8 @@ struct CommercialBreakDetector: Sendable {
 final class CommercialLiveAnalyzer: NSObject, ObservableObject,
     @preconcurrency VLCMediaPlayerDelegate {
     static let snapshotInterval: Duration = .seconds(1)
-    static let snapshotWidth: Int32 = 160
-    static let snapshotHeight: Int32 = 90
+    static let snapshotWidth = Int32(CommercialFrameFeatures.width)
+    static let snapshotHeight = Int32(CommercialFrameFeatures.height)
 
     @Published private(set) var breaks: [CommercialBreak] = []
     @Published private(set) var diagnostics = CommercialDetectionDiagnostics.inactive
@@ -401,9 +927,12 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
         category: "CommercialDetection"
     )
     private var detector = CommercialBreakDetector()
-    private var logoModelsByChannel: [String: CommercialLogoModel] = [:]
+    private let profileStore = CommercialLogoProfileStore.shared
     private var captureTask: Task<Void, Never>?
+    private var artworkTask: Task<Void, Never>?
     private var pendingSnapshot: (url: URL, timestamp: Date, requestedAt: Date)?
+    private var channelContext: CommercialChannelContext?
+    private var lastProfileSaveAt: Date?
     private(set) var channelID: String?
 
     override init() {
@@ -418,13 +947,32 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
         enforceSilence()
     }
 
-    func start(channelID: String, url: URL) {
+    func start(context: CommercialChannelContext, url: URL) async {
+        let channelID = context.channelID
         stop(resetMarkers: self.channelID != channelID)
         if self.channelID != channelID {
-            detector = CommercialBreakDetector(logoModel: logoModelsByChannel[channelID])
+            let stored = await profileStore.load(key: context.cacheKey)
+            detector = CommercialBreakDetector(logoModel: stored)
             publish(detector.breaks)
         }
         self.channelID = channelID
+        channelContext = context
+        artworkTask?.cancel()
+        if let iconURL = context.channelIconURL {
+            artworkTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    let (data, _) = try await URLSession.shared.data(from: iconURL)
+                    try Task.checkCancellation()
+                    let fingerprint = await Task.detached(priority: .utility) {
+                        CommercialFrameFeatureExtractor.artworkFingerprint(from: data)
+                    }.value
+                    detector.setArtworkFingerprint(fingerprint)
+                } catch {
+                    // Artwork is optional evidence; temporal learning remains available.
+                }
+            }
+        }
         diagnostics = CommercialDetectionDiagnostics(
             isActive: true,
             phase: detector.diagnosticsPhase,
@@ -434,7 +982,16 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
             logoCorner: detector.learnedLogoModel?.corner,
             logoMask: detector.learnedLogoModel?.edgeMask ?? [],
             logoSimilarity: nil,
-            logoIsPresent: nil
+            logoIsPresent: nil,
+            candidates: detector.learnedLogoModel?.candidates.map {
+                CommercialLogoDiagnostic(
+                    id: $0.id, bounds: $0.bounds, edgeMask: $0.edgeMask,
+                    role: $0.role, similarity: nil, isPresent: nil
+                )
+            } ?? [],
+            abstentionReason: detector.hasLearnedLogo
+                ? nil
+                : "Waiting for a trusted channel logo"
         )
         guard let media = VLCMedia(url: url) else { return }
         media.addOption(":no-audio")
@@ -456,6 +1013,8 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
     func stop(resetMarkers: Bool) {
         captureTask?.cancel()
         captureTask = nil
+        artworkTask?.cancel()
+        artworkTask = nil
         clearPendingSnapshot()
         mediaPlayer.stop()
         mediaPlayer.media = nil
@@ -463,6 +1022,7 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
         if resetMarkers {
             cacheLearnedLogo()
             channelID = nil
+            channelContext = nil
             detector.reset()
             publish(detector.breaks)
         }
@@ -483,7 +1043,8 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
                 return CommercialFrameFeatureExtractor.extract(from: url)
             }.value
             guard let self, let features else { return }
-            publish(detector.consume(features, at: timestamp))
+            let observation = channelContext?.observation(at: timestamp) ?? .unknown
+            publish(detector.consume(features, at: timestamp, context: observation))
             diagnostics = detector.diagnostics(for: features, sampledAt: timestamp)
             cacheLearnedLogo()
         }
@@ -535,7 +1096,10 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
     }
 
     private func cacheLearnedLogo() {
-        guard let channelID, let model = detector.learnedLogoModel else { return }
-        logoModelsByChannel[channelID] = model
+        guard let channelContext, let model = detector.learnedLogoModel else { return }
+        let now = Date()
+        guard lastProfileSaveAt.map({ now.timeIntervalSince($0) >= 30 }) ?? true else { return }
+        lastProfileSaveAt = now
+        Task { await profileStore.save(model, key: channelContext.cacheKey) }
     }
 }
