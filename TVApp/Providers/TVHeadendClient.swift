@@ -28,6 +28,7 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
         sessionConfiguration.timeoutIntervalForRequest = 20
         sessionConfiguration.timeoutIntervalForResource = 45
         sessionConfiguration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        CachedAddressProxy.shared.configure(sessionConfiguration, for: configuration)
         session = URLSession(
             configuration: sessionConfiguration,
             delegate: TVHeadendHTTPAuthenticationDelegate(configuration: configuration),

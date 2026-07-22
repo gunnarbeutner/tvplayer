@@ -116,6 +116,8 @@ final class ServerSettingsStore: ObservableObject {
                 htspPort: migrated.htspPort,
                 guideCacheURL: migrated.guideCacheURL,
                 xmltvURL: migrated.xmltvURL,
+                resolvedAddresses: migrated.resolvedAddresses,
+                guideResolvedAddresses: migrated.guideResolvedAddresses,
                 origin: .manual,
                 isEdited: true
             )
@@ -245,6 +247,12 @@ final class ServerSettingsStore: ObservableObject {
             htspPort: draft.htspPort,
             guideCacheURL: draft.guideCacheURL,
             xmltvURL: draft.xmltvURL,
+            resolvedAddresses: Self.sameHost(existing?.baseURL, baseURL)
+                ? existing?.resolvedAddresses ?? []
+                : [],
+            guideResolvedAddresses: Self.sameHost(existing?.guideCacheURL, draft.guideCacheURL)
+                ? existing?.guideResolvedAddresses ?? []
+                : [],
             origin: existing?.origin ?? .manual,
             isEdited: existing?.origin == .discovered,
             discoveryID: existing?.discoveryID,
@@ -397,6 +405,9 @@ final class ServerSettingsStore: ObservableObject {
         if let index {
             let profileID = profiles[index].id
             let wasManual = profiles[index].origin == .manual
+            let oldConfiguration = profiles[index].configuration(
+                password: passwords[profileID] ?? ""
+            )
             latestDiscoveryByProfileID[profileID] = service
             profileIDByServiceIdentity[service.serviceIdentity] = profileID
             onlineProfileIDs.insert(profileID)
@@ -407,7 +418,17 @@ final class ServerSettingsStore: ObservableObject {
             profiles[index].discoveryServiceIdentity = service.serviceIdentity
             profiles[index].lastSeenAt = Date()
             if profiles[index].isEdited {
+                cacheResolvedAddresses(from: service.settings, toProfileAt: index)
+                let activeChanged = activeProfileID == profileID
+                    && oldConfiguration != profiles[index].configuration(
+                        password: passwords[profileID] ?? ""
+                    )
                 persist()
+                if activeChanged {
+                    revision &+= 1
+                    syncSharedConfiguration()
+                    scheduleConnectionTest()
+                }
                 return
             }
             apply(service, toProfileAt: index)
@@ -422,6 +443,8 @@ final class ServerSettingsStore: ObservableObject {
             htspPort: settings.htspPort,
             guideCacheURL: settings.guideCacheURL,
             xmltvURL: settings.xmltvURL,
+            resolvedAddresses: settings.resolvedAddresses,
+            guideResolvedAddresses: settings.guideResolvedAddresses,
             origin: .discovered,
             isEdited: false,
             discoveryID: settings.discoveryID,
@@ -455,6 +478,7 @@ final class ServerSettingsStore: ObservableObject {
 
     private func apply(_ service: DiscoveredTVHeadendService, toProfileAt index: Int) {
         let oldConfiguration = profiles[index].configuration(password: passwords[profiles[index].id] ?? "")
+        let oldBaseURL = profiles[index].baseURL
         let profileID = profiles[index].id
         do {
             try keychain.write(service.settings.password, account: Self.passwordAccount(for: profileID))
@@ -469,8 +493,19 @@ final class ServerSettingsStore: ObservableObject {
         profiles[index].username = service.settings.username
         profiles[index].streamProfile = service.settings.streamProfile
         profiles[index].htspPort = service.settings.htspPort
-        profiles[index].guideCacheURL = service.settings.guideCacheURL
+        if let guideCacheURL = service.settings.guideCacheURL {
+            let oldGuideCacheURL = profiles[index].guideCacheURL
+            profiles[index].guideCacheURL = guideCacheURL
+            if !Self.sameHost(oldGuideCacheURL, guideCacheURL)
+                || !service.settings.guideResolvedAddresses.isEmpty {
+                profiles[index].guideResolvedAddresses = service.settings.guideResolvedAddresses
+            }
+        }
         profiles[index].xmltvURL = service.settings.xmltvURL
+        if !Self.sameHost(oldBaseURL, service.settings.baseURL)
+            || !service.settings.resolvedAddresses.isEmpty {
+            profiles[index].resolvedAddresses = service.settings.resolvedAddresses
+        }
         profiles[index].origin = .discovered
         profiles[index].isEdited = false
         profiles[index].discoveryID = service.settings.discoveryID ?? profiles[index].discoveryID
@@ -491,6 +526,21 @@ final class ServerSettingsStore: ObservableObject {
 
     private func loadDraft(profileID: String) {
         loadDraft(profile: profiles.first { $0.id == profileID })
+    }
+
+    private func cacheResolvedAddresses(
+        from settings: DiscoveredTVHeadendSettings,
+        toProfileAt index: Int
+    ) {
+        if Self.sameHost(profiles[index].baseURL, settings.baseURL),
+           !settings.resolvedAddresses.isEmpty {
+            profiles[index].resolvedAddresses = settings.resolvedAddresses
+        }
+        if let guideCacheURL = settings.guideCacheURL,
+           Self.sameHost(profiles[index].guideCacheURL, guideCacheURL),
+           !settings.guideResolvedAddresses.isEmpty {
+            profiles[index].guideResolvedAddresses = settings.guideResolvedAddresses
+        }
     }
 
     private func loadDraft(profile: TVHeadendServerProfile?) {
@@ -557,6 +607,12 @@ final class ServerSettingsStore: ObservableObject {
         else { return }
         let existingIndex = profiles.firstIndex { $0.id == Self.environmentProfileID }
         let existing = existingIndex.map { profiles[$0] }
+        let guideCacheURL = environment["TVPLAYER_GUIDE_URL"]
+            .flatMap { Self.optionalHTTPURL(from: $0) }
+            ?? existing?.guideCacheURL
+        let xmltvURL = environment["TVPLAYER_XMLTV_URL"]
+            .flatMap { Self.optionalHTTPURL(from: $0) }
+            ?? existing?.xmltvURL
         let profile = TVHeadendServerProfile(
             id: Self.environmentProfileID,
             name: existing?.name ?? "Environment · \(Self.defaultName(for: baseURL))",
@@ -564,10 +620,14 @@ final class ServerSettingsStore: ObservableObject {
             username: environment["TVPLAYER_TVH_USERNAME"] ?? existing?.username ?? "",
             streamProfile: environment["TVPLAYER_TVH_PROFILE"] ?? existing?.streamProfile ?? "pass",
             htspPort: Int(environment["TVPLAYER_TVH_HTSP_PORT"] ?? "") ?? existing?.htspPort ?? 9982,
-            guideCacheURL: environment["TVPLAYER_GUIDE_URL"].flatMap { Self.optionalHTTPURL(from: $0) }
-                ?? existing?.guideCacheURL,
-            xmltvURL: environment["TVPLAYER_XMLTV_URL"].flatMap { Self.optionalHTTPURL(from: $0) }
-                ?? existing?.xmltvURL,
+            guideCacheURL: guideCacheURL,
+            xmltvURL: xmltvURL,
+            resolvedAddresses: Self.sameHost(existing?.baseURL, baseURL)
+                ? existing?.resolvedAddresses ?? []
+                : [],
+            guideResolvedAddresses: Self.sameHost(existing?.guideCacheURL, guideCacheURL)
+                ? existing?.guideResolvedAddresses ?? []
+                : [],
             origin: .manual,
             isEdited: true
         )
@@ -595,6 +655,18 @@ final class ServerSettingsStore: ObservableObject {
             ?? defaults.string(forKey: LegacyKey.baseURL)
             ?? ""
         guard let baseURL = httpURL(from: urlText) else { return nil }
+        let guideCacheURL = optionalHTTPURL(from:
+            environment["TVPLAYER_GUIDE_URL"]
+                ?? shared?.guideCacheURL?.absoluteString
+                ?? defaults.string(forKey: LegacyKey.guideCacheURL)
+                ?? ""
+        )
+        let xmltvURL = optionalHTTPURL(from:
+            environment["TVPLAYER_XMLTV_URL"]
+                ?? shared?.xmltvURL?.absoluteString
+                ?? defaults.string(forKey: LegacyKey.xmltvURL)
+                ?? ""
+        )
         return TVHeadendConfiguration(
             serverProfileID: shared?.serverProfileID,
             baseURL: baseURL,
@@ -615,18 +687,14 @@ final class ServerSettingsStore: ObservableObject {
                     ?? defaults.string(forKey: LegacyKey.htspPort)
                     ?? "9982"
             ) ?? 9982,
-            guideCacheURL: optionalHTTPURL(from:
-                environment["TVPLAYER_GUIDE_URL"]
-                    ?? shared?.guideCacheURL?.absoluteString
-                    ?? defaults.string(forKey: LegacyKey.guideCacheURL)
-                    ?? ""
-            ),
-            xmltvURL: optionalHTTPURL(from:
-                environment["TVPLAYER_XMLTV_URL"]
-                    ?? shared?.xmltvURL?.absoluteString
-                    ?? defaults.string(forKey: LegacyKey.xmltvURL)
-                    ?? ""
-            )
+            guideCacheURL: guideCacheURL,
+            xmltvURL: xmltvURL,
+            resolvedAddresses: Self.sameHost(shared?.baseURL, baseURL)
+                ? shared?.resolvedAddresses ?? []
+                : [],
+            guideResolvedAddresses: Self.sameHost(shared?.guideCacheURL, guideCacheURL)
+                ? shared?.guideResolvedAddresses ?? []
+                : []
         )
     }
 
@@ -699,6 +767,11 @@ final class ServerSettingsStore: ObservableObject {
             return components.string ?? url.absoluteString
         }
         return normalized(lhs) == normalized(rhs)
+    }
+
+    private static func sameHost(_ lhs: URL?, _ rhs: URL?) -> Bool {
+        guard let lhs, let rhs else { return lhs == nil && rhs == nil }
+        return lhs.host?.caseInsensitiveCompare(rhs.host ?? "") == .orderedSame
     }
 }
 

@@ -284,7 +284,7 @@ actor HTSPConnectionPrewarmer {
     static let shared = HTSPConnectionPrewarmer()
 
     private struct Key: Hashable {
-        let host: String
+        let hosts: [String]
         let port: Int
         let username: String
         let password: String
@@ -309,7 +309,7 @@ actor HTSPConnectionPrewarmer {
     ) {
         guard let key = key(for: configuration), entries[key] == nil else { return }
         let factory: HTSPConnectionFactory = suppliedFactory ?? {
-            try HTSPConnection.openSynchronously(host: key.host, port: key.port)
+            try HTSPConnection.openSynchronously(hosts: key.hosts, port: key.port)
         }
         let id = UUID()
         let connectionTask = Task.detached(priority: .userInitiated) {
@@ -359,9 +359,10 @@ actor HTSPConnectionPrewarmer {
     }
 
     private func key(for configuration: TVHeadendConfiguration) -> Key? {
-        guard let host = configuration.baseURL?.host else { return nil }
+        let hosts = configuration.htspConnectionHosts
+        guard !hosts.isEmpty else { return nil }
         return Key(
-            host: host,
+            hosts: hosts,
             port: configuration.htspPort,
             username: configuration.username,
             password: configuration.password
@@ -396,8 +397,9 @@ final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
     }
 
     static func probe(configuration: TVHeadendConfiguration) async throws {
-        guard let host = configuration.baseURL?.host else { throw HTSPError.invalidHost }
-        let connection = try await open(host: host, port: configuration.htspPort)
+        let hosts = configuration.htspConnectionHosts
+        guard !hosts.isEmpty else { throw HTSPError.invalidHost }
+        let connection = try await open(hosts: hosts, port: configuration.htspPort)
         try await Task.detached(priority: .userInitiated) {
             try connection.handshake(username: configuration.username, password: configuration.password)
             guard connection.capabilities.contains("timeshift") else {
@@ -406,14 +408,26 @@ final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
         }.value
     }
 
-    static func open(host: String, port: Int) async throws -> HTSPConnection {
+    static func open(hosts: [String], port: Int) async throws -> HTSPConnection {
         try await Task.detached(priority: .userInitiated) {
-            try openSynchronously(host: host, port: port)
+            try openSynchronously(hosts: hosts, port: port)
         }.value
     }
 
     static func openSynchronously(host: String, port: Int) throws -> HTSPConnection {
         HTSPConnection(fileDescriptor: try connectSocket(host: host, port: port))
+    }
+
+    static func openSynchronously(hosts: [String], port: Int) throws -> HTSPConnection {
+        var lastError: Error = HTSPError.invalidHost
+        for host in hosts {
+            do {
+                return try openSynchronously(host: host, port: port)
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError
     }
 
     func handshake(username: String, password: String) throws {

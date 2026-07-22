@@ -1443,6 +1443,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         guard let media = VLCMedia(url: url) else {
             preconditionFailure("VLC 4 rejected the media URL")
         }
+        if let proxy = CachedAddressProxy.shared.vlcHTTPProxyOption(for: url) {
+            media.addOption(proxy)
+        }
         return media
     }
 

@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 struct DiscoveredTVHeadendSettings: Equatable {
     static let serviceType = "_tvplayer._tcp."
@@ -12,12 +13,16 @@ struct DiscoveredTVHeadendSettings: Equatable {
     let htspPort: Int
     let guideCacheURL: URL?
     let xmltvURL: URL?
+    let resolvedAddresses: [String]
+    let guideResolvedAddresses: [String]
 
     init?(
         fields: [String: Data],
         hostName: String,
         port: Int,
-        guideCacheURL: URL? = nil
+        resolvedAddresses: [String] = [],
+        guideCacheURL: URL? = nil,
+        guideResolvedAddresses: [String] = []
     ) {
         guard let record = DNSServiceTXTRecord(fields: fields),
               record.value("txtvers") == "1",
@@ -46,6 +51,8 @@ struct DiscoveredTVHeadendSettings: Equatable {
         streamProfile = profile.isEmpty ? "pass" : profile
         self.htspPort = htspPort
         self.guideCacheURL = guideCacheURL
+        self.resolvedAddresses = resolvedAddresses
+        self.guideResolvedAddresses = guideResolvedAddresses
         xmltvURL = nil
     }
 
@@ -62,8 +69,14 @@ struct DiscoveredTVHeadendSettings: Equatable {
 struct DiscoveredGuideCacheEndpoint: Equatable {
     let discoveryID: String
     let url: URL
+    let resolvedAddresses: [String]
 
-    init?(fields: [String: Data], hostName: String, port: Int) {
+    init?(
+        fields: [String: Data],
+        hostName: String,
+        port: Int,
+        resolvedAddresses: [String] = []
+    ) {
         guard let record = DNSServiceTXTRecord(fields: fields),
               record.value("txtvers") == "1",
               let discoveryID = record.value("id"), !discoveryID.isEmpty,
@@ -73,6 +86,7 @@ struct DiscoveredGuideCacheEndpoint: Equatable {
 
         self.discoveryID = discoveryID
         self.url = url
+        self.resolvedAddresses = resolvedAddresses
     }
 
     init?(txtRecordData: Data, hostName: String, port: Int) {
@@ -151,6 +165,25 @@ struct ResolvedTVHeadendDiscoveryRecord: Equatable {
     let hostName: String
     let port: Int
     let discoveryID: String
+    let resolvedAddresses: [String]
+
+    init(
+        name: String,
+        serviceIdentity: String,
+        fields: [String: Data],
+        hostName: String,
+        port: Int,
+        discoveryID: String,
+        resolvedAddresses: [String] = []
+    ) {
+        self.name = name
+        self.serviceIdentity = serviceIdentity
+        self.fields = fields
+        self.hostName = hostName
+        self.port = port
+        self.discoveryID = discoveryID
+        self.resolvedAddresses = resolvedAddresses
+    }
 }
 
 struct ResolvedGuideDiscoveryRecord: Equatable {
@@ -206,11 +239,18 @@ struct TVHeadendDiscoveryRegistry {
             .sorted { $0.serviceIdentity < $1.serviceIdentity }
             .first?
             .endpoint.url
+        let guideAddresses = guideRecords.values
+            .filter { $0.endpoint.discoveryID == record.discoveryID }
+            .sorted { $0.serviceIdentity < $1.serviceIdentity }
+            .first?
+            .endpoint.resolvedAddresses ?? []
         guard let settings = DiscoveredTVHeadendSettings(
             fields: record.fields,
             hostName: record.hostName,
             port: record.port,
-            guideCacheURL: guideURL
+            resolvedAddresses: record.resolvedAddresses,
+            guideCacheURL: guideURL,
+            guideResolvedAddresses: guideAddresses
         ) else { return nil }
 
         return .upsert(DiscoveredTVHeadendService(
@@ -304,6 +344,7 @@ final class TVHeadendDiscovery: NSObject,
 
         let identity = Self.identity(for: service)
         let fields = NetService.dictionary(fromTXTRecord: txtRecordData)
+        let resolvedAddresses = Self.numericAddresses(from: service.addresses ?? [])
         switch service.type.lowercased() {
         case DiscoveredTVHeadendSettings.serviceType.lowercased():
             guard let settings = DiscoveredTVHeadendSettings(
@@ -320,14 +361,16 @@ final class TVHeadendDiscovery: NSObject,
                 fields: fields,
                 hostName: hostName,
                 port: service.port,
-                discoveryID: discoveryID
+                discoveryID: discoveryID,
+                resolvedAddresses: resolvedAddresses
             )))
 
         case DiscoveredTVHeadendSettings.guideServiceType.lowercased():
             guard let endpoint = DiscoveredGuideCacheEndpoint(
                 fields: fields,
                 hostName: hostName,
-                port: service.port
+                port: service.port,
+                resolvedAddresses: resolvedAddresses
             ) else {
                 emit(registry.remove(serviceIdentity: identity))
                 return
@@ -350,5 +393,63 @@ final class TVHeadendDiscovery: NSObject,
         [service.domain, service.type, service.name]
             .joined(separator: "|")
             .lowercased()
+    }
+
+    static func numericAddresses(from socketAddresses: [Data]) -> [String] {
+        usableNumericAddresses(socketAddresses.compactMap { data in
+            data.withUnsafeBytes { buffer -> String? in
+                guard let baseAddress = buffer.baseAddress,
+                      buffer.count >= MemoryLayout<sockaddr>.size
+                else { return nil }
+                let address = baseAddress.assumingMemoryBound(to: sockaddr.self)
+                guard address.pointee.sa_family == sa_family_t(AF_INET)
+                        || address.pointee.sa_family == sa_family_t(AF_INET6)
+                else { return nil }
+                var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                guard getnameinfo(
+                    address,
+                    socklen_t(buffer.count),
+                    &host,
+                    socklen_t(host.count),
+                    nil,
+                    0,
+                    NI_NUMERICHOST
+                ) == 0 else { return nil }
+                return String(
+                    decoding: host.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) },
+                    as: UTF8.self
+                )
+            }
+        })
+    }
+
+    static func usableNumericAddresses(_ addresses: [String]) -> [String] {
+        var seen: Set<String> = []
+        return addresses.filter { address in
+            let value = address.lowercased()
+            guard !value.isEmpty else { return false }
+            if value.contains(".") {
+                let octets = value.split(separator: ".").compactMap { Int($0) }
+                guard octets.count == 4,
+                      octets.allSatisfy({ (0...255).contains($0) }),
+                      octets[0] != 0,
+                      octets[0] != 127,
+                      !(octets[0] == 169 && octets[1] == 254),
+                      octets[0] < 224
+                else { return false }
+            } else {
+                var parsed = in6_addr()
+                guard value.withCString({ inet_pton(AF_INET6, $0, &parsed) }) == 1 else {
+                    return false
+                }
+                let octets = withUnsafeBytes(of: parsed) { Array($0) }
+                guard !octets.allSatisfy({ $0 == 0 }),
+                      !(octets.dropLast().allSatisfy({ $0 == 0 }) && octets.last == 1),
+                      octets.first != 0xff,
+                      !(octets[0] == 0xfe && octets[1] & 0xc0 == 0x80)
+                else { return false }
+            }
+            return seen.insert(value).inserted
+        }
     }
 }

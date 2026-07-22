@@ -9,6 +9,8 @@ struct TVHeadendConfiguration: Equatable, Sendable {
     let htspPort: Int
     let guideCacheURL: URL?
     let xmltvURL: URL?
+    let resolvedAddresses: [String]
+    let guideResolvedAddresses: [String]
 
     init(
         serverProfileID: String? = nil,
@@ -18,7 +20,9 @@ struct TVHeadendConfiguration: Equatable, Sendable {
         streamProfile: String,
         htspPort: Int = 9982,
         guideCacheURL: URL?,
-        xmltvURL: URL?
+        xmltvURL: URL?,
+        resolvedAddresses: [String] = [],
+        guideResolvedAddresses: [String] = []
     ) {
         self.serverProfileID = serverProfileID
         self.baseURL = baseURL
@@ -28,6 +32,8 @@ struct TVHeadendConfiguration: Equatable, Sendable {
         self.htspPort = htspPort
         self.guideCacheURL = guideCacheURL
         self.xmltvURL = xmltvURL
+        self.resolvedAddresses = resolvedAddresses
+        self.guideResolvedAddresses = guideResolvedAddresses
     }
 
     var isComplete: Bool {
@@ -91,6 +97,16 @@ struct TVHeadendConfiguration: Equatable, Sendable {
     var dataStoreIdentifier: String {
         serverProfileID.map { "profile:\($0)" }
             ?? "\(baseURL?.absoluteString ?? "tvheadend")|\(username)"
+    }
+
+    var htspConnectionHosts: [String] {
+        guard let logicalHost = baseURL?.host else { return [] }
+        return Self.uniqueHosts([logicalHost] + resolvedAddresses)
+    }
+
+    private static func uniqueHosts(_ hosts: [String]) -> [String] {
+        var seen: Set<String> = []
+        return hosts.filter { seen.insert($0.lowercased()).inserted }
     }
 }
 

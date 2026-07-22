@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XCTest
 @testable import TVApp
 
@@ -121,6 +122,42 @@ final class TVHeadendClientTests: XCTestCase {
         XCTAssertNil(weakClient)
     }
 
+    func testCachedAddressProxyPreservesTheLogicalRequestHost() throws {
+        let origin = try ProxyTestOriginServer()
+        let logicalHost = "cached-address-\(UUID().uuidString).local"
+        let configuration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://\(logicalHost):\(origin.port)")!,
+            username: "",
+            password: "",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil,
+            resolvedAddresses: ["127.0.0.1"]
+        )
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        let proxy = CachedAddressProxy.shared
+        proxy.configure(sessionConfiguration, for: configuration)
+        let proxyPort = try XCTUnwrap(proxy.port)
+
+        let proxySettings = try XCTUnwrap(sessionConfiguration.connectionProxyDictionary)
+        XCTAssertEqual(proxySettings["HTTPProxy"] as? String, "127.0.0.1")
+        XCTAssertEqual(proxySettings["HTTPPort"] as? Int, proxyPort)
+
+        let response = try Self.sendRawProxyRequest(
+            proxyPort: proxyPort,
+            request: "GET http://\(logicalHost):\(origin.port)/status?detail=1 HTTP/1.1\r\n"
+                + "Host: \(logicalHost):\(origin.port)\r\n"
+                + "Connection: close\r\n\r\n"
+        )
+        let receivedRequest = try XCTUnwrap(origin.receivedRequest)
+
+        XCTAssertTrue(response.contains("200 OK"))
+        XCTAssertTrue(receivedRequest.hasPrefix("GET /status?detail=1 HTTP/1.1\r\n"))
+        XCTAssertTrue(receivedRequest.lowercased().contains(
+            "\r\nhost: \(logicalHost.lowercased()):\(origin.port)\r\n"
+        ))
+    }
+
     func testTicketedPlaylistChannelsAreParsedCentrally() {
         let channels = TVHeadendClient.playlistChannels(in: #"""
         #EXTM3U
@@ -170,6 +207,165 @@ final class TVHeadendClientTests: XCTestCase {
             realm: nil,
             authenticationMethod: NSURLAuthenticationMethodHTTPDigest
         )
+    }
+
+    private static func sendRawProxyRequest(proxyPort: Int, request: String) throws -> String {
+        let descriptor = try connectToLoopback(port: proxyPort)
+        defer { Darwin.close(descriptor) }
+        var timeout = timeval(tv_sec: 3, tv_usec: 0)
+        setsockopt(
+            descriptor,
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            &timeout,
+            socklen_t(MemoryLayout.size(ofValue: timeout))
+        )
+        guard sendAll(Data(request.utf8), to: descriptor) else {
+            throw ProxyTestError.writeFailed
+        }
+
+        var response = Data()
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        while true {
+            let count = Darwin.recv(descriptor, &buffer, buffer.count, 0)
+            if count > 0 {
+                response.append(buffer, count: count)
+            } else {
+                break
+            }
+        }
+        return String(decoding: response, as: UTF8.self)
+    }
+}
+
+private enum ProxyTestError: Error {
+    case socketCreationFailed
+    case bindFailed
+    case listenFailed
+    case socketNameFailed
+    case connectFailed
+    case writeFailed
+}
+
+private final class ProxyTestOriginServer: @unchecked Sendable {
+    private let descriptor: Int32
+    private let lock = NSLock()
+    private var request: String?
+    let port: Int
+
+    var receivedRequest: String? { lock.withLock { request } }
+
+    init() throws {
+        let descriptor = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+        guard descriptor >= 0 else { throw ProxyTestError.socketCreationFailed }
+        self.descriptor = descriptor
+        var noSignal: Int32 = 1
+        setsockopt(
+            descriptor,
+            SOL_SOCKET,
+            SO_NOSIGPIPE,
+            &noSignal,
+            socklen_t(MemoryLayout.size(ofValue: noSignal))
+        )
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        let status = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard status == 0 else {
+            Darwin.close(descriptor)
+            throw ProxyTestError.bindFailed
+        }
+        guard Darwin.listen(descriptor, 1) == 0 else {
+            Darwin.close(descriptor)
+            throw ProxyTestError.listenFailed
+        }
+
+        var boundAddress = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameStatus = withUnsafeMutablePointer(to: &boundAddress) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(descriptor, $0, &length)
+            }
+        }
+        guard nameStatus == 0 else {
+            Darwin.close(descriptor)
+            throw ProxyTestError.socketNameFailed
+        }
+        port = Int(in_port_t(bigEndian: boundAddress.sin_port))
+
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            serveOneRequest()
+        }
+    }
+
+    deinit {
+        Darwin.close(descriptor)
+    }
+
+    private func serveOneRequest() {
+        let client = Darwin.accept(descriptor, nil, nil)
+        guard client >= 0 else { return }
+        defer { Darwin.close(client) }
+
+        let marker = Data("\r\n\r\n".utf8)
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        while data.range(of: marker) == nil {
+            let count = Darwin.recv(client, &buffer, buffer.count, 0)
+            guard count > 0 else { return }
+            data.append(buffer, count: count)
+        }
+        lock.withLock {
+            request = String(decoding: data, as: UTF8.self)
+        }
+        _ = sendAll(
+            Data("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK".utf8),
+            to: client
+        )
+    }
+}
+
+private func connectToLoopback(port: Int) throws -> Int32 {
+    let descriptor = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+    guard descriptor >= 0 else { throw ProxyTestError.socketCreationFailed }
+    var address = sockaddr_in()
+    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_port = in_port_t(bigEndian: in_port_t(port))
+    address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+    let status = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+    guard status == 0 else {
+        Darwin.close(descriptor)
+        throw ProxyTestError.connectFailed
+    }
+    return descriptor
+}
+
+private func sendAll(_ data: Data, to descriptor: Int32) -> Bool {
+    data.withUnsafeBytes { buffer in
+        guard let baseAddress = buffer.baseAddress else { return true }
+        var sent = 0
+        while sent < buffer.count {
+            let count = Darwin.send(
+                descriptor,
+                baseAddress.advanced(by: sent),
+                buffer.count - sent,
+                0
+            )
+            guard count > 0 else { return false }
+            sent += count
+        }
+        return true
     }
 }
 

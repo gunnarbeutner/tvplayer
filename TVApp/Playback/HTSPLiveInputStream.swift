@@ -339,9 +339,10 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         startsAsCandidate: Bool,
         connectionFactory suppliedFactory: HTSPConnectionFactory?
     ) async throws -> HTSPLiveInputStream {
-        guard let host = configuration.baseURL?.host else { throw HTSPError.invalidHost }
+        let hosts = configuration.htspConnectionHosts
+        guard !hosts.isEmpty else { throw HTSPError.invalidHost }
         let connectionFactory: HTSPConnectionFactory = suppliedFactory ?? {
-            try HTSPConnection.openSynchronously(host: host, port: configuration.htspPort)
+            try HTSPConnection.openSynchronously(hosts: hosts, port: configuration.htspPort)
         }
         let preconnected: (any HTSPConnectionTransport)?
         if suppliedFactory == nil {

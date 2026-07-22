@@ -1020,6 +1020,9 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
                 : "Waiting for a trusted channel logo"
         )
         guard let media = VLCMedia(url: url) else { return }
+        if let proxy = CachedAddressProxy.shared.vlcHTTPProxyOption(for: url) {
+            media.addOption(proxy)
+        }
         media.addOption(":no-audio")
         media.addOption(":network-caching=300")
         media.addOption(":live-caching=300")

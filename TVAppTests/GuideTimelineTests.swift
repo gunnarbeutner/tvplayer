@@ -122,12 +122,17 @@ final class GuideTimelineTests: XCTestCase {
             fields: fields,
             hostName: "tvheadend.local.",
             port: 9_981,
-            discoveryID: "server-0123"
+            discoveryID: "server-0123",
+            resolvedAddresses: ["192.168.10.20", "2001:db8::20"]
         ))
         guard case let .upsert(initialService) = try XCTUnwrap(events.first) else {
             return XCTFail("Expected the primary service to be inserted")
         }
         XCTAssertNil(initialService.settings.guideCacheURL)
+        XCTAssertEqual(
+            initialService.settings.resolvedAddresses,
+            ["192.168.10.20", "2001:db8::20"]
+        )
 
         let endpoint = try XCTUnwrap(DiscoveredGuideCacheEndpoint(
             fields: [
@@ -138,7 +143,8 @@ final class GuideTimelineTests: XCTestCase {
                 "format": Data("tvplayer-json".utf8),
             ],
             hostName: "guide.local.",
-            port: 49_382
+            port: 49_382,
+            resolvedAddresses: ["192.168.10.21"]
         ))
         events = registry.upsert(ResolvedGuideDiscoveryRecord(
             serviceIdentity: guideIdentity,
@@ -151,15 +157,38 @@ final class GuideTimelineTests: XCTestCase {
             joinedService.settings.guideCacheURL?.absoluteString,
             "http://guide.local:49382/guide.json"
         )
+        XCTAssertEqual(joinedService.settings.guideResolvedAddresses, ["192.168.10.21"])
 
         events = registry.remove(serviceIdentity: guideIdentity)
         guard case let .upsert(detachedService) = try XCTUnwrap(events.first) else {
             return XCTFail("Expected guide removal to update the primary service")
         }
         XCTAssertNil(detachedService.settings.guideCacheURL)
+        XCTAssertEqual(detachedService.settings.guideResolvedAddresses, [])
         XCTAssertEqual(
             registry.remove(serviceIdentity: primaryIdentity),
             [.removed(serviceIdentity: primaryIdentity)]
+        )
+    }
+
+    @MainActor
+    func testDiscoveryKeepsOnlyRoutableNumericAddresses() {
+        XCTAssertEqual(
+            TVHeadendDiscovery.usableNumericAddresses([
+                "192.168.10.20",
+                "192.168.10.20",
+                "2001:db8::20",
+                "0.0.0.0",
+                "127.0.0.1",
+                "169.254.1.2",
+                "224.0.0.1",
+                "::",
+                "::1",
+                "fe80::1",
+                "ff02::fb",
+                "not-an-address",
+            ]),
+            ["192.168.10.20", "2001:db8::20"]
         )
     }
 

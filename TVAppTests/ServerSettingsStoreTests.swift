@@ -190,6 +190,75 @@ final class ServerSettingsStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testDiscoveredAddressesPersistAndRefreshForAnEditedProfile() throws {
+        var store = makeStore()
+        store.handleDiscoveryEvent(.upsert(service(
+            id: "stable",
+            host: "tvheadend.local",
+            resolvedAddresses: ["192.168.10.20", "2001:db8::20"]
+        )))
+
+        XCTAssertEqual(
+            store.configuration.resolvedAddresses,
+            ["192.168.10.20", "2001:db8::20"]
+        )
+
+        store.username = "manual-user"
+        try store.save()
+        let revisionBeforeAddressRefresh = store.revision
+        store.handleDiscoveryEvent(.upsert(service(
+            id: "stable",
+            host: "tvheadend.local",
+            resolvedAddresses: ["192.168.10.21"]
+        )))
+
+        XCTAssertEqual(store.configuration.username, "manual-user")
+        XCTAssertEqual(store.configuration.resolvedAddresses, ["192.168.10.21"])
+        XCTAssertEqual(store.revision, revisionBeforeAddressRefresh + 1)
+
+        store = makeStore()
+        XCTAssertEqual(store.configuration.resolvedAddresses, ["192.168.10.21"])
+    }
+
+    @MainActor
+    func testMissingAddressesInAnUpdateDoNotEraseThePersistentCache() {
+        let store = makeStore()
+        store.handleDiscoveryEvent(.upsert(service(
+            id: "stable",
+            host: "tvheadend.local",
+            resolvedAddresses: ["192.168.10.20"]
+        )))
+
+        store.handleDiscoveryEvent(.upsert(service(
+            id: "stable",
+            host: "tvheadend.local",
+            resolvedAddresses: []
+        )))
+
+        XCTAssertEqual(store.configuration.resolvedAddresses, ["192.168.10.20"])
+    }
+
+    func testOlderProfilesDecodeWithAnEmptyAddressCache() throws {
+        let data = Data(#"""
+        {
+          "id": "legacy",
+          "name": "Legacy",
+          "baseURL": "http:\/\/tvheadend.local:9981",
+          "username": "viewer",
+          "streamProfile": "pass",
+          "htspPort": 9982,
+          "origin": "manual",
+          "isEdited": true
+        }
+        """#.utf8)
+
+        let profile = try JSONDecoder().decode(TVHeadendServerProfile.self, from: data)
+
+        XCTAssertEqual(profile.resolvedAddresses, [])
+        XCTAssertEqual(profile.guideResolvedAddresses, [])
+    }
+
+    @MainActor
     func testConnectionResultIsDiscardedWhenTheSameProfileDraftChanges() async throws {
         let requestStarted = expectation(description: "Connection test started")
         var continuation: CheckedContinuation<TVHeadendServerInfo, Never>?
@@ -241,7 +310,8 @@ final class ServerSettingsStoreTests: XCTestCase {
         name: String = "TVHeadend",
         host: String,
         password: String = "secret",
-        username: String = "viewer"
+        username: String = "viewer",
+        resolvedAddresses: [String] = []
     ) -> DiscoveredTVHeadendService {
         var fields = [
             "txtvers": Data("1".utf8),
@@ -261,7 +331,8 @@ final class ServerSettingsStoreTests: XCTestCase {
             settings: DiscoveredTVHeadendSettings(
                 fields: fields,
                 hostName: host,
-                port: 9981
+                port: 9981,
+                resolvedAddresses: resolvedAddresses
             )!
         )
     }
