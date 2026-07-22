@@ -246,7 +246,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         let timeshiftAudioLogger = runsTimeshiftBenchmark
             ? VLCTimeshiftAudioLogger()
             : nil
-        let library = VLCLibrary(options: runsTimeshiftBenchmark ? [] : ["--quiet"])
+        var libraryOptions = ["--no-snapshot-preview"]
+        if !runsTimeshiftBenchmark { libraryOptions.append("--quiet") }
+        let library = VLCLibrary(options: libraryOptions)
         if let timeshiftAudioLogger { library.loggers = [timeshiftAudioLogger] }
         self.timeshiftAudioLogger = timeshiftAudioLogger
         mediaPlayer = VLCMediaPlayer(library: library)
