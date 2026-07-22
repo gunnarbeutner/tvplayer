@@ -91,6 +91,7 @@ struct SettingsView: View {
                                 }
                                 .labelsHidden()
                                 .pickerStyle(.menu)
+                                .foregroundStyle(.white)
                             }
 
                             SettingsField(
