@@ -30,6 +30,20 @@ enum TopShelfOnNowPolicy {
         return result
     }
 
+    static func programsForSnapshot(
+        from channels: [GuideChannel],
+        favoriteChannelIDs: Set<GuideChannel.ID>,
+        after date: Date
+    ) -> [Candidate] {
+        channels
+            .filter { favoriteChannelIDs.contains($0.id) }
+            .flatMap { channel in
+                channel.programs
+                    .filter { $0.end > date }
+                    .map { (channel: channel, program: $0) }
+            }
+    }
+
     private static func identity(for program: GuideProgram) -> Identity {
         if let episodeURI = program.metadata.episodeURI?
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -81,7 +95,8 @@ actor TopShelfSnapshotPublisher {
         favoriteChannelIDs: Set<GuideChannel.ID>,
         recordings: [TVRecording],
         configuration: TVHeadendConfiguration,
-        now: Date
+        now: Date,
+        guideCoverageEnd: Date? = nil
     ) async {
         do {
             _ = try TopShelfSnapshotStore.prepareCacheDirectory()
@@ -92,18 +107,14 @@ actor TopShelfSnapshotPublisher {
             return
         }
 
-        // Keep a small rolling schedule in the shared snapshot. The Top Shelf
-        // extension can then select the programme airing when tvOS next asks
-        // for content, even if the main app has been suspended in the meantime.
-        let favoriteProgramCandidates = channels
-            .filter { favoriteChannelIDs.contains($0.id) }
-            .flatMap { channel in
-                channel.programs
-                    .lazy
-                    .filter { $0.end > now }
-                    .prefix(3)
-                    .map { (channel: channel, program: $0) }
-            }
+        // Keep the complete fetched schedule in the shared snapshot. tvOS can
+        // defer a background refresh, so a short item-count window can expire
+        // even though the app had already downloaded later programmes.
+        let favoriteProgramCandidates = TopShelfOnNowPolicy.programsForSnapshot(
+            from: channels,
+            favoriteChannelIDs: favoriteChannelIDs,
+            after: now
+        )
 
         let playableRecordings = recordings
             .filter(\.isPlayable)
@@ -114,15 +125,41 @@ actor TopShelfSnapshotPublisher {
             }
             .prefix(12)
         let artworkClient = TVHeadendClient(configuration: configuration)
+        let detailedArtworkIDs = Set(
+            channels
+                .filter { favoriteChannelIDs.contains($0.id) }
+                .flatMap { channel in
+                    channel.programs
+                        .filter { $0.end > now }
+                        .prefix(3)
+                        .map { "\(channel.id):\($0.id)" }
+                }
+        )
 
         var referencedArtwork = Set<String>()
+        var channelArtwork: [GuideChannel.ID: String] = [:]
+        var attemptedChannelArtwork = Set<GuideChannel.ID>()
         var onNowItems: [TopShelfSnapshot.Item] = []
         for (channel, program) in favoriteProgramCandidates {
-            let filename = await cacheArtwork(
-                urlString: program.metadata.imageURL,
-                identifier: "channel-\(channel.id)-\(program.id)",
-                client: artworkClient
-            )
+            let filename: String?
+            if detailedArtworkIDs.contains("\(channel.id):\(program.id)") {
+                filename = await cacheArtwork(
+                    urlString: program.metadata.imageURL,
+                    identifier: "channel-\(channel.id)-\(program.id)",
+                    client: artworkClient
+                )
+            } else if let cached = channelArtwork[channel.id] {
+                filename = cached
+            } else if attemptedChannelArtwork.insert(channel.id).inserted {
+                filename = await cacheArtwork(
+                    urlString: channel.iconURL?.absoluteString,
+                    identifier: "channel-\(channel.id)-fallback",
+                    client: artworkClient
+                )
+                channelArtwork[channel.id] = filename
+            } else {
+                filename = nil
+            }
             if let filename { referencedArtwork.insert(filename) }
             onNowItems.append(
                 TopShelfSnapshot.Item(
@@ -197,6 +234,7 @@ actor TopShelfSnapshotPublisher {
         let snapshot = TopShelfSnapshot(
             version: 1,
             generatedAt: now,
+            guideCoverageEnd: guideCoverageEnd,
             onNow: onNowItems,
             recordings: recordingItems
         )
@@ -294,6 +332,7 @@ actor TopShelfSnapshotPublisher {
         let updated = TopShelfSnapshot(
             version: snapshot.version,
             generatedAt: snapshot.generatedAt,
+            guideCoverageEnd: snapshot.guideCoverageEnd,
             onNow: snapshot.onNow,
             recordings: recordings
         )

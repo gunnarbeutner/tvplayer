@@ -79,6 +79,9 @@ targets:
           - com.apple.tv.useractivity.channel-guide
         UIBackgroundModes:
           - audio
+          - fetch
+        BGTaskSchedulerPermittedIdentifiers:
+          - de.beutner.TVPlayer.refresh-guide
         UILaunchScreen: {}
     settings:
       base:

@@ -2,6 +2,56 @@ import XCTest
 @testable import TVApp
 
 final class GuideTimelineTests: XCTestCase {
+    func testAvailableCoverageUsesTheLastReturnedProgramme() {
+        let start = Date(timeIntervalSince1970: 10_000)
+        let timeline = GuideTimeline(start: start, end: start.addingTimeInterval(6 * 3_600))
+        let programmeEnd = start.addingTimeInterval(4 * 3_600)
+        let channel = GuideChannel(
+            id: "channel",
+            number: 1,
+            name: "Channel",
+            monogram: "C",
+            tint: .blue,
+            iconURL: nil,
+            programs: [GuideProgram(
+                id: "programme",
+                channelID: "channel",
+                title: "Programme",
+                subtitle: nil,
+                overview: "",
+                start: start,
+                end: programmeEnd
+            )]
+        )
+
+        XCTAssertEqual(timeline.availableCoverageEnd(in: [channel]), programmeEnd)
+    }
+
+    func testAvailableCoverageIsClampedToRequestedTimeline() {
+        let start = Date(timeIntervalSince1970: 10_000)
+        let timelineEnd = start.addingTimeInterval(6 * 3_600)
+        let timeline = GuideTimeline(start: start, end: timelineEnd)
+        let channel = GuideChannel(
+            id: "channel",
+            number: 1,
+            name: "Channel",
+            monogram: "C",
+            tint: .blue,
+            iconURL: nil,
+            programs: [GuideProgram(
+                id: "programme",
+                channelID: "channel",
+                title: "Programme",
+                subtitle: nil,
+                overview: "",
+                start: start,
+                end: timelineEnd.addingTimeInterval(3_600)
+            )]
+        )
+
+        XCTAssertEqual(timeline.availableCoverageEnd(in: [channel]), timelineEnd)
+    }
+
     @MainActor
     func testChannelWithoutEPGReceivesTimelinePlaceholder() throws {
         let timeline = GuideTimeline(

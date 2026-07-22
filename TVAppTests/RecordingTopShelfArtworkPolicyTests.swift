@@ -143,6 +143,55 @@ final class TopShelfSnapshotStoreTests: XCTestCase {
         XCTAssertTrue(item.isAvailable(at: Date()))
     }
 
+    func testLegacySnapshotDecodesWithoutGuideCoverageEnd() throws {
+        let data = Data(#"""
+        {
+          "version": 1,
+          "generatedAt": 10000,
+          "onNow": [],
+          "recordings": []
+        }
+        """#.utf8)
+
+        let snapshot = try JSONDecoder().decode(TopShelfSnapshot.self, from: data)
+
+        XCTAssertNil(snapshot.guideCoverageEnd)
+    }
+
+    func testBackgroundRefreshIsScheduledBeforeGuideCoverageEnds() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let coverageEnd = now.addingTimeInterval(5 * 60 * 60)
+
+        let refreshDate = GuideBackgroundRefreshPolicy.nextRefreshDate(
+            after: now,
+            guideCoverageEnd: coverageEnd
+        )
+
+        XCTAssertEqual(refreshDate, coverageEnd.addingTimeInterval(-30 * 60))
+    }
+
+    func testBackgroundRefreshDoesNotImmediatelyLoopNearCoverageEnd() {
+        let now = Date(timeIntervalSince1970: 10_000)
+
+        let refreshDate = GuideBackgroundRefreshPolicy.nextRefreshDate(
+            after: now,
+            guideCoverageEnd: now.addingTimeInterval(5 * 60)
+        )
+
+        XCTAssertEqual(refreshDate, now.addingTimeInterval(15 * 60))
+    }
+
+    func testBackgroundRefreshRetriesWhenCoverageIsUnknown() {
+        let now = Date(timeIntervalSince1970: 10_000)
+
+        let refreshDate = GuideBackgroundRefreshPolicy.nextRefreshDate(
+            after: now,
+            guideCoverageEnd: nil
+        )
+
+        XCTAssertEqual(refreshDate, now.addingTimeInterval(60 * 60))
+    }
+
     func testAvailableOnNowItemsDeduplicateChannelsAndSimulcasts() {
         let now = Date(timeIntervalSince1970: 20_000)
         let end = now.addingTimeInterval(60)
@@ -184,6 +233,41 @@ final class TopShelfSnapshotStoreTests: XCTestCase {
 }
 
 final class TopShelfOnNowPolicyTests: XCTestCase {
+    func testSnapshotKeepsTheCompleteAvailableFavoriteSchedule() {
+        let now = Date(timeIntervalSince1970: 5_000)
+        var candidates: [TopShelfOnNowPolicy.Candidate] = []
+        for index in 0..<6 {
+            let start = now.addingTimeInterval(TimeInterval(index * 1_800))
+            let end = now.addingTimeInterval(TimeInterval((index + 1) * 1_800))
+            candidates.append(candidate(
+                channelID: "favorite",
+                programID: "event-\(index)",
+                title: "Programme \(index)",
+                start: start,
+                end: end
+            ))
+        }
+        let channel = GuideChannel(
+            id: "favorite",
+            number: 1,
+            name: "Favorite",
+            monogram: "F",
+            tint: .blue,
+            iconURL: nil,
+            programs: candidates.map { $0.program }
+        )
+
+        let programs = TopShelfOnNowPolicy.programsForSnapshot(
+            from: [channel],
+            favoriteChannelIDs: ["favorite"],
+            after: now
+        )
+
+        let identifiers = programs.map { $0.program.id }
+        let expected = (0..<6).map { "event-\($0)" }
+        XCTAssertEqual(identifiers, expected)
+    }
+
     func testSimulcastsAreDeduplicatedBeforeTheLimit() {
         let start = Date(timeIntervalSince1970: 10_000)
         let end = start.addingTimeInterval(3_600)

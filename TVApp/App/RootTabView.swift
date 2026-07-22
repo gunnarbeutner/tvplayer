@@ -495,7 +495,8 @@ struct RootTabView: View {
                 favoriteChannelIDs: channelPreferences.favoriteChannelIDs,
                 recordings: recordings.recordings,
                 configuration: settings.configuration,
-                now: guide.now
+                now: guide.now,
+                guideCoverageEnd: guide.guideCoverageEnd
             )
         }
 #endif

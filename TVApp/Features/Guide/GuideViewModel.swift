@@ -25,6 +25,7 @@ final class GuideViewModel: ObservableObject {
             guideRevision &+= 1
         }
     }
+    @Published private(set) var guideCoverageEnd: Date?
     @Published private(set) var loadState: GuideLoadState = .needsConfiguration
     @Published private(set) var hasUsableGuide = false
 
@@ -59,6 +60,7 @@ final class GuideViewModel: ObservableObject {
         self.timeline = timeline
         self.fetchGuide = fetchGuide
         channels = []
+        guideCoverageEnd = nil
         defer { rebuildGuideIndexes() }
 
         guard let cachedSnapshot else { return }
@@ -75,6 +77,8 @@ final class GuideViewModel: ObservableObject {
         guard hasCurrentOrFutureProgramme else { return }
 
         channels = restoredChannels
+        guideCoverageEnd = cachedSnapshot.guideCoverageEnd
+            ?? cachedSnapshot.channels.lazy.flatMap(\.programs).map(\.end).max()
         hasUsableGuide = true
         loadState = .loaded(
             serverName: cachedSnapshot.serverName,
@@ -108,6 +112,7 @@ final class GuideViewModel: ObservableObject {
             lastConfiguration = nil
             lastLoadedAt = nil
             activeSnapshotIdentifier = nil
+            guideCoverageEnd = nil
             return
         }
 
@@ -120,6 +125,7 @@ final class GuideViewModel: ObservableObject {
             lastConfiguration = nil
             lastLoadedAt = nil
             activeSnapshotIdentifier = snapshotIdentifier
+            guideCoverageEnd = nil
         }
 
         let isFresh = lastConfiguration == configuration
@@ -200,6 +206,10 @@ final class GuideViewModel: ObservableObject {
             try Task.checkCancellation()
             guard isCurrentLoad(generation, snapshotIdentifier: snapshotIdentifier) else { return }
             timeline = refreshedTimeline
+            let refreshedCoverageEnd = refreshedTimeline.availableCoverageEnd(
+                in: snapshot.channels
+            )
+            guideCoverageEnd = refreshedCoverageEnd
             channels = snapshot.channels
             hasUsableGuide = true
             loadState = .loaded(serverName: snapshot.serverName, channelCount: snapshot.channels.count)
@@ -211,6 +221,7 @@ final class GuideViewModel: ObservableObject {
                 channelPreferencesIdentifier: configuration.channelPreferencesIdentifier,
                 serverName: snapshot.serverName,
                 savedAt: date,
+                guideCoverageEnd: refreshedCoverageEnd,
                 channels: snapshot.channels
             )
             await GuideSnapshotStore.shared.save(persistedSnapshot)

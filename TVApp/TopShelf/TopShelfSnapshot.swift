@@ -56,8 +56,26 @@ struct TopShelfSnapshot: Codable, Sendable {
 
     let version: Int
     let generatedAt: Date
+    /// End of the interval covered by the guide fetch that produced this
+    /// snapshot. This is deliberately independent of programme end times:
+    /// channels can legitimately have gaps near the edge of the window.
+    let guideCoverageEnd: Date?
     let onNow: [Item]
     let recordings: [Item]
+
+    init(
+        version: Int,
+        generatedAt: Date,
+        guideCoverageEnd: Date? = nil,
+        onNow: [Item],
+        recordings: [Item]
+    ) {
+        self.version = version
+        self.generatedAt = generatedAt
+        self.guideCoverageEnd = guideCoverageEnd
+        self.onNow = onNow
+        self.recordings = recordings
+    }
 
     func availableOnNowItems(at date: Date, limit: Int = 12) -> [Item] {
         guard limit > 0 else { return [] }
@@ -79,6 +97,25 @@ struct TopShelfSnapshot: Codable, Sendable {
             if result.count == limit { break }
         }
         return result
+    }
+}
+
+enum GuideBackgroundRefreshPolicy {
+    static let coverageLeadTime: TimeInterval = 30 * 60
+    static let minimumDelay: TimeInterval = 15 * 60
+    static let retryDelay: TimeInterval = 60 * 60
+
+    static func nextRefreshDate(
+        after now: Date,
+        guideCoverageEnd: Date?
+    ) -> Date {
+        guard let guideCoverageEnd else {
+            return now.addingTimeInterval(retryDelay)
+        }
+        return max(
+            now.addingTimeInterval(minimumDelay),
+            guideCoverageEnd.addingTimeInterval(-coverageLeadTime)
+        )
     }
 }
 

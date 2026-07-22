@@ -200,6 +200,19 @@ struct GuideTimeline: Equatable {
         CGFloat(interval.duration / 3_600) * Self.pointsPerHour
     }
 
+    /// The usable edge can be earlier than the requested edge when a guide
+    /// source has not populated the whole window yet. Never claim coverage
+    /// beyond either the last returned programme or this timeline.
+    func availableCoverageEnd(in channels: [GuideChannel]) -> Date? {
+        guard let programmeEnd = channels.lazy
+            .flatMap(\.programs)
+            .map(\.end)
+            .max(),
+              programmeEnd > start
+        else { return nil }
+        return min(end, programmeEnd)
+    }
+
     static func surrounding(_ date: Date, calendar: Calendar = .current) -> GuideTimeline {
         let components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
         let minute = ((components.minute ?? 0) / 30) * 30

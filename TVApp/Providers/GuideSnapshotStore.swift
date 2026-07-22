@@ -11,6 +11,7 @@ struct PersistedGuideSnapshot: Codable, Sendable {
     let channelPreferencesIdentifier: String?
     let serverName: String
     let savedAt: Date
+    let guideCoverageEnd: Date?
     let channels: [PersistedGuideChannel]
 
     @MainActor
@@ -19,6 +20,7 @@ struct PersistedGuideSnapshot: Codable, Sendable {
         channelPreferencesIdentifier: String? = nil,
         serverName: String,
         savedAt: Date = Date(),
+        guideCoverageEnd: Date? = nil,
         channels: [GuideChannel]
     ) {
         version = Self.currentVersion
@@ -26,6 +28,7 @@ struct PersistedGuideSnapshot: Codable, Sendable {
         self.channelPreferencesIdentifier = channelPreferencesIdentifier
         self.serverName = serverName
         self.savedAt = savedAt
+        self.guideCoverageEnd = guideCoverageEnd
         self.channels = channels.map(PersistedGuideChannel.init)
     }
 

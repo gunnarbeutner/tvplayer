@@ -2,6 +2,10 @@ import SwiftUI
 
 @main
 struct TVAppApp: App {
+#if os(tvOS)
+    @UIApplicationDelegateAdaptor(TVAppDelegate.self) private var appDelegate
+#endif
+
     var body: some Scene {
 #if os(macOS)
         WindowGroup {
