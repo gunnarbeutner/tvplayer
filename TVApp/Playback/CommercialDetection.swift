@@ -47,6 +47,30 @@ struct CommercialLogoModel: Equatable, Sendable {
     let edgeMask: [UInt8]
 }
 
+struct CommercialDetectionDiagnostics: Equatable, Sendable {
+    static let inactive = CommercialDetectionDiagnostics(
+        isActive: false,
+        phase: "Inactive",
+        learningProgress: 0,
+        sampledAt: nil,
+        sampledPixels: [],
+        logoCorner: nil,
+        logoMask: [],
+        logoSimilarity: nil,
+        logoIsPresent: nil
+    )
+
+    let isActive: Bool
+    let phase: String
+    let learningProgress: Double
+    let sampledAt: Date?
+    let sampledPixels: [UInt8]
+    let logoCorner: Int?
+    let logoMask: [UInt8]
+    let logoSimilarity: Double?
+    let logoIsPresent: Bool?
+}
+
 enum CommercialFrameFeatureExtractor {
     static func extract(from url: URL) -> CommercialFrameFeatures? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
@@ -125,6 +149,7 @@ struct CommercialBreakDetector: Sendable {
     static let maximumCommercialDuration: TimeInterval = 600
     static let mergeGap: TimeInterval = 5
     static let discontinuityTolerance: TimeInterval = 5
+    static let logoSimilarityThreshold = 0.62
 
     private enum State: Sendable {
         case programme
@@ -144,11 +169,27 @@ struct CommercialBreakDetector: Sendable {
     private var logoCorner: Int?
     private var logoMask: [UInt8] = []
     private var lastTimestamp: Date?
+    private var lastLogoSimilarity: Double?
 
     var hasLearnedLogo: Bool { logoCorner != nil && !logoMask.isEmpty }
     var learnedLogoModel: CommercialLogoModel? {
         guard let logoCorner, !logoMask.isEmpty else { return nil }
         return CommercialLogoModel(corner: logoCorner, edgeMask: logoMask)
+    }
+
+    var diagnosticsPhase: String {
+        guard hasLearnedLogo else { return "Learning" }
+        switch state {
+        case .programme: return "Programme"
+        case .candidate: return "Possible commercial"
+        case .commercial: return "Commercial"
+        }
+    }
+
+    var learningProgress: Double {
+        hasLearnedLogo
+            ? 1
+            : min(1, Double(learningSamples) / Double(Self.logoLearningSampleCount))
     }
 
     init(logoModel: CommercialLogoModel? = nil) {
@@ -169,12 +210,14 @@ struct CommercialBreakDetector: Sendable {
         lastTimestamp = timestamp
 
         guard hasLearnedLogo else {
+            lastLogoSimilarity = nil
             learn(from: features)
             return breaks
         }
 
         let similarity = logoSimilarity(in: features)
-        let logoIsPresent = similarity >= 0.62
+        lastLogoSimilarity = similarity
+        let logoIsPresent = similarity >= Self.logoSimilarityThreshold
         switch state {
         case .programme:
             if !logoIsPresent, !features.isDark {
@@ -244,6 +287,25 @@ struct CommercialBreakDetector: Sendable {
     mutating func reset() {
         breaks.removeAll()
         resetModel(preservingBreaks: true)
+    }
+
+    func diagnostics(
+        for features: CommercialFrameFeatures,
+        sampledAt: Date
+    ) -> CommercialDetectionDiagnostics {
+        CommercialDetectionDiagnostics(
+            isActive: true,
+            phase: diagnosticsPhase,
+            learningProgress: learningProgress,
+            sampledAt: sampledAt,
+            sampledPixels: features.pixels,
+            logoCorner: logoCorner,
+            logoMask: logoMask,
+            logoSimilarity: lastLogoSimilarity,
+            logoIsPresent: lastLogoSimilarity.map {
+                $0 >= Self.logoSimilarityThreshold
+            }
+        )
     }
 
     private mutating func resetTemporalState() {
@@ -318,6 +380,7 @@ struct CommercialBreakDetector: Sendable {
         logoCorner = nil
         logoMask.removeAll()
         lastTimestamp = nil
+        lastLogoSimilarity = nil
     }
 }
 
@@ -329,6 +392,7 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
     static let snapshotHeight: Int32 = 90
 
     @Published private(set) var breaks: [CommercialBreak] = []
+    @Published private(set) var diagnostics = CommercialDetectionDiagnostics.inactive
     let mediaPlayer: VLCMediaPlayer
     var breaksChanged: (([CommercialBreak]) -> Void)?
 
@@ -361,6 +425,17 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
             publish(detector.breaks)
         }
         self.channelID = channelID
+        diagnostics = CommercialDetectionDiagnostics(
+            isActive: true,
+            phase: detector.diagnosticsPhase,
+            learningProgress: detector.learningProgress,
+            sampledAt: nil,
+            sampledPixels: [],
+            logoCorner: detector.learnedLogoModel?.corner,
+            logoMask: detector.learnedLogoModel?.edgeMask ?? [],
+            logoSimilarity: nil,
+            logoIsPresent: nil
+        )
         guard let media = VLCMedia(url: url) else { return }
         media.addOption(":no-audio")
         media.addOption(":network-caching=300")
@@ -384,6 +459,7 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
         clearPendingSnapshot()
         mediaPlayer.stop()
         mediaPlayer.media = nil
+        diagnostics = .inactive
         if resetMarkers {
             cacheLearnedLogo()
             channelID = nil
@@ -408,6 +484,7 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
             }.value
             guard let self, let features else { return }
             publish(detector.consume(features, at: timestamp))
+            diagnostics = detector.diagnostics(for: features, sampledAt: timestamp)
             cacheLearnedLogo()
         }
     }

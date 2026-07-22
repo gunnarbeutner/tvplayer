@@ -213,6 +213,7 @@ struct PlaybackView: View {
 #endif
     @State private var isRefreshingGrowingRecording = false
     @State private var videoAttachmentRevision = 0
+    @State private var showsCommercialDetectionOverlay = false
     @FocusState private var wakeSurfaceFocused: Bool
 
     let presentation: PlaybackPresentation
@@ -260,6 +261,23 @@ struct PlaybackView: View {
                     .focusEffectDisabled()
                     .onTapGesture(perform: showTimeline)
                     .accessibilityLabel("Show playback timeline")
+            }
+
+            if showsCommercialDetectionOverlay,
+               !presentation.isRecording,
+               chromeMode != .panel {
+                CommercialDetectionDebugOverlay(
+                    analyzer: playback.commercialAnalyzer
+                )
+                .padding(.horizontal, usesCompactLayout ? 16 : 34)
+                .padding(.vertical, usesCompactHeight ? 8 : 26)
+                .frame(
+                    maxWidth: .infinity,
+                    maxHeight: .infinity,
+                    alignment: .topTrailing
+                )
+                .allowsHitTesting(false)
+                .zIndex(4)
             }
 
 #if !os(tvOS)
@@ -340,6 +358,7 @@ struct PlaybackView: View {
                     engine: engine,
                     profiles: profiles,
                     selectedTab: $selectedTab,
+                    showsCommercialDetectionOverlay: $showsCommercialDetectionOverlay,
                     usesCompactLayout: usesCompactLayout,
                     usesCompactHeight: usesCompactHeight,
                     selectProfile: { profile in
@@ -1004,6 +1023,187 @@ struct PlaybackView: View {
 
 }
 
+private struct CommercialDetectionDebugOverlay: View {
+    @ObservedObject var analyzer: CommercialLiveAnalyzer
+
+    private var diagnostics: CommercialDetectionDiagnostics { analyzer.diagnostics }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Commercial detector")
+                    .font(.headline)
+                Spacer(minLength: 16)
+                Text(diagnostics.phase)
+                    .font(.caption.bold())
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(phaseColor.opacity(0.9), in: Capsule())
+            }
+
+            CommercialDetectionDebugFrame(diagnostics: diagnostics)
+                .frame(width: 320, height: 180)
+
+            if diagnostics.isActive {
+                HStack(spacing: 8) {
+                    if let similarity = diagnostics.logoSimilarity {
+                        Text("Logo \(similarity.formatted(.percent.precision(.fractionLength(0))))")
+                        Text(diagnostics.logoIsPresent == true ? "present" : "absent")
+                            .foregroundStyle(
+                                diagnostics.logoIsPresent == true ? .green : .orange
+                            )
+                    } else {
+                        Text("Learning \(diagnostics.learningProgress.formatted(.percent.precision(.fractionLength(0))))")
+                    }
+                }
+                .font(.caption.bold().monospacedDigit())
+
+                Text(modelDescription)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.72))
+            } else {
+                Text("No native timeshift analyser is active.")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.72))
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(14)
+        .background(.black.opacity(0.86), in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .strokeBorder(.white.opacity(0.16), lineWidth: 1)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilitySummary)
+    }
+
+    private var phaseColor: Color {
+        switch diagnostics.phase {
+        case "Commercial": .orange
+        case "Possible commercial": .yellow
+        case "Programme": .green
+        default: .gray
+        }
+    }
+
+    private var modelDescription: String {
+        guard let corner = diagnostics.logoCorner else {
+            return "No logo mask learned yet"
+        }
+        let side = corner == 0 ? "Upper-left" : "Upper-right"
+        let edgeCount = diagnostics.logoMask.reduce(0) { $0 + Int($1) }
+        return "\(side) mask · \(edgeCount) learned edges"
+    }
+
+    private var accessibilitySummary: String {
+        var parts = ["Commercial detector", diagnostics.phase]
+        if let similarity = diagnostics.logoSimilarity {
+            parts.append("logo match \(similarity.formatted(.percent))")
+        } else if diagnostics.isActive {
+            parts.append("learning \(diagnostics.learningProgress.formatted(.percent))")
+        }
+        parts.append(modelDescription)
+        return parts.joined(separator: ", ")
+    }
+}
+
+private struct CommercialDetectionDebugFrame: View {
+    let diagnostics: CommercialDetectionDiagnostics
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                if let image = sampledImage {
+                    Image(decorative: image, scale: 1)
+                        .resizable()
+                        .interpolation(.none)
+                } else {
+                    Rectangle().fill(.white.opacity(0.06))
+                    Text("Waiting for frame")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.62))
+                }
+
+                Canvas { context, size in
+                    drawLogoMask(context: &context, size: size)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+            }
+        }
+        .aspectRatio(
+            CGFloat(CommercialFrameFeatures.width)
+                / CGFloat(CommercialFrameFeatures.height),
+            contentMode: .fit
+        )
+    }
+
+    private var sampledImage: CGImage? {
+        let width = CommercialFrameFeatures.width
+        let height = CommercialFrameFeatures.height
+        guard diagnostics.sampledPixels.count == width * height else { return nil }
+        let data = Data(diagnostics.sampledPixels) as CFData
+        guard let provider = CGDataProvider(data: data) else { return nil }
+        return CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 8,
+            bytesPerRow: width,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )
+    }
+
+    private func drawLogoMask(context: inout GraphicsContext, size: CGSize) {
+        guard let corner = diagnostics.logoCorner else { return }
+        let sourceWidth = CGFloat(CommercialFrameFeatures.width)
+        let sourceHeight = CGFloat(CommercialFrameFeatures.height)
+        let scaleX = size.width / sourceWidth
+        let scaleY = size.height / sourceHeight
+        let cornerWidth = CommercialFrameFeatures.cornerWidth
+        let cornerHeight = CommercialFrameFeatures.cornerHeight
+        let originX = corner == 0
+            ? 0
+            : CommercialFrameFeatures.width - cornerWidth
+
+        let region = CGRect(
+            x: CGFloat(originX) * scaleX,
+            y: 0,
+            width: CGFloat(cornerWidth) * scaleX,
+            height: CGFloat(cornerHeight) * scaleY
+        )
+        context.stroke(
+            Path(roundedRect: region, cornerRadius: 3),
+            with: .color(.orange),
+            lineWidth: 2
+        )
+
+        guard diagnostics.logoMask.count == cornerWidth * cornerHeight else { return }
+        for index in diagnostics.logoMask.indices where diagnostics.logoMask[index] != 0 {
+            let x = originX + index % cornerWidth
+            let y = index / cornerWidth
+            context.fill(
+                Path(CGRect(
+                    x: CGFloat(x) * scaleX,
+                    y: CGFloat(y) * scaleY,
+                    width: max(1, scaleX),
+                    height: max(1, scaleY)
+                )),
+                with: .color(.green.opacity(0.9))
+            )
+        }
+    }
+}
+
 private struct RecordingPlaybackTimeline: View {
     let recording: TVRecording
     let elapsedSeconds: TimeInterval
@@ -1629,6 +1829,7 @@ private struct PlayerTabbedOverlay: View {
     @ObservedObject var engine: VLCPlaybackEngine
     let profiles: [TVHeadendStreamProfile]
     @Binding var selectedTab: PlayerOverlayTab
+    @Binding var showsCommercialDetectionOverlay: Bool
     let usesCompactLayout: Bool
     let usesCompactHeight: Bool
     let selectProfile: (TVHeadendStreamProfile) -> Void
@@ -1998,44 +2199,61 @@ private struct PlayerTabbedOverlay: View {
 
     private var technicalDetails: some View {
         ScrollView {
-            LazyVGrid(
-                columns: Array(
-                    repeating: GridItem(.flexible()),
-                    count: usesCompactHeight ? 2 : (usesCompactLayout ? 1 : 3)
-                ),
-                alignment: .leading,
-                spacing: 18
-            ) {
-                ForEach(engine.technicalDetails) { detail in
-                    let isFocused = focusedTechnicalDetailID == detail.id
-
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(detail.label.uppercased())
-                            .font(.caption.bold())
-                            .tracking(1.1)
-                            .foregroundStyle(AppTheme.secondaryText)
-                        Text(detail.value)
+            VStack(alignment: .leading, spacing: 18) {
+                Toggle(isOn: $showsCommercialDetectionOverlay) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Commercial detector overlay")
                             .font(.headline)
                             .foregroundStyle(.white)
+                        Text("Show the sampled frame, learned logo mask, and match confidence.")
+                            .font(.subheadline)
+                            .foregroundStyle(AppTheme.secondaryText)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(18)
-                    .background(
-                        isFocused ? AppTheme.focused : Color.white.opacity(0.07),
-                        in: RoundedRectangle(cornerRadius: 12)
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 12)
-                            .strokeBorder(
-                                isFocused ? AppTheme.focusBorder : Color.clear,
-                                lineWidth: 3
-                            )
+                }
+                .toggleStyle(.switch)
+                .disabled(presentation.isRecording)
+                .padding(18)
+                .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
+
+                LazyVGrid(
+                    columns: Array(
+                        repeating: GridItem(.flexible()),
+                        count: usesCompactHeight ? 2 : (usesCompactLayout ? 1 : 3)
+                    ),
+                    alignment: .leading,
+                    spacing: 18
+                ) {
+                    ForEach(engine.technicalDetails) { detail in
+                        let isFocused = focusedTechnicalDetailID == detail.id
+
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(detail.label.uppercased())
+                                .font(.caption.bold())
+                                .tracking(1.1)
+                                .foregroundStyle(AppTheme.secondaryText)
+                            Text(detail.value)
+                                .font(.headline)
+                                .foregroundStyle(.white)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(18)
+                        .background(
+                            isFocused ? AppTheme.focused : Color.white.opacity(0.07),
+                            in: RoundedRectangle(cornerRadius: 12)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12)
+                                .strokeBorder(
+                                    isFocused ? AppTheme.focusBorder : Color.clear,
+                                    lineWidth: 3
+                                )
+                        }
+                        .contentShape(RoundedRectangle(cornerRadius: 12))
+                        .focusable()
+                        .focused($focusedTechnicalDetailID, equals: detail.id)
+                        .focusEffectDisabled()
+                        .accessibilityElement(children: .combine)
                     }
-                    .contentShape(RoundedRectangle(cornerRadius: 12))
-                    .focusable()
-                    .focused($focusedTechnicalDetailID, equals: detail.id)
-                    .focusEffectDisabled()
-                    .accessibilityElement(children: .combine)
                 }
             }
         }

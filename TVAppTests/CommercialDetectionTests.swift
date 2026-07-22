@@ -70,6 +70,39 @@ final class CommercialDetectionTests: XCTestCase {
         XCTAssertTrue(detector.prune(before: date(76)).isEmpty)
     }
 
+    func testDiagnosticsExposeLearningProgressAndSampledFrame() {
+        var detector = CommercialBreakDetector()
+        let features = frame(logoVisible: true)
+
+        _ = detector.consume(features, at: date(0))
+        let diagnostics = detector.diagnostics(for: features, sampledAt: date(0))
+
+        XCTAssertEqual(diagnostics.phase, "Learning")
+        XCTAssertEqual(
+            diagnostics.learningProgress,
+            1 / Double(CommercialBreakDetector.logoLearningSampleCount),
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(diagnostics.sampledAt, date(0))
+        XCTAssertEqual(diagnostics.sampledPixels, features.pixels)
+        XCTAssertNil(diagnostics.logoCorner)
+        XCTAssertNil(diagnostics.logoSimilarity)
+    }
+
+    func testDiagnosticsExposeLearnedLogoMaskAndMatchResult() {
+        var detector = learnedDetector()
+        let features = frame(logoVisible: false)
+
+        _ = detector.consume(features, at: date(60))
+        let diagnostics = detector.diagnostics(for: features, sampledAt: date(60))
+
+        XCTAssertEqual(diagnostics.phase, "Possible commercial")
+        XCTAssertEqual(diagnostics.logoCorner, 0)
+        XCTAssertFalse(diagnostics.logoMask.isEmpty)
+        XCTAssertEqual(diagnostics.logoSimilarity, 0)
+        XCTAssertEqual(diagnostics.logoIsPresent, false)
+    }
+
     private func learnedDetector() -> CommercialBreakDetector {
         var detector = CommercialBreakDetector()
         for second in 0..<CommercialBreakDetector.logoLearningSampleCount {
