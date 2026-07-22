@@ -694,10 +694,16 @@ struct LivePlaybackPositionTracker {
             // less frequently than this tracker is sampled. Advancing by only
             // the most recent sampling interval made the programme timeline
             // steadily fall behind during otherwise uninterrupted playback.
-            // The capped wall-clock interval remains a fallback for output
-            // pipelines which do not expose a usable media clock.
+            // A replaced stream can also jump VLC's media clock forward by
+            // minutes or hours. Treat a delta larger than plausible wall-clock
+            // progress as a new clock epoch instead of moving the programme
+            // timeline into the future.
+            let maximumPlausibleProgress = max(1, observationInterval * 2)
+            let boundedProgress = playbackProgress.flatMap { progress in
+                progress <= maximumPlausibleProgress ? progress : nil
+            }
             self.pausedDate = pausedDate.addingTimeInterval(
-                playbackProgress ?? min(1, observationInterval)
+                boundedProgress ?? min(1, observationInterval)
             )
         }
         return true
@@ -718,7 +724,7 @@ struct LivePlaybackPositionTracker {
     ) -> Date {
         let calculatedDate = pausedDate
             ?? date.addingTimeInterval(-max(0, liveDelay))
-        return max(calculatedDate, bufferStartedAt ?? .distantPast)
+        return min(max(calculatedDate, bufferStartedAt ?? .distantPast), date)
     }
 }
 

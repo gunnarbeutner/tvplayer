@@ -56,6 +56,16 @@ enum TimelineScrubbing {
     }
 }
 
+enum LiveTimelinePosition {
+    static func clampedDate(
+        _ proposedDate: Date,
+        liveEdge: Date,
+        bufferStartedAt: Date?
+    ) -> Date {
+        min(max(proposedDate, bufferStartedAt ?? .distantPast), liveEdge)
+    }
+}
+
 #if os(macOS)
 enum MacOSPlayerKeyboardCommand: Equatable {
     case togglePlayback
@@ -681,7 +691,7 @@ struct PlaybackView: View {
         let liveEdge = Date()
         let current = timelineSeekTargetsLiveEdge
             ? liveEdge
-            : (timelineSeekTargetDate ?? engine.livePlaybackDate(at: liveEdge))
+            : (timelineSeekTargetDate ?? liveTimelinePlaybackDate(at: liveEdge))
         let availableStart = engine.bufferStartedAt ?? liveEdge
         let target = min(max(current.addingTimeInterval(seconds), availableStart), liveEdge)
         guard abs(target.timeIntervalSince(current)) > NativeTimeshiftActionPlan.liveEdgeTolerance else {
@@ -731,7 +741,7 @@ struct PlaybackView: View {
             if targetsLiveEdge {
                 engine.returnToLive()
             } else {
-                let delta = target.timeIntervalSince(engine.livePlaybackDate())
+                let delta = target.timeIntervalSince(liveTimelinePlaybackDate())
                 if delta < -NativeTimeshiftActionPlan.liveEdgeTolerance {
                     engine.skipBackward(by: -delta)
                 } else if delta > NativeTimeshiftActionPlan.liveEdgeTolerance {
@@ -758,6 +768,14 @@ struct PlaybackView: View {
                 }
             }
         }
+    }
+
+    private func liveTimelinePlaybackDate(at liveEdge: Date = Date()) -> Date {
+        LiveTimelinePosition.clampedDate(
+            engine.livePlaybackDate(at: liveEdge),
+            liveEdge: liveEdge,
+            bufferStartedAt: engine.bufferStartedAt
+        )
     }
 
 #if os(tvOS)
@@ -1119,10 +1137,15 @@ private struct ProgrammePlaybackTimeline: View {
     }
 
     private func timeline(at liveDate: Date) -> some View {
-        let playbackDate = seekTargetsLiveEdge
+        let proposedPlaybackDate = seekTargetsLiveEdge
             ? liveDate
             : (seekTargetDate ?? pausedPlaybackDate
                 ?? liveDate.addingTimeInterval(-liveDelaySeconds))
+        let playbackDate = LiveTimelinePosition.clampedDate(
+            proposedPlaybackDate,
+            liveEdge: liveDate,
+            bufferStartedAt: bufferStartedAt
+        )
         let program = channel.programs.first { $0.start <= playbackDate && playbackDate < $0.end } ?? fallbackProgram
         let next = program.flatMap { current in
             channel.programs.first { $0.start >= current.end && $0.id != current.id }
@@ -1564,7 +1587,14 @@ private struct PlayerTabbedOverlay: View {
             .accessibilityHidden(selectedTab != tab)
     }
 
-    private var playbackDate: Date { engine.livePlaybackDate() }
+    private var playbackDate: Date {
+        let liveEdge = Date()
+        return LiveTimelinePosition.clampedDate(
+            engine.livePlaybackDate(at: liveEdge),
+            liveEdge: liveEdge,
+            bufferStartedAt: engine.bufferStartedAt
+        )
+    }
 
     private var currentProgram: GuideProgram? {
         presentation.channel.programs.first {

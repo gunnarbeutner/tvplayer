@@ -641,6 +641,64 @@ final class TimeshiftActionTests: XCTestCase {
         )
     }
 
+    func testPlaybackMarkerRejectsImplausibleForwardMediaClockDiscontinuity() {
+        var tracker = LivePlaybackPositionTracker()
+        let start = Date(timeIntervalSinceReferenceDate: 10_000)
+        tracker.pause(at: start, liveDelay: 0, bufferStartedAt: nil)
+        tracker.requestResume(
+            from: PlaybackOutputCounters(
+                displayedPictures: 100,
+                playedAudioBuffers: 100,
+                playbackTimeMilliseconds: 10_000
+            )
+        )
+
+        XCTAssertTrue(
+            tracker.observePlaybackOutput(
+                PlaybackOutputCounters(
+                    displayedPictures: 101,
+                    playedAudioBuffers: 101,
+                    playbackTimeMilliseconds: 10_500
+                ),
+                at: start.addingTimeInterval(0.5)
+            )
+        )
+        XCTAssertTrue(
+            tracker.observePlaybackOutput(
+                PlaybackOutputCounters(
+                    displayedPictures: 102,
+                    playedAudioBuffers: 102,
+                    playbackTimeMilliseconds: 6_010_500
+                ),
+                at: start.addingTimeInterval(1)
+            )
+        )
+
+        XCTAssertEqual(
+            tracker.playbackDate(
+                at: start.addingTimeInterval(1),
+                liveDelay: 0,
+                bufferStartedAt: nil
+            ),
+            start.addingTimeInterval(0.5)
+        )
+    }
+
+    func testPlaybackDateClampsCorruptFutureAnchorToLiveEdge() {
+        var tracker = LivePlaybackPositionTracker()
+        let liveEdge = Date(timeIntervalSinceReferenceDate: 10_000)
+        tracker.recoverAtLiveEdge(liveEdge.addingTimeInterval(6_000))
+
+        XCTAssertEqual(
+            tracker.playbackDate(
+                at: liveEdge,
+                liveDelay: 0,
+                bufferStartedAt: liveEdge.addingTimeInterval(-60)
+            ),
+            liveEdge
+        )
+    }
+
     func testResumeRequestKeepsMarkerAnchoredUntilOutputAdvances() {
         var tracker = LivePlaybackPositionTracker()
         let pauseTime = Date(timeIntervalSinceReferenceDate: 10_000)

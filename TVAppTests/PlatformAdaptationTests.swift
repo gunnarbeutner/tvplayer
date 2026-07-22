@@ -93,6 +93,28 @@ final class PlatformAdaptationTests: XCTestCase {
         XCTAssertEqual(PlayerNavigationPolicy.skipInterval, 10)
     }
 
+    func testLiveTimelinePositionNeverEscapesAvailableWindow() {
+        let liveEdge = Date(timeIntervalSinceReferenceDate: 20_000)
+        let bufferStart = liveEdge.addingTimeInterval(-120)
+
+        XCTAssertEqual(
+            LiveTimelinePosition.clampedDate(
+                liveEdge.addingTimeInterval(6_000),
+                liveEdge: liveEdge,
+                bufferStartedAt: bufferStart
+            ),
+            liveEdge
+        )
+        XCTAssertEqual(
+            LiveTimelinePosition.clampedDate(
+                bufferStart.addingTimeInterval(-60),
+                liveEdge: liveEdge,
+                bufferStartedAt: bufferStart
+            ),
+            bufferStart
+        )
+    }
+
 #if os(macOS)
     func testMacOSPlayerPlaybackShortcuts() {
         XCTAssertEqual(
