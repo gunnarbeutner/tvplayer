@@ -65,6 +65,34 @@ final class TVHeadendClientTests: XCTestCase {
         warmed?.close()
     }
 
+    func testHTTPAuthenticationIsRestrictedToTheConfiguredServerOrigin() {
+        let configuration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://tvheadend.test:9981")!,
+            username: "viewer",
+            password: "secret",
+            streamProfile: "pass",
+            guideCacheURL: URL(string: "http://guide.test:49382/guide.json"),
+            xmltvURL: nil
+        )
+
+        XCTAssertTrue(TVHeadendClient.isServerProtectionSpace(
+            protectionSpace(host: "TVHEADEND.TEST", port: 9981, protocol: "http"),
+            for: configuration
+        ))
+        XCTAssertFalse(TVHeadendClient.isServerProtectionSpace(
+            protectionSpace(host: "guide.test", port: 49382, protocol: "http"),
+            for: configuration
+        ))
+        XCTAssertFalse(TVHeadendClient.isServerProtectionSpace(
+            protectionSpace(host: "tvheadend.test", port: 8080, protocol: "http"),
+            for: configuration
+        ))
+        XCTAssertFalse(TVHeadendClient.isServerProtectionSpace(
+            protectionSpace(host: "tvheadend.test", port: 9981, protocol: "https"),
+            for: configuration
+        ))
+    }
+
     @MainActor
     func testPlaybackStartIntentSupersedesAndCancelsPreviousTask() {
         let intents = PlaybackStartIntentTracker()
@@ -85,6 +113,20 @@ final class TVHeadendClientTests: XCTestCase {
         XCTAssertTrue(intents.isCurrent(secondID))
         intents.finish(secondID)
         XCTAssertFalse(intents.isCurrent(secondID))
+    }
+
+    private func protectionSpace(
+        host: String,
+        port: Int,
+        protocol: String
+    ) -> URLProtectionSpace {
+        URLProtectionSpace(
+            host: host,
+            port: port,
+            protocol: `protocol`,
+            realm: nil,
+            authenticationMethod: NSURLAuthenticationMethodHTTPDigest
+        )
     }
 }
 

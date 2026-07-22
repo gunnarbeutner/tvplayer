@@ -416,6 +416,14 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
             return
         }
 
+        guard Self.isServerProtectionSpace(
+            challenge.protectionSpace,
+            for: configuration
+        ) else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+
         completionHandler(
             .useCredential,
             URLCredential(
@@ -514,6 +522,16 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
         return first.scheme?.lowercased() == second.scheme?.lowercased()
             && first.host?.lowercased() == second.host?.lowercased()
             && effectivePort(for: first) == effectivePort(for: second)
+    }
+
+    static func isServerProtectionSpace(
+        _ protectionSpace: URLProtectionSpace,
+        for configuration: TVHeadendConfiguration
+    ) -> Bool {
+        guard let baseURL = configuration.baseURL else { return false }
+        return protectionSpace.protocol?.lowercased() == baseURL.scheme?.lowercased()
+            && protectionSpace.host.lowercased() == baseURL.host?.lowercased()
+            && protectionSpace.port == effectivePort(for: baseURL)
     }
 
     private static func effectivePort(for url: URL) -> Int? {
