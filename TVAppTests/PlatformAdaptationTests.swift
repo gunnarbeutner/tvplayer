@@ -93,6 +93,89 @@ final class PlatformAdaptationTests: XCTestCase {
         XCTAssertEqual(PlayerNavigationPolicy.skipInterval, 10)
     }
 
+    func testRemoteSeekRevealsTimelineAndSeeksOnFirstPress() {
+        XCTAssertEqual(
+            PlayerRemoteSeekPolicy.plan(
+                interval: -PlayerNavigationPolicy.skipInterval,
+                chromeIsHidden: true,
+                panelIsPresented: false,
+                isRecording: false,
+                isSeekable: true
+            ),
+            PlayerRemoteSeekPlan(
+                handlesPress: true,
+                revealsTimeline: true,
+                operation: .live(-10)
+            )
+        )
+    }
+
+    func testRemoteSeekHandlesRecordingsOnFirstPress() {
+        XCTAssertEqual(
+            PlayerRemoteSeekPolicy.plan(
+                interval: PlayerNavigationPolicy.skipInterval,
+                chromeIsHidden: true,
+                panelIsPresented: false,
+                isRecording: true,
+                isSeekable: true
+            ),
+            PlayerRemoteSeekPlan(
+                handlesPress: true,
+                revealsTimeline: true,
+                operation: .recording(10)
+            )
+        )
+    }
+
+    func testRemoteSeekOnlyRevealsTimelineWhenPlaybackIsNotSeekable() {
+        XCTAssertEqual(
+            PlayerRemoteSeekPolicy.plan(
+                interval: -PlayerNavigationPolicy.skipInterval,
+                chromeIsHidden: true,
+                panelIsPresented: false,
+                isRecording: false,
+                isSeekable: false
+            ),
+            PlayerRemoteSeekPlan(
+                handlesPress: true,
+                revealsTimeline: true,
+                operation: .none
+            )
+        )
+    }
+
+    func testRemoteSeekLeavesDirectionalNavigationToOpenPanel() {
+        XCTAssertEqual(
+            PlayerRemoteSeekPolicy.plan(
+                interval: PlayerNavigationPolicy.skipInterval,
+                chromeIsHidden: false,
+                panelIsPresented: true,
+                isRecording: false,
+                isSeekable: true
+            ),
+            PlayerRemoteSeekPlan(
+                handlesPress: false,
+                revealsTimeline: false,
+                operation: .none
+            )
+        )
+    }
+
+    func testRemoteSeekPreservesHoldRepeatTiming() {
+        XCTAssertEqual(PlayerRemoteSeekPolicy.initialRepeatDelayMilliseconds, 450)
+        XCTAssertEqual(PlayerRemoteSeekPolicy.repeatIntervalMilliseconds, 180)
+    }
+
+    func testRemoteForwardSeekShowsLiveEdgeFeedbackWhenMovementIsBlocked() {
+        let feedback = PlayerRemoteSeekPolicy.boundaryFeedback(
+            for: PlayerNavigationPolicy.skipInterval
+        )
+
+        XCTAssertEqual(feedback, .liveEdge)
+        XCTAssertEqual(feedback?.label, "Live")
+        XCTAssertEqual(feedback?.accessibilityAnnouncement, "Already live")
+    }
+
     func testLiveTimelinePositionNeverEscapesAvailableWindow() {
         let liveEdge = Date(timeIntervalSinceReferenceDate: 20_000)
         let bufferStart = liveEdge.addingTimeInterval(-120)
