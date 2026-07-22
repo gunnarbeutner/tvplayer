@@ -209,26 +209,20 @@ struct ChannelsView: View {
 
     private func playFromDetails(_ channel: GuideChannel, _ program: GuideProgram?) {
         detail = nil
-        Task { @MainActor in
-            await Task.yield()
-            playback.start(
-                channel: channel,
-                program: program,
-                configuration: settings.configuration
-            )
-        }
+        playback.startAfterDetailDismissal(
+            channel: channel,
+            program: program,
+            configuration: settings.configuration
+        )
     }
 
     private func playRecordingFromDetails(_ recording: TVRecording, _ channel: GuideChannel) {
         detail = nil
-        Task { @MainActor in
-            await Task.yield()
-            playback.start(
-                recording: recording,
-                channel: channel,
-                configuration: settings.configuration
-            )
-        }
+        playback.startAfterDetailDismissal(
+            recording: recording,
+            channel: channel,
+            configuration: settings.configuration
+        )
     }
 
     private func restorePlaybackFocusIfAvailable() {

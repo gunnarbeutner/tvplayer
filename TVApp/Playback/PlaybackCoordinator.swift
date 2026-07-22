@@ -783,6 +783,28 @@ final class PlaybackCoordinator: ObservableObject {
             .livePlaybackRequest(channelID: channelID)
     }
 
+    func startAfterDetailDismissal(
+        channel: GuideChannel,
+        program: GuideProgram?,
+        configuration: TVHeadendConfiguration
+    ) {
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            self?.start(channel: channel, program: program, configuration: configuration)
+        }
+    }
+
+    func startAfterDetailDismissal(
+        recording: TVRecording,
+        channel: GuideChannel?,
+        configuration: TVHeadendConfiguration
+    ) {
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            self?.start(recording: recording, channel: channel, configuration: configuration)
+        }
+    }
+
     private func logLaunchStage(_ stage: String, id: UUID) {
         guard let startedAt = launchStartedAt[id] else { return }
         let milliseconds = Int(Date().timeIntervalSince(startedAt) * 1_000)
@@ -797,13 +819,11 @@ final class PlaybackCoordinator: ObservableObject {
 
     private static func placeholderChannel(for recording: TVRecording) -> GuideChannel {
         let name = recording.channelName
-        let words = name.split(whereSeparator: { $0.isWhitespace || $0 == "." })
-        let monogram = words.prefix(2).compactMap(\.first).map(String.init).joined().uppercased()
         return GuideChannel(
             id: recording.channelID ?? "recording-\(recording.id)",
             number: 0,
             name: name,
-            monogram: monogram.isEmpty ? "TV" : monogram,
+            monogram: GuideChannelAppearance.monogram(for: name),
             tint: .orange,
             iconURL: nil,
             programs: []

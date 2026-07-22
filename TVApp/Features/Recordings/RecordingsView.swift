@@ -99,26 +99,20 @@ struct RecordingsView: View {
 
     private func playFromDetails(_ recording: TVRecording, _ channel: GuideChannel?) {
         selectedRecording = nil
-        Task { @MainActor in
-            await Task.yield()
-            playback.start(
-                recording: recording,
-                channel: channel,
-                configuration: settings.configuration
-            )
-        }
+        playback.startAfterDetailDismissal(
+            recording: recording,
+            channel: channel,
+            configuration: settings.configuration
+        )
     }
 
     private func watchLiveFromDetails(_ channel: GuideChannel, _ program: GuideProgram?) {
         selectedRecording = nil
-        Task { @MainActor in
-            await Task.yield()
-            playback.start(
-                channel: channel,
-                program: program,
-                configuration: settings.configuration
-            )
-        }
+        playback.startAfterDetailDismissal(
+            channel: channel,
+            program: program,
+            configuration: settings.configuration
+        )
     }
 
     @ViewBuilder

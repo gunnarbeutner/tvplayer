@@ -639,18 +639,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             }
 
         case "subscriptionStart":
-            let streams = message["streams"]?.listValue?.compactMap { value -> HTSPStreamInfo? in
-                guard let stream = value.mapValue,
-                      let index = stream["index"]?.intValue,
-                      let type = stream["type"]?.stringValue
-                else { return nil }
-                return HTSPStreamInfo(
-                    index: Int(index),
-                    type: type,
-                    language: stream["language"]?.stringValue,
-                    metadata: stream["meta"]?.dataValue
-                )
-            } ?? []
+            let streams = HTSPStreamInfo.decodeList(message["streams"])
             let replacement = try MPEGTransportStreamMuxer(streams: streams)
             processLock.withLock { muxer = replacement }
             resetDeliveryQueue()

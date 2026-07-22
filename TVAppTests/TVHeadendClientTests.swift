@@ -121,6 +121,21 @@ final class TVHeadendClientTests: XCTestCase {
         XCTAssertNil(weakClient)
     }
 
+    func testTicketedPlaylistChannelsAreParsedCentrally() {
+        let channels = TVHeadendClient.playlistChannels(in: #"""
+        #EXTM3U
+        #EXTINF:-1 tvg-id="news",World News
+        http://tvheadend.test:9981/stream/channelid/42?ticket=one
+        #EXTINF:-1 tvg-id="sports",Sports HD
+        http://tvheadend.test:9981/stream/channelid/73?ticket=two
+        """#)
+
+        XCTAssertEqual(channels, [
+            TVHeadendPlaylistChannel(id: 42, name: "World News"),
+            TVHeadendPlaylistChannel(id: 73, name: "Sports HD"),
+        ])
+    }
+
     @MainActor
     func testPlaybackStartIntentSupersedesAndCancelsPreviousTask() {
         let intents = PlaybackStartIntentTracker()

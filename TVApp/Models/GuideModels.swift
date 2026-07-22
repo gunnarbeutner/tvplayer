@@ -162,6 +162,16 @@ struct GuideProgram: Identifiable, Hashable, Codable, Sendable {
 }
 
 enum GuideChannelAppearance {
+    static func monogram(for name: String, fallback: String = "TV") -> String {
+        let words = name.split(whereSeparator: { $0.isWhitespace || $0 == "." })
+        let monogram = if words.count >= 2 {
+            words.prefix(2).compactMap(\.first).map(String.init).joined().uppercased()
+        } else {
+            String(name.prefix(2)).uppercased()
+        }
+        return monogram.isEmpty ? fallback : monogram
+    }
+
     static func tint(for identifier: String) -> Color {
         let palette: [Color] = [.blue, .indigo, .purple, .pink, .red, .orange, .teal, .cyan]
         let value = identifier.unicodeScalars.reduce(0) {

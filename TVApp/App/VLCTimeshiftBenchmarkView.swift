@@ -703,13 +703,11 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
             start: now.addingTimeInterval(-12 * 60 * 60),
             end: now.addingTimeInterval(12 * 60 * 60)
         )
-        let words = channel.name.split(whereSeparator: { $0.isWhitespace || $0 == "." })
-        let monogram = words.prefix(2).compactMap(\.first).map(String.init).joined().uppercased()
         let guideChannel = GuideChannel(
             id: channelID,
             number: 0,
             name: channel.name,
-            monogram: monogram.isEmpty ? "TV" : monogram,
+            monogram: GuideChannelAppearance.monogram(for: channel.name),
             tint: .blue,
             iconURL: nil,
             programs: [program]
@@ -743,30 +741,11 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
     private func firstChannel(
         configuration: TVHeadendConfiguration
     ) async throws -> (id: UInt32, name: String) {
-        guard let baseURL = configuration.baseURL else { throw BenchmarkError.invalidPlaylist }
-        let url = baseURL
-            .appending(path: "playlist/ticket/channels")
-            .appending(queryItems: [URLQueryItem(name: "profile", value: configuration.streamProfile)])
-        let delegate = VLCTimeshiftBenchmarkAuthentication(configuration: configuration)
-        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
-        let (data, response) = try await session.data(from: url)
-        guard let response = response as? HTTPURLResponse,
-              (200..<300).contains(response.statusCode),
-              let playlist = String(data: data, encoding: .utf8)
+        guard let channel = try await TVHeadendClient(configuration: configuration)
+            .ticketedChannels()
+            .first
         else { throw BenchmarkError.invalidPlaylist }
-
-        var name = "Live channel"
-        for rawLine in playlist.split(whereSeparator: \.isNewline) {
-            let line = String(rawLine)
-            if line.hasPrefix("#EXTINF:") {
-                name = line.split(separator: ",", maxSplits: 1).last.map(String.init) ?? name
-            } else if !line.hasPrefix("#"), let streamURL = URL(string: line),
-                      let channelID = TVHeadendClient.numericChannelID(from: streamURL) {
-                return (channelID, name)
-            }
-        }
-        throw BenchmarkError.invalidPlaylist
+        return (channel.id, channel.name)
     }
 
     private func appendSummary(_ name: String, _ values: [Double]) {
@@ -880,36 +859,6 @@ private enum BenchmarkContinuityError: LocalizedError {
                 current,
                 state
             )
-        }
-    }
-}
-
-private final class VLCTimeshiftBenchmarkAuthentication: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    private let configuration: TVHeadendConfiguration
-
-    init(configuration: TVHeadendConfiguration) {
-        self.configuration = configuration
-    }
-
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-    ) {
-        let method = challenge.protectionSpace.authenticationMethod
-        if method == NSURLAuthenticationMethodHTTPDigest
-            || method == NSURLAuthenticationMethodHTTPBasic {
-            completionHandler(
-                .useCredential,
-                URLCredential(
-                    user: configuration.username,
-                    password: configuration.password,
-                    persistence: .forSession
-                )
-            )
-        } else {
-            completionHandler(.performDefaultHandling, nil)
         }
     }
 }

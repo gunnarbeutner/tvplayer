@@ -1812,33 +1812,15 @@ private final class VLCVideoContainerView: UIView {
             layer.mask = nil
             return
         }
-        leadingFadeMask.frame = bounds
-        leadingFadeMask.startPoint = CGPoint(x: 0, y: 0.5)
-        leadingFadeMask.endPoint = CGPoint(x: 1, y: 0.5)
-        leadingFadeMask.colors = [
-            UIColor.clear.cgColor,
-            UIColor.black.withAlphaComponent(0.48).cgColor,
-            UIColor.black.cgColor,
-            UIColor.black.cgColor,
-        ]
-        let width = max(1, bounds.width)
-        let visibleWidth = max(1, width - leadingFadeInset)
-        let fadeStart = min(1, max(0, leadingFadeInset / width))
-        let fadeMidpoint = min(
-            1,
-            max(fadeStart, (leadingFadeInset + visibleWidth * GuideArtworkStyle.fadeMidpoint) / width)
+        GuideArtworkStyle.applyLeadingFadeMask(
+            leadingFadeMask,
+            to: layer,
+            bounds: bounds,
+            leadingInset: leadingFadeInset,
+            clearColor: UIColor.clear.cgColor,
+            translucentColor: UIColor.black.withAlphaComponent(0.48).cgColor,
+            opaqueColor: UIColor.black.cgColor
         )
-        let fadeCompletion = min(
-            1,
-            max(fadeMidpoint, (leadingFadeInset + visibleWidth * GuideArtworkStyle.fadeCompletion) / width)
-        )
-        leadingFadeMask.locations = [
-            NSNumber(value: Double(fadeStart)),
-            NSNumber(value: Double(fadeMidpoint)),
-            NSNumber(value: Double(fadeCompletion)),
-            1,
-        ]
-        layer.mask = leadingFadeMask
     }
 
     func attachIfVisible(force: Bool = false) {
@@ -2037,33 +2019,16 @@ private final class VLCVideoContainerView: NSView {
             layer?.mask = nil
             return
         }
-        leadingFadeMask.frame = bounds
-        leadingFadeMask.startPoint = CGPoint(x: 0, y: 0.5)
-        leadingFadeMask.endPoint = CGPoint(x: 1, y: 0.5)
-        leadingFadeMask.colors = [
-            NSColor.clear.cgColor,
-            NSColor.black.withAlphaComponent(0.48).cgColor,
-            NSColor.black.cgColor,
-            NSColor.black.cgColor,
-        ]
-        let width = max(1, bounds.width)
-        let visibleWidth = max(1, width - leadingFadeInset)
-        let fadeStart = min(1, max(0, leadingFadeInset / width))
-        let fadeMidpoint = min(
-            1,
-            max(fadeStart, (leadingFadeInset + visibleWidth * GuideArtworkStyle.fadeMidpoint) / width)
+        guard let layer else { return }
+        GuideArtworkStyle.applyLeadingFadeMask(
+            leadingFadeMask,
+            to: layer,
+            bounds: bounds,
+            leadingInset: leadingFadeInset,
+            clearColor: NSColor.clear.cgColor,
+            translucentColor: NSColor.black.withAlphaComponent(0.48).cgColor,
+            opaqueColor: NSColor.black.cgColor
         )
-        let fadeCompletion = min(
-            1,
-            max(fadeMidpoint, (leadingFadeInset + visibleWidth * GuideArtworkStyle.fadeCompletion) / width)
-        )
-        leadingFadeMask.locations = [
-            NSNumber(value: Double(fadeStart)),
-            NSNumber(value: Double(fadeMidpoint)),
-            NSNumber(value: Double(fadeCompletion)),
-            1,
-        ]
-        layer?.mask = leadingFadeMask
     }
 
     private func attachIfVisible(force: Bool = false) {

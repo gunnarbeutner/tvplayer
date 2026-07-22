@@ -191,29 +191,15 @@ final class SampleBufferHostView: UIView {
             layer.mask = nil
             return
         }
-        leadingFadeMask.frame = bounds
-        leadingFadeMask.startPoint = CGPoint(x: 0, y: 0.5)
-        leadingFadeMask.endPoint = CGPoint(x: 1, y: 0.5)
-        leadingFadeMask.colors = [
-            UIColor.clear.cgColor,
-            UIColor.black.withAlphaComponent(0.48).cgColor,
-            UIColor.black.cgColor,
-            UIColor.black.cgColor,
-        ]
-        let width = max(1, bounds.width)
-        let visibleWidth = max(1, width - leadingFadeInset)
-        let start = min(1, max(0, leadingFadeInset / width))
-        let midpoint = min(1, max(start,
-            (leadingFadeInset + visibleWidth * GuideArtworkStyle.fadeMidpoint) / width))
-        let completion = min(1, max(midpoint,
-            (leadingFadeInset + visibleWidth * GuideArtworkStyle.fadeCompletion) / width))
-        leadingFadeMask.locations = [
-            NSNumber(value: Double(start)),
-            NSNumber(value: Double(midpoint)),
-            NSNumber(value: Double(completion)),
-            1,
-        ]
-        layer.mask = leadingFadeMask
+        GuideArtworkStyle.applyLeadingFadeMask(
+            leadingFadeMask,
+            to: layer,
+            bounds: bounds,
+            leadingInset: leadingFadeInset,
+            clearColor: UIColor.clear.cgColor,
+            translucentColor: UIColor.black.withAlphaComponent(0.48).cgColor,
+            opaqueColor: UIColor.black.cgColor
+        )
     }
 }
 #endif

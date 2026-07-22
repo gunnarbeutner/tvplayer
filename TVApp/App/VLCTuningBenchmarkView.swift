@@ -155,10 +155,7 @@ final class VLCTuningBenchmarkModel: ObservableObject {
 
     let engine = VLCPlaybackEngine()
 
-    private struct Channel {
-        let id: UInt32
-        let name: String
-    }
+    private typealias Channel = TVHeadendPlaylistChannel
 
     private let startedAt = ProcessInfo.processInfo.systemUptime
     private var discovery: TVHeadendDiscovery?
@@ -403,32 +400,7 @@ final class VLCTuningBenchmarkModel: ObservableObject {
     }
 
     private func loadChannels(configuration: TVHeadendConfiguration) async throws -> [Channel] {
-        guard let baseURL = configuration.baseURL else { throw TuningError.invalidPlaylist }
-        let url = baseURL
-            .appending(path: "playlist/ticket/channels")
-            .appending(queryItems: [URLQueryItem(name: "profile", value: configuration.streamProfile)])
-        let delegate = VLCTuningBenchmarkAuthentication(configuration: configuration)
-        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
-        let (data, response) = try await session.data(from: url)
-        guard let response = response as? HTTPURLResponse,
-              (200..<300).contains(response.statusCode),
-              let playlist = String(data: data, encoding: .utf8)
-        else { throw TuningError.invalidPlaylist }
-
-        var result: [Channel] = []
-        var name = "Live channel"
-        for rawLine in playlist.split(whereSeparator: \.isNewline) {
-            let line = String(rawLine)
-            if line.hasPrefix("#EXTINF:") {
-                name = line.split(separator: ",", maxSplits: 1).last.map(String.init) ?? name
-            } else if !line.hasPrefix("#"),
-                      let streamURL = URL(string: line),
-                      let channelID = TVHeadendClient.numericChannelID(from: streamURL) {
-                result.append(Channel(id: channelID, name: name))
-            }
-        }
-        return result
+        try await TVHeadendClient(configuration: configuration).ticketedChannels()
     }
 
     private var requestedAttemptCount: Int {
@@ -487,44 +459,12 @@ final class VLCTuningBenchmarkModel: ObservableObject {
     }
 
     private enum TuningError: LocalizedError {
-        case invalidPlaylist
         case noChannels
 
         var errorDescription: String? {
             switch self {
-            case .invalidPlaylist: "TVHeadend did not return a usable channel playlist."
             case .noChannels: "TVHeadend returned no numeric channel IDs."
             }
-        }
-    }
-}
-
-private final class VLCTuningBenchmarkAuthentication: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    private let configuration: TVHeadendConfiguration
-
-    init(configuration: TVHeadendConfiguration) {
-        self.configuration = configuration
-    }
-
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-    ) {
-        let method = challenge.protectionSpace.authenticationMethod
-        if method == NSURLAuthenticationMethodHTTPDigest
-            || method == NSURLAuthenticationMethodHTTPBasic {
-            completionHandler(
-                .useCredential,
-                URLCredential(
-                    user: configuration.username,
-                    password: configuration.password,
-                    persistence: .forSession
-                )
-            )
-        } else {
-            completionHandler(.performDefaultHandling, nil)
         }
     }
 }

@@ -1,6 +1,11 @@
 @preconcurrency import Foundation
 import SwiftUI
 
+struct TVHeadendPlaylistChannel: Equatable, Sendable {
+    let id: UInt32
+    let name: String
+}
+
 final class TVHeadendClient: TVProvider, @unchecked Sendable {
     private let configuration: TVHeadendConfiguration
     private let serverCapabilitiesCache = TVHeadendServerCapabilitiesCache()
@@ -117,7 +122,7 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
                     id: channel.uuid,
                     number: channel.number.map { Int($0.rounded()) } ?? offset + 1,
                     name: channel.name,
-                    monogram: Self.monogram(for: channel.name),
+                    monogram: GuideChannelAppearance.monogram(for: channel.name),
                     tint: GuideChannelAppearance.tint(for: channel.uuid),
                     iconURL: Self.iconURL(for: channel, baseURL: baseURL),
                     programs: fillPastGap
@@ -164,6 +169,19 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
         guard let streamURL = streamURLs[channelID]
         else { throw TVProviderError.channelNotInPlaylist }
         return streamURL
+    }
+
+    func ticketedChannels(profile: String? = nil) async throws -> [TVHeadendPlaylistChannel] {
+        let selectedProfile = profile ?? configuration.streamProfile
+        let playlistURL = try endpointURL(
+            path: "/playlist/ticket/channels",
+            queryItems: [URLQueryItem(name: "profile", value: selectedProfile)]
+        )
+        let data = try await fetchData(at: playlistURL)
+        guard let playlist = String(data: data, encoding: .utf8) else {
+            throw TVProviderError.invalidResponse
+        }
+        return Self.playlistChannels(in: playlist)
     }
 
     func streamProfiles() async throws -> [TVHeadendStreamProfile] {
@@ -654,6 +672,24 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
         return result
     }
 
+    static func playlistChannels(in playlist: String) -> [TVHeadendPlaylistChannel] {
+        var name = "Live channel"
+        var result: [TVHeadendPlaylistChannel] = []
+
+        for rawLine in playlist.split(whereSeparator: \.isNewline) {
+            let line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("#EXTINF:") {
+                name = line.split(separator: ",", maxSplits: 1).last
+                    .map(String.init) ?? name
+            } else if !line.hasPrefix("#"),
+                      let streamURL = URL(string: line),
+                      let channelID = numericChannelID(from: streamURL) {
+                result.append(TVHeadendPlaylistChannel(id: channelID, name: name))
+            }
+        }
+        return result
+    }
+
     private static func firstMediaURL(in data: Data) -> URL? {
         guard let playlist = String(data: data, encoding: .utf8) else { return nil }
         for rawLine in playlist.split(whereSeparator: \.isNewline) {
@@ -809,14 +845,6 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
             end: gapEnd
         )
         return [placeholder] + sorted
-    }
-
-    private static func monogram(for name: String) -> String {
-        let words = name.split(whereSeparator: { $0.isWhitespace || $0 == "." })
-        if words.count >= 2 {
-            return words.prefix(2).compactMap(\.first).map(String.init).joined().uppercased()
-        }
-        return String(name.prefix(2)).uppercased()
     }
 
     private static func iconURL(for channel: TVHeadendChannel, baseURL: URL?) -> URL? {

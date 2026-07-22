@@ -1,3 +1,4 @@
+import QuartzCore
 import SwiftUI
 
 enum AppTheme {
@@ -33,6 +34,39 @@ enum GuideArtworkStyle {
 
     static func backgroundClearWidth(for artworkWidth: CGFloat) -> CGFloat {
         artworkWidth * (1 - fadeCompletion)
+    }
+
+    static func applyLeadingFadeMask(
+        _ mask: CAGradientLayer,
+        to layer: CALayer,
+        bounds: CGRect,
+        leadingInset: CGFloat,
+        clearColor: CGColor,
+        translucentColor: CGColor,
+        opaqueColor: CGColor
+    ) {
+        mask.frame = bounds
+        mask.startPoint = CGPoint(x: 0, y: 0.5)
+        mask.endPoint = CGPoint(x: 1, y: 0.5)
+        mask.colors = [clearColor, translucentColor, opaqueColor, opaqueColor]
+        let width = max(1, bounds.width)
+        let visibleWidth = max(1, width - leadingInset)
+        let start = min(1, max(0, leadingInset / width))
+        let midpoint = min(1, max(
+            start,
+            (leadingInset + visibleWidth * fadeMidpoint) / width
+        ))
+        let completion = min(1, max(
+            midpoint,
+            (leadingInset + visibleWidth * fadeCompletion) / width
+        ))
+        mask.locations = [
+            NSNumber(value: Double(start)),
+            NSNumber(value: Double(midpoint)),
+            NSNumber(value: Double(completion)),
+            1,
+        ]
+        layer.mask = mask
     }
 }
 

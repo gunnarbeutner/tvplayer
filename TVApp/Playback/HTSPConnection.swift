@@ -235,6 +235,21 @@ struct HTSPStreamInfo: Equatable, Sendable {
     let type: String
     let language: String?
     let metadata: Data?
+
+    static func decodeList(_ value: HTSPValue?) -> [HTSPStreamInfo] {
+        value?.listValue?.compactMap { value in
+            guard let stream = value.mapValue,
+                  let index = stream["index"]?.intValue,
+                  let type = stream["type"]?.stringValue
+            else { return nil }
+            return HTSPStreamInfo(
+                index: Int(index),
+                type: type,
+                language: stream["language"]?.stringValue,
+                metadata: stream["meta"]?.dataValue
+            )
+        } ?? []
+    }
 }
 
 protocol HTSPConnectionTransport: AnyObject, Sendable {
@@ -470,18 +485,7 @@ final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
                 )
             }
             guard message["method"]?.stringValue == "subscriptionStart" else { continue }
-            let streams = message["streams"]?.listValue?.compactMap { value -> HTSPStreamInfo? in
-                guard let stream = value.mapValue,
-                      let index = stream["index"]?.intValue,
-                      let type = stream["type"]?.stringValue
-                else { return nil }
-                return HTSPStreamInfo(
-                    index: Int(index),
-                    type: type,
-                    language: stream["language"]?.stringValue,
-                    metadata: stream["meta"]?.dataValue
-                )
-            } ?? []
+            let streams = HTSPStreamInfo.decodeList(message["streams"])
             return (period, streams)
         }
     }
