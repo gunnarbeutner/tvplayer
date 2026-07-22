@@ -3,6 +3,56 @@ import XCTest
 @testable import TVApp
 
 final class HTSPTimeshiftTests: XCTestCase {
+    private static var candidateConfiguration: TVHeadendConfiguration {
+        TVHeadendConfiguration(
+            baseURL: URL(string: "http://tvheadend.local:9981"),
+            username: "viewer",
+            password: "secret",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil
+        )
+    }
+
+    private static var alignedCandidateReads: [ScriptedHTSPRead] {
+        [
+            .message([
+                "method": .string("subscriptionStart"),
+                "streams": .list([
+                    .map(["index": .int(1), "type": .string("H264")]),
+                    .map([
+                        "index": .int(2),
+                        "type": .string("AAC"),
+                        "language": .string("eng"),
+                    ]),
+                ]),
+            ]),
+            .message([
+                "method": .string("muxpkt"),
+                "stream": .int(1),
+                "frametype": .int(73),
+                "pts": .int(1_000_000),
+                "dts": .int(1_000_000),
+                "payload": .data(Data([0, 0, 0, 1, 0x65, 0x88, 0x84])),
+            ]),
+            .message([
+                "method": .string("muxpkt"),
+                "stream": .int(1),
+                "frametype": .int(80),
+                "pts": .int(1_500_000),
+                "dts": .int(1_500_000),
+                "payload": .data(Data([0, 0, 0, 1, 0x41, 0x9a])),
+            ]),
+            .message([
+                "method": .string("muxpkt"),
+                "stream": .int(2),
+                "pts": .int(1_480_000),
+                "duration": .int(20_000),
+                "payload": .data(Data([0x11, 0x22, 0x33])),
+            ]),
+        ]
+    }
+
     func testHTSPMessageCodecRoundTripsProtocolValues() throws {
         let message: [String: HTSPValue] = [
             "method": .string("subscriptionSkip"),
@@ -889,10 +939,15 @@ final class HTSPTimeshiftTests: XCTestCase {
     }
 
     func testNativeSubscriptionRequestsKodiSizedQueueAndNormalizedTimestamps() {
-        let fields = HTSPConnection.subscriptionFields(channelID: 42, profile: "pass")
+        let fields = HTSPConnection.subscriptionFields(
+            channelID: 42,
+            profile: "pass",
+            weight: 100
+        )
 
         XCTAssertEqual(fields["subscriptionId"], .int(1))
         XCTAssertEqual(fields["channelId"], .int(42))
+        XCTAssertEqual(fields["weight"], .int(100))
         XCTAssertEqual(fields["timeshiftPeriod"], .int(Int64(UInt32.max)))
         XCTAssertEqual(fields["normts"], .int(1))
         XCTAssertEqual(fields["queueDepth"], .int(10_000_000))
@@ -966,6 +1021,122 @@ final class HTSPTimeshiftTests: XCTestCase {
         ))
     }
 
+    func testLiveStreamHealthPublishesCurrentTimestampAlignedInitialTuneQuality() async throws {
+        let connection = ScriptedHTSPConnection(
+            streams: [
+                HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil),
+                HTSPStreamInfo(index: 2, type: "AAC", language: "eng", metadata: nil),
+            ],
+            reads: [
+                .message([
+                    "method": .string("muxpkt"),
+                    "stream": .int(1),
+                    "frametype": .int(73),
+                    "pts": .int(2_200_000),
+                    "dts": .int(1_000_000),
+                    "payload": .data(Data([0, 0, 0, 1, 0x65])),
+                ]),
+                .message([
+                    "method": .string("muxpkt"),
+                    "stream": .int(1),
+                    "frametype": .int(80),
+                    "pts": .int(2_900_000),
+                    "dts": .int(1_700_000),
+                    "payload": .data(Data([0, 0, 0, 1, 0x41])),
+                ]),
+                .message([
+                    "method": .string("muxpkt"),
+                    "stream": .int(2),
+                    "pts": .int(1_680_000),
+                    "duration": .int(20_000),
+                    "payload": .data(Data([0x11, 0x22])),
+                ]),
+            ]
+        )
+        let configuration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://tvheadend.local:9981"),
+            username: "viewer",
+            password: "secret",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil
+        )
+        let policy = NativeTimeshiftTuningPolicy(initialHorizonMilliseconds: 700)
+        let stream = try await HTSPLiveInputStream.connect(
+            configuration: configuration,
+            channelID: 42,
+            profile: "pass",
+            tuningPolicy: policy,
+            connectionFactory: { connection }
+        )
+        defer { stream.close() }
+        let stagingGeneration = stream.healthSnapshot.initialTuneStagingGeneration
+        XCTAssertGreaterThan(stagingGeneration, 0)
+        XCTAssertEqual(stream.healthSnapshot.initialTuneStagingQuality, .pending)
+
+        stream.open()
+        for _ in 0..<100
+        where stream.healthSnapshot.initialTuneStagingQuality == .pending {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        let health = stream.healthSnapshot
+        XCTAssertEqual(
+            health.initialTuneStagingQuality,
+            .timestampAligned(horizonMicroseconds: 700_000)
+        )
+        XCTAssertEqual(health.initialTuneStagingGeneration, stagingGeneration)
+    }
+
+    func testLiveStreamHealthMarksBoundedInitialTuneFallback() async throws {
+        let connection = ScriptedHTSPConnection(
+            streams: [
+                HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil),
+                HTSPStreamInfo(index: 2, type: "AAC", language: "eng", metadata: nil),
+            ],
+            reads: [
+                .message([
+                    "method": .string("muxpkt"),
+                    "stream": .int(1),
+                    "frametype": .int(73),
+                    "payload": .data(Data([0, 0, 0, 1, 0x65])),
+                ]),
+                .message([
+                    "method": .string("muxpkt"),
+                    "stream": .int(2),
+                    "payload": .data(Data([0x11, 0x22])),
+                ]),
+            ]
+        )
+        let configuration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://tvheadend.local:9981"),
+            username: "viewer",
+            password: "secret",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil
+        )
+        let stream = try await HTSPLiveInputStream.connect(
+            configuration: configuration,
+            channelID: 42,
+            profile: "pass",
+            tuningPolicy: NativeTimeshiftTuningPolicy(initialStageTimeout: 0),
+            connectionFactory: { connection }
+        )
+        defer { stream.close() }
+        let stagingGeneration = stream.healthSnapshot.initialTuneStagingGeneration
+
+        stream.open()
+        for _ in 0..<100
+        where stream.healthSnapshot.initialTuneStagingQuality == .pending {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        let health = stream.healthSnapshot
+        XCTAssertEqual(health.initialTuneStagingQuality, .fallback)
+        XCTAssertEqual(health.initialTuneStagingGeneration, stagingGeneration)
+    }
+
     func testDroppedSubscriptionReconnectsWithoutClosingTheInputStream() async throws {
         let streams = [
             HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil),
@@ -1030,8 +1201,294 @@ final class HTSPTimeshiftTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertTrue(second.requestedSpeeds.contains(0))
+        XCTAssertEqual(first.subscribedWeights, [100])
+        XCTAssertEqual(second.subscribedWeights, [100])
         XCTAssertEqual(factory.connectionCount, 2)
         stream.close()
+    }
+
+    func testSubscriptionWeightChangeUsesSequencedSubscriptionRPC() async throws {
+        let connection = ScriptedHTSPConnection(
+            streams: [
+                HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil),
+            ],
+            reads: []
+        )
+        let configuration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://tvheadend.local:9981"),
+            username: "viewer",
+            password: "secret",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil
+        )
+        let stream = try await HTSPLiveInputStream.connect(
+            configuration: configuration,
+            channelID: 42,
+            profile: "pass",
+            connectionFactory: { connection }
+        )
+        let changed = expectation(description: "subscription weight changed")
+
+        stream.open()
+        stream.changeSubscriptionWeight(to: 100) { result in
+            if case let .failure(error) = result {
+                XCTFail("Weight change failed: \(error.localizedDescription)")
+            }
+            changed.fulfill()
+        }
+        for _ in 0..<100 where connection.requestedWeightChanges != [100] {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        connection.enqueue(.message(["seq": .int(1)]))
+
+        await fulfillment(of: [changed], timeout: 2)
+        XCTAssertEqual(connection.subscribedWeights, [100])
+        XCTAssertEqual(connection.requestedWeightChanges, [100])
+        XCTAssertEqual(connection.weightChangeIncludesSubscriptionID, [true])
+        stream.close()
+    }
+
+    func testCandidatePromotionRaisesWeightBeforePublishingBufferedOutput() async throws {
+        let connection = ScriptedHTSPConnection(
+            streams: [
+                HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil),
+                HTSPStreamInfo(index: 2, type: "AAC", language: "eng", metadata: nil),
+            ],
+            reads: Self.alignedCandidateReads
+        )
+        let configuration = Self.candidateConfiguration
+        let stream = try await HTSPLiveInputStream.connectCandidate(
+            configuration: configuration,
+            channelID: 42,
+            profile: "pass",
+            connectionFactory: { connection }
+        )
+        defer { stream.close() }
+
+        for _ in 0..<100 where !stream.candidateIsReady {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(stream.candidateIsReady)
+        XCTAssertEqual(connection.subscribedWeights, [1])
+        XCTAssertEqual(stream.queuedByteCount, 0)
+
+        let promotionTask = Task { try await stream.promoteCandidate() }
+        for _ in 0..<100 where connection.requestedWeightChanges != [100] {
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+
+        XCTAssertEqual(connection.requestedWeightChanges, [100])
+        XCTAssertEqual(connection.weightChangeIncludesSubscriptionID, [true])
+        XCTAssertEqual(
+            stream.queuedByteCount,
+            0,
+            "Staged bytes must remain hidden until TVHeadend acknowledges foreground priority."
+        )
+
+        connection.enqueue(.message(["seq": .int(1)]))
+        let promotion = try await promotionTask.value
+
+        XCTAssertTrue(promotion.usedAlignedWindow)
+        XCTAssertGreaterThan(promotion.payloadByteCount, 0)
+        let queuedByteCount = Int(stream.queuedByteCount)
+        XCTAssertGreaterThan(queuedByteCount, 0)
+
+        var bytes = [UInt8](repeating: 0, count: queuedByteCount)
+        let readCount = bytes.withUnsafeMutableBufferPointer {
+            stream.read($0.baseAddress!, maxLength: $0.count)
+        }
+        XCTAssertEqual(readCount, queuedByteCount)
+        XCTAssertEqual(readCount % 188, 0)
+        XCTAssertEqual(bytes.first, 0x47)
+    }
+
+    func testCandidatePoolOnlyConsumesAnExactMatchAndCancellationClosesIt() async throws {
+        let connection = ScriptedHTSPConnection(
+            streams: [
+                HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil),
+            ],
+            reads: []
+        )
+        let expected = HTSPLiveCandidateDescriptor(
+            configuration: Self.candidateConfiguration,
+            channelID: 42,
+            profile: "pass"
+        )
+        let mismatch = HTSPLiveCandidateDescriptor(
+            configuration: Self.candidateConfiguration,
+            channelID: 43,
+            profile: "pass"
+        )
+        let pool = HTSPLiveCandidatePool { descriptor in
+            try await HTSPLiveInputStream.connectCandidate(
+                configuration: descriptor.configuration,
+                channelID: descriptor.channelID,
+                profile: descriptor.profile,
+                tuningPolicy: descriptor.tuningPolicy,
+                connectionFactory: { connection }
+            )
+        }
+
+        await pool.stage(expected)
+        for _ in 0..<100 where connection.subscribedWeights != [1] {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(connection.subscribedWeights, [1])
+        let containsExpected = await pool.contains(expected)
+        XCTAssertTrue(containsExpected)
+
+        let mismatchedClaim = try await pool.take(matching: mismatch)
+        XCTAssertNil(mismatchedClaim)
+        let stillContainsExpected = await pool.contains(expected)
+        XCTAssertTrue(stillContainsExpected)
+
+        await pool.cancel()
+        for _ in 0..<100 where !connection.isClosed {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(connection.isClosed)
+        let containsAfterCancellation = await pool.contains(expected)
+        XCTAssertFalse(containsAfterCancellation)
+    }
+
+    func testCandidatePoolIgnoresCancellationFromSupersededGeneration() async throws {
+        let first = ScriptedHTSPConnection(
+            streams: [HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil)],
+            reads: []
+        )
+        let second = ScriptedHTSPConnection(
+            streams: [HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil)],
+            reads: []
+        )
+        let factory = ScriptedHTSPConnectionFactory([first, second])
+        let firstDescriptor = HTSPLiveCandidateDescriptor(
+            configuration: Self.candidateConfiguration,
+            channelID: 42,
+            profile: "pass"
+        )
+        let secondDescriptor = HTSPLiveCandidateDescriptor(
+            configuration: Self.candidateConfiguration,
+            channelID: 43,
+            profile: "pass"
+        )
+        let pool = HTSPLiveCandidatePool { descriptor in
+            try await HTSPLiveInputStream.connectCandidate(
+                configuration: descriptor.configuration,
+                channelID: descriptor.channelID,
+                profile: descriptor.profile,
+                tuningPolicy: descriptor.tuningPolicy,
+                connectionFactory: { try factory.makeConnection() }
+            )
+        }
+        let firstGeneration = UUID()
+        let secondGeneration = UUID()
+
+        await pool.stage(firstDescriptor, generation: firstGeneration)
+        for _ in 0..<100 where first.subscribedWeights != [1] {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        await pool.stage(secondDescriptor, generation: secondGeneration)
+        for _ in 0..<100 where second.subscribedWeights != [1] {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        await pool.cancel(generation: firstGeneration)
+
+        let containsSecond = await pool.contains(secondDescriptor)
+        XCTAssertTrue(containsSecond)
+        XCTAssertFalse(second.isClosed)
+
+        await pool.cancel(generation: secondGeneration)
+        for _ in 0..<100 where !second.isClosed {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(second.isClosed)
+    }
+
+    func testCandidatePoolCancellationWhileTakingClosesLateStream() async throws {
+        let connection = ScriptedHTSPConnection(
+            streams: [HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil)],
+            reads: []
+        )
+        let descriptor = HTSPLiveCandidateDescriptor(
+            configuration: Self.candidateConfiguration,
+            channelID: 42,
+            profile: "pass"
+        )
+        let pool = HTSPLiveCandidatePool { descriptor in
+            // Model a connector that finishes despite cancellation, as a
+            // blocking socket handshake can do in production.
+            try? await Task.sleep(for: .milliseconds(100))
+            return try await HTSPLiveInputStream.connectCandidate(
+                configuration: descriptor.configuration,
+                channelID: descriptor.channelID,
+                profile: descriptor.profile,
+                tuningPolicy: descriptor.tuningPolicy,
+                connectionFactory: { connection }
+            )
+        }
+
+        await pool.stage(descriptor, generation: UUID())
+        let take = Task { try await pool.take(matching: descriptor) }
+        try? await Task.sleep(for: .milliseconds(10))
+        take.cancel()
+
+        do {
+            _ = try await take.value
+            XCTFail("A cancelled candidate claim must not succeed.")
+        } catch is CancellationError {
+            // Expected.
+        }
+        for _ in 0..<100 where !connection.isClosed {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(connection.isClosed)
+        let containsAfterCancelledTake = await pool.contains(descriptor)
+        XCTAssertFalse(containsAfterCancelledTake)
+    }
+
+    func testCandidatePoolRestagesSameDescriptorAfterConnectedStreamFails() async throws {
+        let failed = ScriptedHTSPConnection(
+            streams: [HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil)],
+            reads: [.failure(.disconnected)]
+        )
+        let replacement = ScriptedHTSPConnection(
+            streams: [HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil)],
+            reads: []
+        )
+        let factory = ScriptedHTSPConnectionFactory([failed, replacement])
+        let descriptor = HTSPLiveCandidateDescriptor(
+            configuration: Self.candidateConfiguration,
+            channelID: 42,
+            profile: "pass"
+        )
+        let pool = HTSPLiveCandidatePool { descriptor in
+            try await HTSPLiveInputStream.connectCandidate(
+                configuration: descriptor.configuration,
+                channelID: descriptor.channelID,
+                profile: descriptor.profile,
+                tuningPolicy: descriptor.tuningPolicy,
+                connectionFactory: { try factory.makeConnection() }
+            )
+        }
+
+        await pool.stage(descriptor)
+        for _ in 0..<100 where !failed.isClosed {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(failed.isClosed)
+        let containsFailedCandidate = await pool.contains(descriptor)
+        XCTAssertTrue(containsFailedCandidate)
+
+        await pool.stage(descriptor)
+        for _ in 0..<100 where replacement.subscribedWeights != [1] {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        XCTAssertEqual(factory.connectionCount, 2)
+        XCTAssertEqual(replacement.subscribedWeights, [1])
+        await pool.cancel()
     }
 
     func testPauseRPCAcknowledgementReleasesResumeWithoutSpeedNotification() async throws {
@@ -1199,6 +1656,9 @@ private final class ScriptedHTSPConnection: HTSPConnectionTransport, @unchecked 
     private var nextSequence: Int64 = 1
     private var speeds: [Int32] = []
     private var methods: [String] = []
+    private var subscribeWeights: [UInt32] = []
+    private var changedWeights: [UInt32] = []
+    private var weightChangeSubscriptionIDFlags: [Bool] = []
 
     init(streams: [HTSPStreamInfo], reads: [ScriptedHTSPRead]) {
         self.streams = streams
@@ -1213,10 +1673,31 @@ private final class ScriptedHTSPConnection: HTSPConnectionTransport, @unchecked 
         condition.withLock { methods }
     }
 
+    var subscribedWeights: [UInt32] {
+        condition.withLock { subscribeWeights }
+    }
+
+    var requestedWeightChanges: [UInt32] {
+        condition.withLock { changedWeights }
+    }
+
+    var weightChangeIncludesSubscriptionID: [Bool] {
+        condition.withLock { weightChangeSubscriptionIDFlags }
+    }
+
+    var isClosed: Bool {
+        condition.withLock { closed }
+    }
+
     func handshake(username: String, password: String) throws {}
 
-    func subscribe(channelID: UInt32, profile: String) throws -> (Int64, [HTSPStreamInfo]) {
-        (Int64(UInt32.max), streams)
+    func subscribe(
+        channelID: UInt32,
+        profile: String,
+        weight: UInt32
+    ) throws -> (Int64, [HTSPStreamInfo]) {
+        condition.withLock { subscribeWeights.append(weight) }
+        return (Int64(UInt32.max), streams)
     }
 
     func reserveSequence() -> Int64 {
@@ -1236,6 +1717,11 @@ private final class ScriptedHTSPConnection: HTSPConnectionTransport, @unchecked 
             methods.append(method)
             if method == "subscriptionSpeed", let speed = fields["speed"]?.intValue {
                 speeds.append(Int32(clamping: speed))
+            }
+            if method == "subscriptionChangeWeight",
+               let weight = fields["weight"]?.intValue {
+                changedWeights.append(UInt32(clamping: weight))
+                weightChangeSubscriptionIDFlags.append(includesSubscriptionID)
             }
         }
     }

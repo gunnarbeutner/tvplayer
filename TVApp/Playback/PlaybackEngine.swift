@@ -130,9 +130,73 @@ enum PlaybackRequestKind: Equatable {
     }
 }
 
+struct NativeTimeshiftTuningPolicy: Equatable, Sendable {
+    static let minimumAlignedHorizonMilliseconds = 500
+
+    let vlcCacheMilliseconds: Int
+    let initialHorizonMilliseconds: Int
+    let postSeekReserveMilliseconds: Int
+    let alignedRevealDuration: TimeInterval
+    let fallbackRevealDuration: TimeInterval
+    let revealPollInterval: TimeInterval
+    let initialStageTimeout: TimeInterval
+
+    init(
+        vlcCacheMilliseconds: Int = 1_500,
+        initialHorizonMilliseconds: Int = 500,
+        postSeekReserveMilliseconds: Int = 1_500,
+        alignedRevealDuration: TimeInterval = 0.5,
+        fallbackRevealDuration: TimeInterval = 0.75,
+        revealPollInterval: TimeInterval = 0.05,
+        initialStageTimeout: TimeInterval = 2.5
+    ) {
+        self.vlcCacheMilliseconds = max(0, vlcCacheMilliseconds)
+        self.initialHorizonMilliseconds = max(
+            Self.minimumAlignedHorizonMilliseconds,
+            initialHorizonMilliseconds
+        )
+        self.postSeekReserveMilliseconds = max(
+            Self.minimumAlignedHorizonMilliseconds,
+            postSeekReserveMilliseconds
+        )
+        let sanitizedAlignedRevealDuration = max(0, alignedRevealDuration)
+        self.alignedRevealDuration = sanitizedAlignedRevealDuration
+        self.fallbackRevealDuration = max(
+            sanitizedAlignedRevealDuration,
+            fallbackRevealDuration
+        )
+        self.revealPollInterval = max(0.01, revealPollInterval)
+        self.initialStageTimeout = max(0, initialStageTimeout)
+    }
+
+    func revealDuration(
+        for quality: HTSPInitialTuneStagingQuality,
+        generation: UInt64,
+        currentGeneration: UInt64
+    ) -> TimeInterval {
+        guard generation == currentGeneration,
+              case let .timestampAligned(horizonMicroseconds) = quality,
+              horizonMicroseconds
+                >= Int64(Self.minimumAlignedHorizonMilliseconds) * 1_000
+        else { return fallbackRevealDuration }
+        return alignedRevealDuration
+    }
+}
+
 struct HTSPPlaybackConfiguration: Equatable, Sendable {
     let configuration: TVHeadendConfiguration
     let channelID: UInt32
+    let tuningPolicy: NativeTimeshiftTuningPolicy
+
+    init(
+        configuration: TVHeadendConfiguration,
+        channelID: UInt32,
+        tuningPolicy: NativeTimeshiftTuningPolicy = NativeTimeshiftTuningPolicy()
+    ) {
+        self.configuration = configuration
+        self.channelID = channelID
+        self.tuningPolicy = tuningPolicy
+    }
 }
 
 enum LivePlaybackMode: Equatable, Sendable {
@@ -155,6 +219,14 @@ struct PlaybackTechnicalDetail: Identifiable, Equatable {
     let value: String
 
     var id: String { label }
+}
+
+struct NativeLiveCandidateMetrics: Equatable, Sendable {
+    let usedAlignedWindow: Bool
+    let stagedDuration: TimeInterval
+    let promotionDuration: TimeInterval
+    let readyAge: TimeInterval?
+    let payloadByteCount: Int
 }
 
 @MainActor
@@ -195,6 +267,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     @Published private(set) var timeshiftNavigationDebugState = "idle"
     @Published private(set) var nativeTimeshiftRecoveryCount = 0
     @Published private(set) var lastNativePipelineDiagnostic: String?
+    private(set) var lastNativeCandidateMetrics: NativeLiveCandidateMetrics?
     private(set) var playbackOutputSnapshot = PlaybackOutputCounters(
         displayedPictures: 0,
         playedAudioBuffers: 0
@@ -335,19 +408,46 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         nativeTimeshiftActions = nil
         nativeTimeshiftSessionID = nil
         activeLivePlaybackMode = nil
+        lastNativeCandidateMetrics = nil
 
         let media: VLCMedia
+        var mediaCachingMilliseconds = request.networkCachingMilliseconds
         switch request.kind {
         case let .live(mode):
             switch mode {
             case let .nativeTimeshift(htsp):
                 do {
-                    let stream = try await HTSPLiveInputStream.connect(
+                    let descriptor = HTSPLiveCandidateDescriptor(
                         configuration: htsp.configuration,
                         channelID: htsp.channelID,
                         profile: request.profile,
-                        vlcCacheMilliseconds: request.networkCachingMilliseconds
+                        tuningPolicy: htsp.tuningPolicy
                     )
+                    let candidate = try await HTSPLiveCandidatePool.shared.take(
+                        matching: descriptor
+                    )
+                    let stream: HTSPLiveInputStream
+                    if let candidate {
+                        stream = candidate.stream
+                        lastNativeCandidateMetrics = NativeLiveCandidateMetrics(
+                            usedAlignedWindow: candidate.promotion.usedAlignedWindow,
+                            stagedDuration: candidate.stagedDuration,
+                            promotionDuration: candidate.promotionDuration,
+                            readyAge: candidate.promotion.readyAge,
+                            payloadByteCount: candidate.promotion.payloadByteCount
+                        )
+                    } else {
+                        // A single standby slot may contain the prediction for
+                        // the opposite surf direction. Do not leave it using a
+                        // tuner while this cold miss becomes foreground.
+                        await HTSPLiveCandidatePool.shared.cancel()
+                        stream = try await HTSPLiveInputStream.connect(
+                            configuration: htsp.configuration,
+                            channelID: htsp.channelID,
+                            profile: request.profile,
+                            tuningPolicy: htsp.tuningPolicy
+                        )
+                    }
                     guard activePreparationID == preparationID, !Task.isCancelled else {
                         stream.close()
                         throw CancellationError()
@@ -361,6 +461,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                     nativeTimeshiftSessionID = sessionID
                     configureNativeCallbacks(for: stream, sessionID: sessionID)
                     activeLivePlaybackMode = .tvHeadend
+                    mediaCachingMilliseconds = htsp.tuningPolicy.vlcCacheMilliseconds
                     logger.info("Using TVHeadend native timeshift over HTSP")
                 } catch is CancellationError {
                     throw CancellationError()
@@ -382,7 +483,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         guard activePreparationID == preparationID, !Task.isCancelled else {
             throw CancellationError()
         }
-        addCachingOptions(to: media, milliseconds: request.networkCachingMilliseconds)
+        addCachingOptions(to: media, milliseconds: mediaCachingMilliseconds)
 
         activeRequest = request
         activeProfile = request.profile
@@ -752,12 +853,14 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 
     func waitForInitialPlaybackOutput() async -> Bool {
-        guard nativeInputStream != nil else {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(20))
+        guard let initialNativeInputStream = nativeInputStream else {
             // Preserve the direct HTTP/recording contract: those pipelines do
             // not exhibit TVHeadend's skewed startup burst and should reveal
             // as soon as VLC has a video output, as they did before native
             // tuning gained its cadence gate.
-            for _ in 0..<200 {
+            while clock.now < deadline {
                 guard !Task.isCancelled else { return false }
                 refreshPlaybackInformation()
                 if mediaPlayer.hasVideoOut { return true }
@@ -767,29 +870,55 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             return false
         }
 
+        let tuningPolicy = initialNativeInputStream.tuningPolicy
         let initialOutput = playbackOutputCounters
-        var outputGate = PostSeekPlaybackOutputGate()
-        outputGate.arm(from: initialOutput)
-        // A short decoded burst can precede VLC's final startup cache wait.
-        // Reveal only after A/V has advanced continuously beyond that burst.
-        outputGate.requireSustainedOutput(0.75)
-        outputGate.markPipelineRecreated()
-        _ = outputGate.beginConcealing(from: initialOutput)
+        func makeOutputGate(from output: PlaybackOutputCounters) -> PostSeekPlaybackOutputGate {
+            var gate = PostSeekPlaybackOutputGate()
+            gate.arm(from: output)
+            // A short decoded burst can precede VLC's final startup cache
+            // wait. Start conservatively; a timestamp-aligned native batch
+            // can shorten this below before its first bytes reach VLC.
+            gate.requireSustainedOutput(tuningPolicy.fallbackRevealDuration)
+            gate.markPipelineRecreated()
+            _ = gate.beginConcealing(from: output)
+            return gate
+        }
+        var outputGate = makeOutputGate(from: initialOutput)
         var requiresVideoOutput = false
         var requiresAudioOutput = false
+        var health = initialNativeInputStream.healthSnapshot
+        var currentStagingGeneration = health.initialTuneStagingGeneration
+        var currentSessionID = nativeTimeshiftSessionID
+        let missingAudioRecoveryAt = clock.now.advanced(by: .seconds(3))
+        var didScheduleMissingAudioRecovery = false
 
-        for attempt in 0..<200 {
+        while clock.now < deadline {
             guard !Task.isCancelled else { return false }
             refreshPlaybackInformation()
             let output = playbackOutputCounters
-            let health = nativeInputStream?.healthSnapshot
+            guard let stream = nativeInputStream else { return false }
+            health = stream.healthSnapshot
+            let sessionChanged = nativeTimeshiftSessionID != currentSessionID
+            if sessionChanged
+                || health.initialTuneStagingGeneration != currentStagingGeneration {
+                currentSessionID = nativeTimeshiftSessionID
+                currentStagingGeneration = health.initialTuneStagingGeneration
+                outputGate = makeOutputGate(from: output)
+                requiresVideoOutput = false
+                requiresAudioOutput = false
+            }
             // A missing native-health snapshot means this is an HTTP,
             // recording, or otherwise non-HTSP pipeline. Preserve the normal
             // player contract there: do not dismiss the launch surface until
             // video is actually present. Only an explicitly audio-only native
             // subscription may become ready without video.
-            let expectsVideo = health?.expectsVideo ?? true
-            let expectsAudio = health?.expectsAudio == true
+            let expectsVideo = health.expectsVideo
+            let expectsAudio = health.expectsAudio
+            outputGate.requireSustainedOutput(tuningPolicy.revealDuration(
+                for: health.initialTuneStagingQuality,
+                generation: health.initialTuneStagingGeneration,
+                currentGeneration: currentStagingGeneration
+            ))
             if expectsVideo, !requiresVideoOutput {
                 outputGate.requireDisplayedPictures(12)
                 requiresVideoOutput = true
@@ -801,16 +930,18 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             let hasExpectedVideo = !expectsVideo || mediaPlayer.hasVideoOut
             if hasExpectedVideo, outputGate.observe(output) { return true }
 
-            if attempt == 30,
+            if !didScheduleMissingAudioRecovery,
+               clock.now >= missingAudioRecoveryAt,
                mediaPlayer.hasVideoOut,
                expectsAudio,
                output.playedAudioBuffers == 0 {
+                didScheduleMissingAudioRecovery = true
                 scheduleNativePipelineRecovery(
                     detail: "Video started but the expected audio stream produced no output for 3 seconds."
                 )
             }
             if case .failed = state { return false }
-            try? await Task.sleep(for: .milliseconds(100))
+            try? await Task.sleep(for: .seconds(tuningPolicy.revealPollInterval))
         }
         return false
     }
@@ -1135,7 +1266,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                     configuration: htsp.configuration,
                     channelID: htsp.channelID,
                     profile: request.profile,
-                    vlcCacheMilliseconds: request.networkCachingMilliseconds
+                    tuningPolicy: htsp.tuningPolicy
                 )
                 guard !Task.isCancelled, pipelineRecoveryID == recoveryID else {
                     stream.close()
@@ -1145,7 +1276,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                 let reader = stream.makeVLCReader()
                 retainedNativeVLCReaders.append(reader)
                 let media = Self.makeNativeHTSPMedia(stream: reader)
-                addCachingOptions(to: media, milliseconds: request.networkCachingMilliseconds)
+                addCachingOptions(
+                    to: media,
+                    milliseconds: htsp.tuningPolicy.vlcCacheMilliseconds
+                )
                 nativeInputStream = stream
                 nativeTimeshiftActions = NativeTimeshiftActionController(sink: stream)
                 let sessionID = UUID()
@@ -1304,7 +1438,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 
     private func replaceVLCPipelineAfterTimeshiftNavigation() async -> Bool {
-        guard let stream = nativeInputStream, let request = activeRequest else { return false }
+        guard let stream = nativeInputStream, activeRequest != nil else { return false }
 #if DEBUG
         let replacementStartedAt = ProcessInfo.processInfo.systemUptime
 #endif
@@ -1330,7 +1464,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         let reader = stream.makeVLCReader()
         retainedNativeVLCReaders.append(reader)
         let media = Self.makeNativeHTSPMedia(stream: reader)
-        let cachingMilliseconds = request.networkCachingMilliseconds
+        let cachingMilliseconds = stream.tuningPolicy.vlcCacheMilliseconds
         addCachingOptions(to: media, milliseconds: cachingMilliseconds)
         mediaPlayer.media = media
         postSeekOutputGate.markPipelineRecreated()

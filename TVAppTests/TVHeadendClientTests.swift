@@ -131,8 +131,8 @@ final class TVHeadendClientTests: XCTestCase {
         """#)
 
         XCTAssertEqual(channels, [
-            TVHeadendPlaylistChannel(id: 42, name: "World News"),
-            TVHeadendPlaylistChannel(id: 73, name: "Sports HD"),
+            TVHeadendPlaylistChannel(id: 42, name: "World News", playlistID: "news"),
+            TVHeadendPlaylistChannel(id: 73, name: "Sports HD", playlistID: "sports"),
         ])
     }
 
@@ -186,7 +186,11 @@ private final class PrewarmHTSPConnection: HTSPConnectionTransport, @unchecked S
         lock.withLock { handshakes += 1 }
     }
 
-    func subscribe(channelID: UInt32, profile: String) throws -> (Int64, [HTSPStreamInfo]) {
+    func subscribe(
+        channelID: UInt32,
+        profile: String,
+        weight: UInt32
+    ) throws -> (Int64, [HTSPStreamInfo]) {
         lock.withLock { subscriptions += 1 }
         return (60, [])
     }

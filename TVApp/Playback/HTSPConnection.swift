@@ -256,7 +256,11 @@ protocol HTSPConnectionTransport: AnyObject, Sendable {
     var capabilities: Set<String> { get }
 
     func handshake(username: String, password: String) throws
-    func subscribe(channelID: UInt32, profile: String) throws -> (Int64, [HTSPStreamInfo])
+    func subscribe(
+        channelID: UInt32,
+        profile: String,
+        weight: UInt32
+    ) throws -> (Int64, [HTSPStreamInfo])
     func reserveSequence() -> Int64
     func sendRequest(
         method: String,
@@ -467,10 +471,18 @@ final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
 #endif
     }
 
-    func subscribe(channelID: UInt32, profile: String) throws -> (Int64, [HTSPStreamInfo]) {
+    func subscribe(
+        channelID: UInt32,
+        profile: String,
+        weight: UInt32
+    ) throws -> (Int64, [HTSPStreamInfo]) {
         let response = try request(
             method: "subscribe",
-            fields: Self.subscriptionFields(channelID: channelID, profile: profile)
+            fields: Self.subscriptionFields(
+                channelID: channelID,
+                profile: profile,
+                weight: weight
+            )
         )
         guard let period = response["timeshiftPeriod"]?.intValue, period > 0 else {
             throw HTSPError.timeshiftUnavailable
@@ -492,11 +504,13 @@ final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
 
     static func subscriptionFields(
         channelID: UInt32,
-        profile: String
+        profile: String,
+        weight: UInt32
     ) -> [String: HTSPValue] {
         [
             "subscriptionId": .int(1),
             "channelId": .int(Int64(channelID)),
+            "weight": .int(Int64(weight)),
             "timeshiftPeriod": .int(Int64(UInt32.max)),
             "normts": .int(1),
             "queueDepth": .int(10_000_000),

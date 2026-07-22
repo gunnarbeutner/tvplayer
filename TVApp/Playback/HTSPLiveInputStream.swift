@@ -7,6 +7,13 @@ enum HTSPStreamLifecycleEvent: Equatable, Sendable {
     case terminalFailure(String)
 }
 
+enum HTSPInitialTuneStagingQuality: Equatable, Sendable {
+    case notApplicable
+    case pending
+    case timestampAligned(horizonMicroseconds: Int64)
+    case fallback
+}
+
 /// A single-use view of the long-lived HTSP byte source. VLC owns and closes
 /// this object; the underlying subscription is owned by `HTSPLiveInputStream`.
 private final class HTSPLiveReaderInputStream: InputStream, @unchecked Sendable {
@@ -72,6 +79,8 @@ struct HTSPStreamHealthSnapshot: Equatable, Sendable {
     let lastAudioPacketAt: Date?
     let audioStreamTypes: [String]
     let transportStartup: MPEGTransportStreamStartupSnapshot
+    let initialTuneStagingQuality: HTSPInitialTuneStagingQuality
+    let initialTuneStagingGeneration: UInt64
 }
 
 private enum HTSPStreamFailure: LocalizedError {
@@ -82,9 +91,31 @@ private enum HTSPStreamFailure: LocalizedError {
     }
 }
 
+enum HTSPLiveCandidateError: LocalizedError {
+    case unavailable
+    case promotionFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable:
+            "The staged live channel is no longer available."
+        case let .promotionFailed(reason):
+            "The staged live channel could not be promoted: \(reason)"
+        }
+    }
+}
+
+struct HTSPLiveCandidatePromotion: Sendable {
+    let usedAlignedWindow: Bool
+    let readyAge: TimeInterval?
+    let payloadByteCount: Int
+}
+
 final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unchecked Sendable {
     private static let maximumQueuedBytes = 8 * 1_024 * 1_024
     private static let controlResponseTimeout: TimeInterval = 5
+    private static let candidateSubscriptionWeight: UInt32 = 1
+    private static let foregroundSubscriptionWeight: UInt32 = 100
     private static let fastPrebufferSpeed: Int32 = 400
     private static let fastPrebufferLiveEdgeMargin: TimeInterval = 0.5
 
@@ -124,6 +155,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         let primaryAudioStreamIndex: Int?
         let diagnostics: String
         let flushesExistingDecoder: Bool
+        let alignedHorizonMicroseconds: Int64?
     }
 
     private enum MuxPacketDisposition {
@@ -143,10 +175,18 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         case failed
     }
 
+    private enum DeliveryRole {
+        case playback
+        case candidate
+        case activatingCandidate
+    }
+
     private let configuration: TVHeadendConfiguration
     private let channelID: UInt32
     private let profile: String
-    private let vlcCacheDuration: Int64
+    let tuningPolicy: NativeTimeshiftTuningPolicy
+    private let initialTuneHorizonDuration: Int64
+    private let postSeekReserveDuration: Int64
     private let connectionLock = NSLock()
     private var connection: any HTSPConnectionTransport
     private var connectionGeneration = 0
@@ -165,6 +205,8 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     private var currentStatus: Stream.Status = .notOpen
     private var currentError: Error?
     private var stopped = false
+    private var deliveryRole: DeliveryRole
+    private var rollingTuneBuffer = HTSPRollingTunePacketBuffer()
     private var vlcReaderGeneration = 0
     private var receiverThread: Thread?
     private var currentLiveDelay: TimeInterval = 0
@@ -190,6 +232,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     )?
     private var initialTunePacketStager = HTSPInitialTunePacketStager()
     private var initialTuneFlushesExistingDecoder = false
+    private var initialTuneStagingQuality: HTSPInitialTuneStagingQuality = .notApplicable
     private var postSeekBuffer = HTSPPostSeekBufferTracker()
     private var postSeekPacketStager = HTSPPostSeekPacketStager()
     private var postSeekTailInterleaver: HTSPPostSeekTailInterleaver?
@@ -222,26 +265,74 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         connectionFactory: @escaping HTSPConnectionFactory,
         streams: [HTSPStreamInfo],
         acceptedTimeshiftPeriod: TimeInterval,
-        vlcCacheMilliseconds: Int
+        tuningPolicy: NativeTimeshiftTuningPolicy,
+        startsAsCandidate: Bool
     ) throws {
         self.configuration = configuration
         self.channelID = channelID
         self.profile = profile
         self.connection = connection
         self.connectionFactory = connectionFactory
+        deliveryRole = startsAsCandidate ? .candidate : .playback
         muxer = try MPEGTransportStreamMuxer(streams: streams)
         self.acceptedTimeshiftPeriod = acceptedTimeshiftPeriod
-        vlcCacheDuration = Int64(max(0, vlcCacheMilliseconds)) * 1_000
+        self.tuningPolicy = tuningPolicy
+        initialTuneHorizonDuration = Int64(tuningPolicy.initialHorizonMilliseconds) * 1_000
+        postSeekReserveDuration = Int64(tuningPolicy.postSeekReserveMilliseconds) * 1_000
         super.init(data: Data())
-        beginInitialTunePacketStaging()
+        if startsAsCandidate {
+            beginRollingTuneBuffering()
+        } else {
+            beginInitialTunePacketStaging()
+        }
     }
 
     static func connect(
         configuration: TVHeadendConfiguration,
         channelID: UInt32,
         profile: String,
-        vlcCacheMilliseconds: Int = 1_500,
+        tuningPolicy: NativeTimeshiftTuningPolicy = NativeTimeshiftTuningPolicy(),
         connectionFactory suppliedFactory: HTSPConnectionFactory? = nil
+    ) async throws -> HTSPLiveInputStream {
+        try await connect(
+            configuration: configuration,
+            channelID: channelID,
+            profile: profile,
+            tuningPolicy: tuningPolicy,
+            subscriptionWeight: Self.foregroundSubscriptionWeight,
+            startsAsCandidate: false,
+            connectionFactory: suppliedFactory
+        )
+    }
+
+    static func connectCandidate(
+        configuration: TVHeadendConfiguration,
+        channelID: UInt32,
+        profile: String,
+        tuningPolicy: NativeTimeshiftTuningPolicy = NativeTimeshiftTuningPolicy(),
+        connectionFactory suppliedFactory: HTSPConnectionFactory? = nil
+    ) async throws -> HTSPLiveInputStream {
+        let stream = try await connect(
+            configuration: configuration,
+            channelID: channelID,
+            profile: profile,
+            tuningPolicy: tuningPolicy,
+            subscriptionWeight: Self.candidateSubscriptionWeight,
+            startsAsCandidate: true,
+            connectionFactory: suppliedFactory
+        )
+        stream.open()
+        return stream
+    }
+
+    private static func connect(
+        configuration: TVHeadendConfiguration,
+        channelID: UInt32,
+        profile: String,
+        tuningPolicy: NativeTimeshiftTuningPolicy,
+        subscriptionWeight: UInt32,
+        startsAsCandidate: Bool,
+        connectionFactory suppliedFactory: HTSPConnectionFactory?
     ) async throws -> HTSPLiveInputStream {
         guard let host = configuration.baseURL?.host else { throw HTSPError.invalidHost }
         let connectionFactory: HTSPConnectionFactory = suppliedFactory ?? {
@@ -264,7 +355,8 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 do {
                     let subscription = try preconnected.subscribe(
                         channelID: channelID,
-                        profile: profile
+                        profile: profile,
+                        weight: subscriptionWeight
                     )
                     return (preconnected, subscription)
                 } catch {
@@ -282,7 +374,11 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             guard connection.capabilities.contains("timeshift") else {
                 throw HTSPError.timeshiftUnavailable
             }
-            let subscription = try connection.subscribe(channelID: channelID, profile: profile)
+            let subscription = try connection.subscribe(
+                channelID: channelID,
+                profile: profile,
+                weight: subscriptionWeight
+            )
             return (connection, subscription)
         }.value
         let stream = try HTSPLiveInputStream(
@@ -293,7 +389,8 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             connectionFactory: connectionFactory,
             streams: connected.1.1,
             acceptedTimeshiftPeriod: TimeInterval(connected.1.0),
-            vlcCacheMilliseconds: vlcCacheMilliseconds
+            tuningPolicy: tuningPolicy,
+            startsAsCandidate: startsAsCandidate
         )
         return stream
     }
@@ -324,6 +421,16 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
     var queuedByteCount: Int64 {
         condition.withLock { Int64(max(0, buffer.count - readOffset)) }
+    }
+
+    var candidateIsReady: Bool {
+        condition.withLock {
+            deliveryRole == .candidate && rollingTuneBuffer.isReady
+        }
+    }
+
+    var candidateBufferedByteCount: Int {
+        condition.withLock { rollingTuneBuffer.payloadByteCount }
     }
 
     var isNavigatingTimeshift: Bool {
@@ -357,7 +464,9 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 firstAudioPacketAt: firstAudioPacketAt,
                 lastAudioPacketAt: lastAudioPacketAt,
                 audioStreamTypes: streamInfo.audioStreamTypes,
-                transportStartup: streamInfo.transportStartup
+                transportStartup: streamInfo.transportStartup,
+                initialTuneStagingQuality: initialTuneStagingQuality,
+                initialTuneStagingGeneration: postSeekStagingEpoch
             )
         }
     }
@@ -412,6 +521,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         }
         stopped = true
         currentStatus = .closed
+        rollingTuneBuffer.cancel()
         postSeekBuffer.cancel()
         cancelPostSeekPacketStagingLocked()
         condition.broadcast()
@@ -445,6 +555,46 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         }
         guard canSend else { return }
         enqueueSpeed(0)
+    }
+
+    /// Changes TVHeadend's resource priority for this subscription. The
+    /// response is delivered by the stream's existing receiver so callers do
+    /// not compete with it for reads from the HTSP socket.
+    func changeSubscriptionWeight(
+        to weight: UInt32,
+        completion: @escaping @Sendable (Result<Void, Error>) -> Void
+    ) {
+        controlQueue.async { [weak self] in
+            guard let self else {
+                completion(.failure(HTSPError.disconnected))
+                return
+            }
+            self.sendControlRequest(
+                method: "subscriptionChangeWeight",
+                fields: ["weight": .int(Int64(weight))],
+                succeeded: { completion(.success(())) },
+                failed: { completion(.failure($0)) }
+            )
+        }
+    }
+
+    func promoteCandidate() async throws -> HTSPLiveCandidatePromotion {
+        let canPromote = condition.withLock {
+            deliveryRole == .candidate && !stopped && currentError == nil
+        }
+        guard canPromote else { throw HTSPLiveCandidateError.unavailable }
+
+        try await withCheckedThrowingContinuation { continuation in
+            changeSubscriptionWeight(to: Self.foregroundSubscriptionWeight) { result in
+                continuation.resume(with: result)
+            }
+        }
+        do {
+            return try activateCandidateDelivery()
+        } catch {
+            close()
+            throw error
+        }
     }
 
     func seek(by seconds: TimeInterval) {
@@ -569,9 +719,11 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 }
             } catch HTSPError.readTimedOut {
                 guard shouldRecoverForPacketStall(at: Date()) else { continue }
+                if failCandidateIfNeeded(HTSPStreamFailure.packetStalled) { return }
                 guard recoverConnection(after: HTSPStreamFailure.packetStalled) else { return }
             } catch {
                 guard !condition.withLock({ stopped }) else { return }
+                if failCandidateIfNeeded(error) { return }
                 guard recoverConnection(after: error) else { return }
             }
         }
@@ -748,7 +900,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         case "subscriptionStart":
             let streams = HTSPStreamInfo.decodeList(message["streams"])
             let replacement = try MPEGTransportStreamMuxer(streams: streams)
-            processLock.withLock { muxer = replacement }
+            if replaceMuxerAndRestartCandidateIfNeeded(replacement) { return }
             clearDeliveryQueue()
             if replacement.hasVideo,
                replacement.primaryVideoStreamIndex != nil,
@@ -788,6 +940,22 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     ) -> MuxPacketDisposition {
         let packetTime = packet.presentationTime ?? packet.decodeTime
         condition.lock()
+        if deliveryRole == .candidate {
+            rollingTuneBuffer.append(
+                packet,
+                isVideo: isVideo,
+                isAudio: isAudio
+            )
+            initialTuneStagingQuality = rollingTuneBuffer.isReady
+                ? .timestampAligned(horizonMicroseconds: initialTuneHorizonDuration)
+                : .pending
+            condition.unlock()
+            return .staged
+        }
+        if deliveryRole == .activatingCandidate {
+            condition.unlock()
+            return .drop
+        }
         guard deliveryGate.shouldDeliverPackets else {
             condition.unlock()
             return .drop
@@ -817,7 +985,8 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                     primaryVideoStreamIndex: primaryVideoStreamIndex,
                     primaryAudioStreamIndex: primaryAudioStreamIndex,
                     diagnostics: diagnostics,
-                    flushesExistingDecoder: initialTuneFlushesExistingDecoder
+                    flushesExistingDecoder: initialTuneFlushesExistingDecoder,
+                    alignedHorizonMicroseconds: initialTuneHorizonDuration
                 )
                 condition.unlock()
                 return .flushInitialTune(completion)
@@ -848,7 +1017,8 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                     primaryVideoStreamIndex: nil,
                     primaryAudioStreamIndex: nil,
                     diagnostics: diagnostics,
-                    flushesExistingDecoder: initialTuneFlushesExistingDecoder
+                    flushesExistingDecoder: initialTuneFlushesExistingDecoder,
+                    alignedHorizonMicroseconds: nil
                 )
                 condition.unlock()
                 return .flushInitialTune(completion)
@@ -993,6 +1163,9 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             let retainedTail = tailInterleaver.flatMap { $0.isEmpty ? nil : $0 }
             postSeekTailInterleaver = retainedTail
             hasInitialTuneTailInterleaver = retainedTail != nil
+            initialTuneStagingQuality = completion.alignedHorizonMicroseconds.map {
+                .timestampAligned(horizonMicroseconds: $0)
+            } ?? .fallback
             buffer.append(transportData)
             condition.broadcast()
             return true
@@ -1164,11 +1337,156 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         postSeekNavigationGeneration = 0
         initialTunePacketStager.cancel()
         initialTuneFlushesExistingDecoder = false
+        initialTuneStagingQuality = .notApplicable
         postSeekPacketStager.cancel()
         postSeekTailInterleaver = nil
         hasInitialTuneTailInterleaver = false
         postSeekPrimaryVideoStreamIndex = nil
         postSeekPrimaryAudioStreamIndex = nil
+    }
+
+    private func beginRollingTuneBuffering() {
+        let tracks = processLock.withLock {
+            (
+                hasVideo: muxer.hasVideo,
+                primaryVideoStreamIndex: muxer.primaryVideoStreamIndex,
+                primaryAudioStreamIndex: muxer.primaryAudioStreamIndex
+            )
+        }
+        condition.withLock {
+            cancelPostSeekPacketStagingLocked()
+            postSeekBuffer.cancel()
+            buffer.removeAll(keepingCapacity: true)
+            readOffset = 0
+            rollingTuneBuffer.begin(
+                hasVideo: tracks.hasVideo,
+                primaryVideoStreamIndex: tracks.primaryVideoStreamIndex,
+                primaryAudioStreamIndex: tracks.primaryAudioStreamIndex,
+                requiredDuration: initialTuneHorizonDuration,
+                maximumPayloadBytes: Self.maximumQueuedBytes,
+                maximumWaitAfterVideoKeyframe: tuningPolicy.initialStageTimeout
+            )
+            initialTuneStagingQuality = .pending
+            condition.broadcast()
+        }
+    }
+
+    /// Installs new subscription metadata and resets candidate staging as one
+    /// atomic state change. Promotion takes these locks in the same order, so
+    /// a late subscriptionStart cannot clear bytes after they became visible
+    /// to the foreground reader.
+    private func replaceMuxerAndRestartCandidateIfNeeded(
+        _ replacement: MPEGTransportStreamMuxer
+    ) -> Bool {
+        processLock.lock()
+        condition.lock()
+        defer {
+            condition.unlock()
+            processLock.unlock()
+        }
+
+        muxer = replacement
+        guard deliveryRole == .candidate else { return false }
+
+        cancelPostSeekPacketStagingLocked()
+        postSeekBuffer.cancel()
+        buffer.removeAll(keepingCapacity: true)
+        readOffset = 0
+        rollingTuneBuffer.begin(
+            hasVideo: replacement.hasVideo,
+            primaryVideoStreamIndex: replacement.primaryVideoStreamIndex,
+            primaryAudioStreamIndex: replacement.primaryAudioStreamIndex,
+            requiredDuration: initialTuneHorizonDuration,
+            maximumPayloadBytes: Self.maximumQueuedBytes,
+            maximumWaitAfterVideoKeyframe: tuningPolicy.initialStageTimeout
+        )
+        initialTuneStagingQuality = .pending
+        condition.broadcast()
+        return true
+    }
+
+    private func activateCandidateDelivery() throws -> HTSPLiveCandidatePromotion {
+        processLock.lock()
+        condition.lock()
+        defer {
+            condition.unlock()
+            processLock.unlock()
+        }
+        guard deliveryRole == .candidate, !stopped, currentError == nil else {
+            throw HTSPLiveCandidateError.unavailable
+        }
+
+        deliveryRole = .activatingCandidate
+        let claim = rollingTuneBuffer.claim()
+        cancelPostSeekPacketStagingLocked()
+        postSeekBuffer.cancel()
+        buffer.removeAll(keepingCapacity: true)
+        readOffset = 0
+        initialTuneFlushesExistingDecoder = false
+
+        let promotion: HTSPLiveCandidatePromotion
+        switch claim {
+        case let .ready(snapshot):
+            muxer.resetForFreshPipeline()
+            var transportData = Data()
+            for packet in snapshot.orderedPackets {
+                transportData.append(muxer.mux(packet))
+            }
+            guard !transportData.isEmpty else {
+                throw HTSPLiveCandidateError.promotionFailed(
+                    "The aligned transport window contained no playable data."
+                )
+            }
+            postSeekTailInterleaver = snapshot.tailInterleaver
+            hasInitialTuneTailInterleaver = snapshot.tailInterleaver != nil
+            initialTuneStagingQuality = .timestampAligned(
+                horizonMicroseconds: snapshot.commonHorizonMicroseconds
+            )
+            buffer.append(transportData)
+            promotion = HTSPLiveCandidatePromotion(
+                usedAlignedWindow: true,
+                readyAge: max(0, Date().timeIntervalSince(snapshot.readyAt)),
+                payloadByteCount: snapshot.payloadByteCount
+            )
+            benchmarkTrace(
+                "promoted aligned candidate payload=\(snapshot.payloadByteCount)B "
+                    + "readyAge=\(Int(max(0, Date().timeIntervalSince(snapshot.readyAt)) * 1_000))ms"
+            )
+
+        case let .partial(stager):
+            initialTunePacketStager = stager
+            initialTuneStagingQuality = .pending
+            promotion = HTSPLiveCandidatePromotion(
+                usedAlignedWindow: false,
+                readyAge: nil,
+                payloadByteCount: 0
+            )
+            benchmarkTrace("promoted partially staged candidate")
+
+        case .unavailable:
+            initialTunePacketStager.begin(
+                hasVideo: muxer.hasVideo,
+                primaryVideoStreamIndex: muxer.primaryVideoStreamIndex,
+                primaryAudioStreamIndex: muxer.primaryAudioStreamIndex,
+                requiredDuration: initialTuneHorizonDuration,
+                maximumPayloadBytes: Self.maximumQueuedBytes,
+                maximumWaitAfterVideoKeyframe: tuningPolicy.initialStageTimeout
+            )
+            initialTuneStagingQuality = initialTunePacketStager.isActive
+                ? .pending
+                : .notApplicable
+            promotion = HTSPLiveCandidatePromotion(
+                usedAlignedWindow: false,
+                readyAge: nil,
+                payloadByteCount: 0
+            )
+            benchmarkTrace("promoted transport-only candidate")
+        }
+
+        deliveryRole = .playback
+        subscriptionReadyAt = Date()
+        condition.broadcast()
+        return promotion
     }
 
     private func beginInitialTunePacketStaging(
@@ -1208,14 +1526,17 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             hasVideo: hasVideo,
             primaryVideoStreamIndex: primaryVideoStreamIndex,
             primaryAudioStreamIndex: primaryAudioStreamIndex,
-            requiredDuration: HTSPPostSeekBufferTracker.minimumRequiredDuration,
+            requiredDuration: initialTuneHorizonDuration,
             maximumPayloadBytes: Self.maximumQueuedBytes,
             // TVHeadend often delivers the initial video burst ahead of the
             // selected audio PID. Give the next audio access unit time to
             // prove the half-second common horizon instead of publishing the
             // skewed fallback a few milliseconds early.
-            maximumWaitAfterVideoKeyframe: 2.5
+            maximumWaitAfterVideoKeyframe: tuningPolicy.initialStageTimeout
         )
+        initialTuneStagingQuality = initialTunePacketStager.isActive
+            ? .pending
+            : .notApplicable
     }
 
     private func beginNavigation() {
@@ -1247,7 +1568,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         // reserve after the requested position for shallow seeks as well.
         let baseRequiredDuration = max(
             HTSPPostSeekBufferTracker.minimumRequiredDuration,
-            vlcCacheDuration
+            postSeekReserveDuration
         )
         let requiredDuration = baseRequiredDuration
         let requiredSeconds = TimeInterval(requiredDuration) / 1_000_000
@@ -1688,6 +2009,20 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         }
     }
 
+    private func failCandidateIfNeeded(_ error: Error) -> Bool {
+        let isCandidate = condition.withLock {
+            deliveryRole != .playback && !stopped
+        }
+        guard isCandidate else { return false }
+        condition.withLock { rollingTuneBuffer.cancel() }
+        failStream(error)
+        currentConnection().connection.close()
+        logger.info(
+            "Discarded staged HTSP channel: \(error.localizedDescription, privacy: .public)"
+        )
+        return true
+    }
+
     private func recoverConnection(after initialError: Error) -> Bool {
         if HTSPRecoveryPolicy.isTerminal(initialError) {
             failStream(initialError)
@@ -1715,7 +2050,8 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 }
                 let subscription = try replacement.subscribe(
                     channelID: channelID,
-                    profile: profile
+                    profile: profile,
+                    weight: Self.foregroundSubscriptionWeight
                 )
                 let replacementMuxer = try MPEGTransportStreamMuxer(streams: subscription.1)
                 guard !condition.withLock({ stopped }) else {

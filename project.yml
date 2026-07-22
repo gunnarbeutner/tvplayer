@@ -134,6 +134,8 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes:
+          - audio
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon-Mobile

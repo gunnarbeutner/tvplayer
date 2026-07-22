@@ -49,6 +49,33 @@ enum PlaybackExitCommandPolicy {
     }
 }
 
+private struct LiveChannelOrderSynchronization: ViewModifier {
+    @ObservedObject var guide: GuideViewModel
+    @ObservedObject var channelPreferences: ChannelPreferencesStore
+    @ObservedObject var playback: PlaybackCoordinator
+    @ObservedObject var settings: ServerSettingsStore
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: guide.guideRevision, initial: true) { _, _ in
+                synchronize()
+            }
+            .onChange(of: channelPreferences.revision, initial: true) { _, _ in
+                synchronize()
+            }
+            .onChange(of: playback.presentation?.id) { _, _ in
+                synchronize()
+            }
+    }
+
+    private func synchronize() {
+        playback.updateLiveChannelOrder(
+            channelPreferences.displayedChannels(from: guide.channels),
+            configuration: settings.configuration
+        )
+    }
+}
+
 struct RootTabView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var selection: AppTab = .guide
@@ -231,6 +258,12 @@ struct RootTabView: View {
         .environmentObject(channelPreferences)
         .environmentObject(recordings)
         .environmentObject(playback)
+        .modifier(LiveChannelOrderSynchronization(
+            guide: guide,
+            channelPreferences: channelPreferences,
+            playback: playback,
+            settings: settings
+        ))
         .onChange(of: playback.isPlayerPresented) { wasPresented, isPresented in
 #if os(tvOS)
             if isPresented, selection == .guide {

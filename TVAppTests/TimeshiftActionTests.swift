@@ -3,6 +3,106 @@ import XCTest
 @testable import TVApp
 
 final class TimeshiftActionTests: XCTestCase {
+    func testNativeTimeshiftTuningPolicyKeepsColdTuneAndPostSeekBuffersIndependent() {
+        let defaults = NativeTimeshiftTuningPolicy()
+
+        XCTAssertEqual(defaults.vlcCacheMilliseconds, 1_500)
+        XCTAssertEqual(defaults.initialHorizonMilliseconds, 500)
+        XCTAssertEqual(defaults.postSeekReserveMilliseconds, 1_500)
+        XCTAssertEqual(defaults.alignedRevealDuration, 0.5)
+        XCTAssertEqual(defaults.fallbackRevealDuration, 0.75)
+        XCTAssertEqual(defaults.revealPollInterval, 0.05)
+        XCTAssertEqual(defaults.initialStageTimeout, 2.5)
+
+        let reducedColdTuneCache = NativeTimeshiftTuningPolicy(
+            vlcCacheMilliseconds: 800,
+            initialHorizonMilliseconds: 650
+        )
+        XCTAssertEqual(reducedColdTuneCache.vlcCacheMilliseconds, 800)
+        XCTAssertEqual(reducedColdTuneCache.initialHorizonMilliseconds, 650)
+        XCTAssertEqual(reducedColdTuneCache.postSeekReserveMilliseconds, 1_500)
+    }
+
+    func testNativeTimeshiftTuningPolicyOnlyUsesShortRevealForCurrentAlignedBatch() {
+        let policy = NativeTimeshiftTuningPolicy()
+
+        XCTAssertEqual(
+            policy.revealDuration(
+                for: .timestampAligned(horizonMicroseconds: 500_000),
+                generation: 7,
+                currentGeneration: 7
+            ),
+            0.5
+        )
+        XCTAssertEqual(
+            policy.revealDuration(
+                for: .timestampAligned(horizonMicroseconds: 499_999),
+                generation: 7,
+                currentGeneration: 7
+            ),
+            0.75
+        )
+        XCTAssertEqual(
+            policy.revealDuration(
+                for: .timestampAligned(horizonMicroseconds: 500_000),
+                generation: 6,
+                currentGeneration: 7
+            ),
+            0.75
+        )
+        XCTAssertEqual(
+            policy.revealDuration(
+                for: .pending,
+                generation: 7,
+                currentGeneration: 7
+            ),
+            0.75
+        )
+    }
+
+    func testColdTuneOutputGateKeepsInitialBurstAndPauseConcealed() {
+        var gate = PostSeekPlaybackOutputGate()
+        let startedAt = Date(timeIntervalSinceReferenceDate: 500)
+        let initial = PlaybackOutputCounters(
+            displayedPictures: 0,
+            playedAudioBuffers: 0
+        )
+        gate.arm(from: initial)
+        gate.requireSustainedOutput(0.5)
+        gate.requireDisplayedPictures(12)
+        gate.requireAudioOutput()
+        gate.markPipelineRecreated()
+        XCTAssertTrue(gate.beginConcealing(from: initial))
+
+        // The first observation establishes the new pipeline's baseline. A
+        // twelve-picture startup burst then stops for longer than the cadence
+        // tolerance and must not dismiss the launch surface.
+        XCTAssertFalse(gate.observe(initial, at: startedAt))
+        XCTAssertFalse(gate.observe(
+            PlaybackOutputCounters(displayedPictures: 12, playedAudioBuffers: 12),
+            at: startedAt.addingTimeInterval(0.01)
+        ))
+        XCTAssertFalse(gate.observe(
+            PlaybackOutputCounters(displayedPictures: 12, playedAudioBuffers: 12),
+            at: startedAt.addingTimeInterval(0.31)
+        ))
+
+        // Once presentation resumes, the gate needs a complete fresh half
+        // second and twelve new pictures from this continuity epoch.
+        XCTAssertFalse(gate.observe(
+            PlaybackOutputCounters(displayedPictures: 13, playedAudioBuffers: 13),
+            at: startedAt.addingTimeInterval(0.32)
+        ))
+        XCTAssertFalse(gate.observe(
+            PlaybackOutputCounters(displayedPictures: 24, playedAudioBuffers: 24),
+            at: startedAt.addingTimeInterval(0.819)
+        ))
+        XCTAssertTrue(gate.observe(
+            PlaybackOutputCounters(displayedPictures: 25, playedAudioBuffers: 25),
+            at: startedAt.addingTimeInterval(0.82)
+        ))
+    }
+
     func testTimelineSeekCommitPolicyCoalescesTapsButCommitsHeldSeekOnRelease() {
         XCTAssertEqual(TimelineSeekCommitPolicy.coalescingDelayMilliseconds, 250)
         XCTAssertNil(TimelineSeekCommitPolicy.delayAfterRemoteRelease(didRepeat: false))

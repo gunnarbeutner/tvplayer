@@ -239,6 +239,10 @@ struct HTSPInitialTunePacketStager: Sendable {
     private var maximumWaitAfterVideoKeyframe: TimeInterval = 2
     private(set) var isActive = false
 
+    var payloadByteCount: Int {
+        packets.payloadByteCount + provisionalPayloadBytes
+    }
+
     mutating func begin(
         hasVideo: Bool,
         primaryVideoStreamIndex: Int?,
@@ -505,6 +509,225 @@ struct HTSPInitialTunePacketStager: Sendable {
         guard let duration = packet.durationMicroseconds, duration >= 0 else { return false }
         let end = packetTime.addingReportingOverflow(duration)
         return end.overflow || end.partialValue >= earliestTime
+    }
+}
+
+/// Keeps one decodable live window warm without exposing bytes to VLC. The
+/// window always starts at the newest primary-video keyframe and only releases
+/// packets through the common primary A/V watermark. A completed window stays
+/// available while its replacement is assembled, so an arriving keyframe
+/// never creates a readiness gap. The committed and in-progress windows share
+/// one payload budget.
+struct HTSPRollingTunePacketBuffer: Sendable {
+    struct Snapshot: Sendable {
+        let orderedPackets: [HTSPMuxPacket]
+        let tailInterleaver: HTSPPostSeekTailInterleaver?
+        let commonHorizonMicroseconds: Int64
+        let readyAt: Date
+        let lastAlignedOutputAt: Date
+        let diagnostics: String
+
+        var payloadByteCount: Int {
+            orderedPackets.reduce(into: 0) { $0 += $1.payload.count }
+                + (tailInterleaver?.queuedPayloadByteCount ?? 0)
+        }
+    }
+
+    enum Claim: Sendable {
+        case ready(Snapshot)
+        case partial(HTSPInitialTunePacketStager)
+        case unavailable
+    }
+
+    private var hasVideo = false
+    private var primaryVideoStreamIndex: Int?
+    private var primaryAudioStreamIndex: Int?
+    private var requiredDuration: Int64 = 500_000
+    private var maximumPayloadBytes = 8 * 1_024 * 1_024
+    private var maximumWaitBeforeVideoKeyframe: TimeInterval = 3
+    private var maximumWaitAfterVideoKeyframe: TimeInterval = 2.5
+    private var initialStager = HTSPInitialTunePacketStager()
+    private var orderedPackets: [HTSPMuxPacket] = []
+    private var orderedPayloadBytes = 0
+    private var tailInterleaver: HTSPPostSeekTailInterleaver?
+    private var readyAt: Date?
+    private var lastAlignedOutputAt: Date?
+    private var diagnostics: String?
+
+    var isReady: Bool { readyAt != nil && !orderedPackets.isEmpty }
+
+    var payloadByteCount: Int {
+        committedPayloadByteCount + initialStager.payloadByteCount
+    }
+
+    mutating func begin(
+        hasVideo: Bool,
+        primaryVideoStreamIndex: Int?,
+        primaryAudioStreamIndex: Int?,
+        requiredDuration: Int64,
+        maximumPayloadBytes: Int,
+        maximumWaitBeforeVideoKeyframe: TimeInterval = 3,
+        maximumWaitAfterVideoKeyframe: TimeInterval = 2.5
+    ) {
+        self.hasVideo = hasVideo
+        self.primaryVideoStreamIndex = primaryVideoStreamIndex
+        self.primaryAudioStreamIndex = primaryAudioStreamIndex
+        self.requiredDuration = max(250_000, requiredDuration)
+        self.maximumPayloadBytes = max(1, maximumPayloadBytes)
+        self.maximumWaitBeforeVideoKeyframe = max(0, maximumWaitBeforeVideoKeyframe)
+        self.maximumWaitAfterVideoKeyframe = max(0, maximumWaitAfterVideoKeyframe)
+        cancel()
+        startPendingWindow()
+    }
+
+    mutating func append(
+        _ packet: HTSPMuxPacket,
+        isVideo: Bool,
+        isAudio: Bool,
+        at date: Date = Date()
+    ) {
+        let startsNewPrimaryVideoWindow = isReady
+            && isVideo
+            && packet.streamIndex == primaryVideoStreamIndex
+            && packet.frameType == 0x49
+        if startsNewPrimaryVideoWindow { startPendingWindow() }
+
+        if initialStager.isActive {
+            switch initialStager.append(
+                packet,
+                isVideo: isVideo,
+                isAudio: isAudio,
+                at: date
+            ) {
+            case .passthrough:
+                break
+            case .waiting:
+                return
+            case let .ready(
+                batch,
+                primaryVideoStreamIndex,
+                primaryAudioStreamIndex,
+                completionDiagnostics
+            ):
+                guard let primaryVideoStreamIndex,
+                      let primaryAudioStreamIndex
+                else {
+                    startPendingWindow()
+                    return
+                }
+                var interleaver = HTSPPostSeekTailInterleaver(
+                    batch: batch,
+                    primaryVideoStreamIndex: primaryVideoStreamIndex,
+                    primaryAudioStreamIndex: primaryAudioStreamIndex
+                )
+                let released = interleaver.drainAvailable()
+                guard !released.isEmpty else {
+                    startPendingWindow()
+                    return
+                }
+                let replacementPayloadBytes = released.reduce(into: 0) {
+                    $0 += $1.payload.count
+                } + interleaver.queuedPayloadByteCount
+                guard replacementPayloadBytes <= maximumPayloadBytes else {
+                    startPendingWindow()
+                    return
+                }
+
+                // Every field of the committed generation is replaced only
+                // after the new generation has proven a common A/V watermark.
+                orderedPackets = released
+                orderedPayloadBytes = released.reduce(into: 0) {
+                    $0 += $1.payload.count
+                }
+                tailInterleaver = interleaver
+                readyAt = date
+                lastAlignedOutputAt = date
+                diagnostics = completionDiagnostics
+                return
+            case .overflow, .failure:
+                // A candidate is optional: never promote a bounded fallback
+                // whose common A/V watermark could not be proven.
+                startPendingWindow()
+                return
+            }
+        }
+
+        guard var interleaver = tailInterleaver else { return }
+        guard payloadByteCount <= maximumPayloadBytes - min(
+            packet.payload.count,
+            maximumPayloadBytes
+        ) else {
+            // Freeze the still-decodable committed window rather than
+            // invalidating it merely because its tail reached the cap.
+            return
+        }
+        interleaver.append(packet)
+        let released = interleaver.drainAvailable()
+        if !released.isEmpty {
+            orderedPackets.append(contentsOf: released)
+            orderedPayloadBytes += released.reduce(into: 0) {
+                $0 += $1.payload.count
+            }
+            lastAlignedOutputAt = date
+        }
+        tailInterleaver = interleaver
+    }
+
+    mutating func claim(
+        at date: Date = Date(),
+        maximumAlignedAge: TimeInterval = 0.5
+    ) -> Claim {
+        if let readyAt,
+           let lastAlignedOutputAt,
+           date.timeIntervalSince(lastAlignedOutputAt) <= maximumAlignedAge,
+           !orderedPackets.isEmpty {
+            let snapshot = Snapshot(
+                orderedPackets: orderedPackets,
+                tailInterleaver: tailInterleaver,
+                commonHorizonMicroseconds: requiredDuration,
+                readyAt: readyAt,
+                lastAlignedOutputAt: lastAlignedOutputAt,
+                diagnostics: diagnostics ?? "timestamp-aligned rolling candidate"
+            )
+            cancel()
+            return .ready(snapshot)
+        }
+        if initialStager.isActive {
+            let partial = initialStager
+            cancel()
+            return .partial(partial)
+        }
+        cancel()
+        return .unavailable
+    }
+
+    mutating func cancel() {
+        initialStager.cancel()
+        orderedPackets.removeAll(keepingCapacity: true)
+        orderedPayloadBytes = 0
+        tailInterleaver = nil
+        readyAt = nil
+        lastAlignedOutputAt = nil
+        diagnostics = nil
+    }
+
+    private var committedPayloadByteCount: Int {
+        orderedPayloadBytes + (tailInterleaver?.queuedPayloadByteCount ?? 0)
+    }
+
+    private mutating func startPendingWindow() {
+        initialStager.cancel()
+        let availablePayloadBytes = maximumPayloadBytes - committedPayloadByteCount
+        guard availablePayloadBytes > 0 else { return }
+        initialStager.begin(
+            hasVideo: hasVideo,
+            primaryVideoStreamIndex: primaryVideoStreamIndex,
+            primaryAudioStreamIndex: primaryAudioStreamIndex,
+            requiredDuration: requiredDuration,
+            maximumPayloadBytes: availablePayloadBytes,
+            maximumWaitBeforeVideoKeyframe: maximumWaitBeforeVideoKeyframe,
+            maximumWaitAfterVideoKeyframe: maximumWaitAfterVideoKeyframe
+        )
     }
 }
 

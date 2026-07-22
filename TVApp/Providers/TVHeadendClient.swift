@@ -4,6 +4,13 @@ import SwiftUI
 struct TVHeadendPlaylistChannel: Equatable, Sendable {
     let id: UInt32
     let name: String
+    let playlistID: String?
+
+    init(id: UInt32, name: String, playlistID: String? = nil) {
+        self.id = id
+        self.name = name
+        self.playlistID = playlistID
+    }
 }
 
 final class TVHeadendClient: TVProvider, @unchecked Sendable {
@@ -674,6 +681,7 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
 
     static func playlistChannels(in playlist: String) -> [TVHeadendPlaylistChannel] {
         var name = "Live channel"
+        var playlistID: String?
         var result: [TVHeadendPlaylistChannel] = []
 
         for rawLine in playlist.split(whereSeparator: \.isNewline) {
@@ -681,10 +689,16 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
             if line.hasPrefix("#EXTINF:") {
                 name = line.split(separator: ",", maxSplits: 1).last
                     .map(String.init) ?? name
+                playlistID = attribute(named: "tvg-id", in: line)
             } else if !line.hasPrefix("#"),
                       let streamURL = URL(string: line),
                       let channelID = numericChannelID(from: streamURL) {
-                result.append(TVHeadendPlaylistChannel(id: channelID, name: name))
+                result.append(TVHeadendPlaylistChannel(
+                    id: channelID,
+                    name: name,
+                    playlistID: playlistID
+                ))
+                playlistID = nil
             }
         }
         return result

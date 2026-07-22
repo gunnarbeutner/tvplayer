@@ -85,6 +85,7 @@ final class PlaybackCoordinator: ObservableObject {
     }
 
     private struct CachedLivePrefetch {
+        let id: UUID
         let key: LivePrefetchKey
         let request: LiveStreamRequest
         let completedAt: Date
@@ -119,11 +120,15 @@ final class PlaybackCoordinator: ObservableObject {
     private var launchShouldRestoreAudio = false
     private var cachedLivePrefetch: CachedLivePrefetch?
     private var inFlightLivePrefetch: InFlightLivePrefetch?
+    private var liveCandidateGeneration: UUID?
     private var launchStartedAt: [UUID: Date] = [:]
     private var engineStartIntentID: UUID?
     private var playbackClient: TVHeadendClient?
     private var playbackClientConfiguration: TVHeadendConfiguration?
     private var commercialAnalysisStartTask: Task<Void, Never>?
+    private var liveChannelOrder: [GuideChannel] = []
+    private var liveChannelOrderConfiguration: TVHeadendConfiguration?
+    private var predictsForwardChannel = true
 #if os(tvOS)
     private struct BackgroundSuspension {
         let presentationID: UUID
@@ -176,9 +181,6 @@ final class PlaybackCoordinator: ObservableObject {
             cancelLivePlaybackPrefetch()
             let presentationID = UUID()
             let needsLaunch = !engine.mediaPlayer.hasVideoOut
-            if prewarmedChannelID == channel.id {
-                engine.finishPrewarmingAtLiveEdge()
-            }
             prewarmTask?.cancel()
             prewarmTask = nil
             prewarmedChannelID = nil
@@ -286,15 +288,24 @@ final class PlaybackCoordinator: ObservableObject {
 
         cancelPlaybackStartIntent()
         clearLaunch(dismissPlayer: false)
-        cancelLivePlaybackPrefetch()
+        predictsForwardChannel = direction == .up
         let intentID = playbackStartIntents.begin()
+        beginLaunch(PlaybackLaunchPresentation(
+            id: intentID,
+            channel: target,
+            program: program,
+            recording: nil
+        ))
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let request = try await client(for: configuration)
-                    .livePlaybackRequest(channelID: target.id)
+                let request = try await livePlaybackRequestForStart(
+                    channelID: target.id,
+                    configuration: configuration
+                )
                 try Task.checkCancellation()
                 guard playbackStartIntents.isCurrent(intentID) else { return }
+                logLaunchStage("request-ready", id: intentID)
 
                 let newPresentation = PlaybackPresentation(
                     id: intentID,
@@ -318,6 +329,7 @@ final class PlaybackCoordinator: ObservableObject {
             } catch {
                 guard playbackStartIntents.isCurrent(intentID) else { return }
                 errorMessage = error.localizedDescription
+                finishLaunch(intentID, dismissPlayer: false)
                 finishPlaybackStartIntent(intentID)
             }
         }
@@ -369,6 +381,7 @@ final class PlaybackCoordinator: ObservableObject {
     func playbackDidStart(presentationID: UUID) {
         logLaunchStage("audio-video-ready", id: presentationID)
         finishLaunch(presentationID, dismissPlayer: false)
+        stagePredictedAdjacentChannel()
     }
 
     func playbackDidFail(presentationID: UUID) {
@@ -389,14 +402,29 @@ final class PlaybackCoordinator: ObservableObject {
         }
         if inFlightLivePrefetch?.key == key { return }
 
-        cancelLivePlaybackPrefetch()
+        invalidateLivePlaybackPrefetch()
         let id = UUID()
+        liveCandidateGeneration = id
         let task = Task { @MainActor [weak self] in
             guard let self else { throw CancellationError() }
             let request = try await client(for: configuration)
                 .livePlaybackRequest(channelID: channelID)
-            if case .live(.nativeTimeshift) = request.kind {
-                await HTSPConnectionPrewarmer.shared.preconnect(configuration: configuration)
+            try Task.checkCancellation()
+            guard liveCandidateGeneration == id,
+                  inFlightLivePrefetch?.id == id
+            else { throw CancellationError() }
+            if let descriptor = HTSPLiveCandidateDescriptor(request) {
+                await HTSPLiveCandidatePool.shared.stage(
+                    descriptor,
+                    generation: id
+                )
+                guard !Task.isCancelled,
+                      liveCandidateGeneration == id,
+                      inFlightLivePrefetch?.id == id
+                else {
+                    await HTSPLiveCandidatePool.shared.cancel(generation: id)
+                    throw CancellationError()
+                }
             }
             return request
         }
@@ -408,6 +436,7 @@ final class PlaybackCoordinator: ObservableObject {
                 let request = try await task.value
                 guard !Task.isCancelled, inFlightLivePrefetch?.id == id else { return }
                 cachedLivePrefetch = CachedLivePrefetch(
+                    id: id,
                     key: key,
                     request: request,
                     completedAt: Date()
@@ -417,14 +446,41 @@ final class PlaybackCoordinator: ObservableObject {
             } catch {
                 guard inFlightLivePrefetch?.id == id else { return }
                 inFlightLivePrefetch = nil
+                cancelLiveCandidateGenerationIfCurrent(id)
             }
         }
     }
 
     func cancelLivePlaybackPrefetch() {
+        invalidateLivePlaybackPrefetch()
+    }
+
+    private func invalidateLivePlaybackPrefetch() {
         inFlightLivePrefetch?.task.cancel()
         inFlightLivePrefetch = nil
         cachedLivePrefetch = nil
+        guard let generation = liveCandidateGeneration else { return }
+        liveCandidateGeneration = nil
+        Task {
+            await HTSPLiveCandidatePool.shared.cancel(generation: generation)
+        }
+    }
+
+    private func cancelLiveCandidateGenerationIfCurrent(_ generation: UUID) {
+        guard liveCandidateGeneration == generation else { return }
+        liveCandidateGeneration = nil
+        Task {
+            await HTSPLiveCandidatePool.shared.cancel(generation: generation)
+        }
+    }
+
+    func updateLiveChannelOrder(
+        _ channels: [GuideChannel],
+        configuration: TVHeadendConfiguration
+    ) {
+        liveChannelOrder = channels
+        liveChannelOrderConfiguration = configuration
+        if launchPresentation == nil { stagePredictedAdjacentChannel() }
     }
 
 #if os(tvOS)
@@ -435,6 +491,7 @@ final class PlaybackCoordinator: ObservableObject {
     func suspendForBackground() {
         foregroundResumeTask?.cancel()
         foregroundResumeTask = nil
+        cancelLivePlaybackPrefetch()
 
         guard isUserInitiatedPlayback, let presentation else {
             backgroundSuspension = nil
@@ -508,52 +565,15 @@ final class PlaybackCoordinator: ObservableObject {
         program: GuideProgram?,
         configuration: TVHeadendConfiguration
     ) {
-        if presentation != nil, prewarmedChannelID == nil { return }
         if prewarmedChannelID == channel.id { return }
 
         prewarmTask?.cancel()
-        isUserInitiatedPlayback = false
+        prewarmTask = nil
         prewarmedChannelID = channel.id
-        let task = Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                guard configuration.isComplete else { return }
-                let request = try await livePlaybackRequestForStart(
-                    channelID: channel.id,
-                    configuration: configuration
-                )
-                guard !Task.isCancelled else { return }
-
-                guard case .live(.nativeTimeshift) = request.kind else {
-                    if prewarmedChannelID == channel.id { prewarmedChannelID = nil }
-                    return
-                }
-
-                engine.stop()
-                presentation = PlaybackPresentation(
-                    channel: channel,
-                    program: program,
-                    recording: nil,
-                    request: request
-                )
-                try await engine.prepare(request)
-                guard !Task.isCancelled else { return }
-                guard engine.activeLivePlaybackMode == .tvHeadend else {
-                    engine.stop()
-                    presentation = nil
-                    if prewarmedChannelID == channel.id { prewarmedChannelID = nil }
-                    return
-                }
-                engine.beginBuffering()
-                prewarmedChannelID = channel.id
-            } catch {
-                if !Task.isCancelled {
-                    logger.info("Live-stream prewarm did not complete: \(error.localizedDescription, privacy: .public)")
-                    if prewarmedChannelID == channel.id { prewarmedChannelID = nil }
-                }
-            }
-        }
-        prewarmTask = task
+        prefetchLivePlaybackRequest(
+            channelID: channel.id,
+            configuration: configuration
+        )
     }
 
     func endPrewarming(channelID: String) {
@@ -566,8 +586,7 @@ final class PlaybackCoordinator: ObservableObject {
                   self.prewarmedChannelID == channelID,
                   !self.isPlayerPresented
             else { return }
-            self.engine.stop()
-            self.presentation = nil
+            self.invalidateLivePlaybackPrefetch()
             self.prewarmedChannelID = nil
         }
     }
@@ -788,6 +807,27 @@ final class PlaybackCoordinator: ObservableObject {
         }
     }
 
+    private func stagePredictedAdjacentChannel() {
+        guard isPlayerPresented,
+              launchPresentation == nil,
+              let presentation,
+              presentation.recording == nil,
+              liveChannelOrder.count > 1,
+              let configuration = liveChannelOrderConfiguration,
+              let currentIndex = liveChannelOrder.firstIndex(where: {
+                  $0.id == presentation.channel.id
+              })
+        else { return }
+        let offset = predictsForwardChannel ? 1 : -1
+        let targetIndex = (
+            currentIndex + offset + liveChannelOrder.count
+        ) % liveChannelOrder.count
+        prefetchLivePlaybackRequest(
+            channelID: liveChannelOrder[targetIndex].id,
+            configuration: configuration
+        )
+    }
+
     private func finishLaunch(_ id: UUID, dismissPlayer: Bool) {
         guard launchPresentation?.id == id else { return }
         clearLaunch(dismissPlayer: dismissPlayer)
@@ -822,24 +862,37 @@ final class PlaybackCoordinator: ObservableObject {
            cachedLivePrefetch.key == key,
            Date().timeIntervalSince(cachedLivePrefetch.completedAt) < Self.livePrefetchLifetime {
             self.cachedLivePrefetch = nil
+            releaseLiveCandidateGeneration(cachedLivePrefetch.id)
             logger.debug("Using prefetched playback request for channel \(channelID, privacy: .public)")
             return cachedLivePrefetch.request
         }
 
         if let inFlightLivePrefetch, inFlightLivePrefetch.key == key {
-            self.inFlightLivePrefetch = nil
             logger.debug("Joining playback request prefetch for channel \(channelID, privacy: .public)")
             let task = inFlightLivePrefetch.task
-            return try await withTaskCancellationHandler {
+            let request = try await withTaskCancellationHandler {
                 try await task.value
             } onCancel: {
                 task.cancel()
             }
+            if self.inFlightLivePrefetch?.id == inFlightLivePrefetch.id {
+                self.inFlightLivePrefetch = nil
+            }
+            if cachedLivePrefetch?.id == inFlightLivePrefetch.id {
+                cachedLivePrefetch = nil
+            }
+            releaseLiveCandidateGeneration(inFlightLivePrefetch.id)
+            return request
         }
 
-        cancelLivePlaybackPrefetch()
+        invalidateLivePlaybackPrefetch()
         return try await client(for: configuration)
             .livePlaybackRequest(channelID: channelID)
+    }
+
+    private func releaseLiveCandidateGeneration(_ generation: UUID) {
+        guard liveCandidateGeneration == generation else { return }
+        liveCandidateGeneration = nil
     }
 
     func startAfterDetailDismissal(
