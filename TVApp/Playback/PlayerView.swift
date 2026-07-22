@@ -22,6 +22,36 @@ enum TimelineSeekCommitPolicy {
     }
 }
 
+enum TimelineScrubbing {
+    static func fraction(at x: CGFloat, width: CGFloat) -> Double {
+        guard width > 0 else { return 0 }
+        return min(max(0, Double(x / width)), 1)
+    }
+
+    static func recordingTarget(
+        at x: CGFloat,
+        width: CGFloat,
+        availableDuration: TimeInterval
+    ) -> TimeInterval {
+        max(0, availableDuration) * fraction(at: x, width: width)
+    }
+
+    static func liveTarget(
+        at x: CGFloat,
+        width: CGFloat,
+        rangeStart: Date,
+        rangeEnd: Date,
+        availableStart: Date,
+        availableEnd: Date
+    ) -> Date {
+        let duration = max(0, rangeEnd.timeIntervalSince(rangeStart))
+        let proposed = rangeStart.addingTimeInterval(
+            duration * fraction(at: x, width: width)
+        )
+        return min(max(proposed, availableStart), availableEnd)
+    }
+}
+
 #if os(macOS)
 enum MacOSPlayerKeyboardCommand: Equatable {
     case togglePlayback
@@ -165,6 +195,7 @@ struct PlaybackView: View {
                             usesCompactHeight: usesCompactHeight,
                             seekBackward: { engine.skipBackward(by: $0); noteActivity() },
                             seekForward: { skipForward(by: $0) },
+                            seekTo: { engine.seek(to: $0); noteActivity() },
                             togglePlayback: toggleTimelinePlayback,
                             showPanel: showPanel
                         )
@@ -187,6 +218,9 @@ struct PlaybackView: View {
                             usesCompactHeight: usesCompactHeight,
                             seekBackward: { stageTimelineSeek(by: -$0) },
                             seekForward: { stageTimelineSeek(by: $0) },
+                            previewSeek: previewTimelineSeek,
+                            commitSeek: commitTimelineSeek,
+                            returnToLive: { Task { await returnToLive() } },
                             togglePlayback: toggleTimelinePlayback,
                             showPanel: showPanel
                         )
@@ -615,15 +649,32 @@ struct PlaybackView: View {
         guard abs(target.timeIntervalSince(current)) > NativeTimeshiftActionPlan.liveEdgeTolerance else {
             return false
         }
-        timelineSeekTargetDate = target
-        let targetsLiveEdge = target >= liveEdge.addingTimeInterval(
-            -NativeTimeshiftActionPlan.liveEdgeTolerance
-        )
-        timelineSeekTargetsLiveEdge = targetsLiveEdge
-        noteActivity()
-
+        updateTimelineSeekTarget(target, liveEdge: liveEdge)
         scheduleTimelineSeekCommit()
         return true
+    }
+
+    private func previewTimelineSeek(_ proposedTarget: Date) {
+        guard !presentation.isRecording, engine.isSeekable else { return }
+        timelineSeekCommitTask?.cancel()
+        timelineSeekCommitTask = nil
+        updateTimelineSeekTarget(proposedTarget)
+    }
+
+    private func commitTimelineSeek(_ proposedTarget: Date) {
+        guard !presentation.isRecording, engine.isSeekable else { return }
+        updateTimelineSeekTarget(proposedTarget)
+        scheduleTimelineSeekCommit(afterMilliseconds: 0)
+    }
+
+    private func updateTimelineSeekTarget(_ proposedTarget: Date, liveEdge: Date = Date()) {
+        let availableStart = engine.bufferStartedAt ?? liveEdge
+        let target = min(max(proposedTarget, availableStart), liveEdge)
+        timelineSeekTargetDate = target
+        timelineSeekTargetsLiveEdge = target >= liveEdge.addingTimeInterval(
+            -NativeTimeshiftActionPlan.liveEdgeTolerance
+        )
+        noteActivity()
     }
 
     private func scheduleTimelineSeekCommit(
@@ -773,6 +824,7 @@ private struct RecordingPlaybackTimeline: View {
     let usesCompactHeight: Bool
     let seekBackward: (TimeInterval) -> Void
     let seekForward: (TimeInterval) -> Void
+    let seekTo: (TimeInterval) -> Void
     let togglePlayback: () -> Void
     let showPanel: () -> Void
 
@@ -813,33 +865,15 @@ private struct RecordingPlaybackTimeline: View {
                 }
             }
 
-            GeometryReader { geometry in
-                let width = geometry.size.width
-                let availableWidth = width * CGFloat(availableDuration / totalDuration)
-                let playhead = width * CGFloat(min(max(0, elapsedSeconds / totalDuration), 1))
-
-                ZStack(alignment: .topLeading) {
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(.white.opacity(isFocused ? 0.24 : 0.16))
-                        .frame(height: 16)
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(AppTheme.accent.opacity(0.82))
-                        .frame(width: max(0, availableWidth), height: 16)
-                    Rectangle()
-                        .fill(.white)
-                        .frame(width: 3, height: 31)
-                        .offset(x: min(max(0, playhead - 1.5), width - 3))
-                    Text(playbackTimeLabel(recording.start.addingTimeInterval(elapsedSeconds)))
-                        .font(.callout.bold().monospacedDigit())
-                        .foregroundStyle(.white)
-                        .fixedSize()
-                        .position(
-                            x: min(max(timeLabelInset, playhead), width - timeLabelInset),
-                            y: 38
-                        )
-                }
-            }
-            .frame(height: 52)
+            RecordingTimelineBar(
+                recordingStart: recording.start,
+                totalDuration: totalDuration,
+                availableDuration: availableDuration,
+                elapsedSeconds: elapsedSeconds,
+                isPaused: isPaused,
+                isFocused: isFocused,
+                seek: seekTo
+            )
 
             Group {
                 if usesCompactLayout && !usesCompactHeight {
@@ -873,6 +907,8 @@ private struct RecordingPlaybackTimeline: View {
                 usesCompactLayout: usesCompactLayout,
                 seekBackward: { seekBackward(15) },
                 seekForward: { seekForward(15) },
+                showsGoLive: false,
+                goLive: {},
                 togglePlayback: togglePlayback,
                 showPanel: showPanel
             )
@@ -911,8 +947,90 @@ private struct RecordingPlaybackTimeline: View {
         date.formatted(date: .omitted, time: .standard)
     }
 
+}
+
+private struct RecordingTimelineBar: View {
+    let recordingStart: Date
+    let totalDuration: TimeInterval
+    let availableDuration: TimeInterval
+    let elapsedSeconds: TimeInterval
+    let isPaused: Bool
+    let isFocused: Bool
+    let seek: (TimeInterval) -> Void
+
+    @State private var scrubTargetSeconds: TimeInterval?
+
+    var body: some View {
+        GeometryReader { geometry in
+            let width = geometry.size.width
+            let displayedElapsed = scrubTargetSeconds ?? elapsedSeconds
+            let availableWidth = width * CGFloat(availableDuration / totalDuration)
+            let playhead = width * CGFloat(min(max(0, displayedElapsed / totalDuration), 1))
+
+            interactiveTimeline(
+                ZStack(alignment: .topLeading) {
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(.white.opacity(isFocused ? 0.24 : 0.16))
+                        .frame(height: 16)
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(AppTheme.accent.opacity(0.82))
+                        .frame(width: max(0, availableWidth), height: 16)
+                    Rectangle()
+                        .fill(.white)
+                        .frame(width: 3, height: 31)
+                        .offset(x: min(max(0, playhead - 1.5), width - 3))
+                    Text(playbackTimeLabel(recordingStart.addingTimeInterval(displayedElapsed)))
+                        .font(.callout.bold().monospacedDigit())
+                        .foregroundStyle(.white)
+                        .fixedSize()
+                        .position(
+                            x: min(max(timeLabelInset, playhead), width - timeLabelInset),
+                            y: 38
+                        )
+                },
+                width: width
+            )
+        }
+        .frame(height: 52)
+        .accessibilityLabel("Playback position")
+        .accessibilityValue(playbackTimeLabel(recordingStart.addingTimeInterval(elapsedSeconds)))
+        .accessibilityAdjustableAction { direction in
+            let delta: TimeInterval = direction == .increment ? 15 : -15
+            seek(min(max(0, elapsedSeconds + delta), availableDuration))
+        }
+    }
+
+    @ViewBuilder
+    private func interactiveTimeline<Content: View>(_ content: Content, width: CGFloat) -> some View {
+#if os(tvOS)
+        content
+#else
+        content
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        scrubTargetSeconds = TimelineScrubbing.recordingTarget(
+                            at: value.location.x,
+                            width: width,
+                            availableDuration: availableDuration
+                        )
+                    }
+                    .onEnded { value in
+                        let target = TimelineScrubbing.recordingTarget(
+                            at: value.location.x,
+                            width: width,
+                            availableDuration: availableDuration
+                        )
+                        scrubTargetSeconds = nil
+                        seek(target)
+                    }
+            )
+#endif
+    }
+
     private func playbackTimeLabel(_ date: Date) -> String {
-        clock(date) + (isPaused ? " · Paused" : "")
+        date.formatted(date: .omitted, time: .standard) + (isPaused ? " · Paused" : "")
     }
 
     private var timeLabelInset: CGFloat { isPaused ? 86 : 54 }
@@ -934,6 +1052,9 @@ private struct ProgrammePlaybackTimeline: View {
     let usesCompactHeight: Bool
     let seekBackward: (TimeInterval) -> Void
     let seekForward: (TimeInterval) -> Void
+    let previewSeek: (Date) -> Void
+    let commitSeek: (Date) -> Void
+    let returnToLive: () -> Void
     let togglePlayback: () -> Void
     let showPanel: () -> Void
 
@@ -1004,7 +1125,10 @@ private struct ProgrammePlaybackTimeline: View {
                     availableStart: max(program.start, bufferStartedAt ?? liveDate),
                     availableEnd: min(program.end, liveDate),
                     isPaused: isPaused,
-                    isFocused: isFocused
+                    isFocused: isFocused,
+                    canSeek: canSeek,
+                    previewSeek: previewSeek,
+                    commitSeek: commitSeek
                 )
 
                 Group {
@@ -1060,6 +1184,10 @@ private struct ProgrammePlaybackTimeline: View {
                 usesCompactLayout: usesCompactLayout,
                 seekBackward: { seekBackward(15) },
                 seekForward: { seekForward(15) },
+                showsGoLive: canSeek
+                    && liveDate.timeIntervalSince(playbackDate)
+                        > NativeTimeshiftActionPlan.liveEdgeTolerance,
+                goLive: returnToLive,
                 togglePlayback: togglePlayback,
                 showPanel: showPanel
             )
@@ -1113,6 +1241,8 @@ private struct PlaybackTransportControls: View {
     let usesCompactLayout: Bool
     let seekBackward: () -> Void
     let seekForward: () -> Void
+    let showsGoLive: Bool
+    let goLive: () -> Void
     let togglePlayback: () -> Void
     let showPanel: () -> Void
 
@@ -1143,6 +1273,19 @@ private struct PlaybackTransportControls: View {
             }
             .disabled(!canSeek)
 
+            if showsGoLive {
+                Button(action: goLive) {
+                    if usesCompactLayout {
+                        Label("Go Live", systemImage: "dot.radiowaves.left.and.right")
+                            .labelStyle(.iconOnly)
+                            .frame(width: 36, height: 36)
+                    } else {
+                        Label("Go Live", systemImage: "dot.radiowaves.left.and.right")
+                    }
+                }
+                .accessibilityLabel("Go Live")
+            }
+
             Spacer(minLength: usesCompactLayout ? 0 : 8)
 
             Button(action: showPanel) {
@@ -1170,6 +1313,9 @@ private struct TimelineBar: View {
     let availableEnd: Date
     let isPaused: Bool
     let isFocused: Bool
+    let canSeek: Bool
+    let previewSeek: (Date) -> Void
+    let commitSeek: (Date) -> Void
 
     var body: some View {
         GeometryReader { geometry in
@@ -1179,32 +1325,78 @@ private struct TimelineBar: View {
             let availableX = position(availableStart, width: width, duration: duration)
             let availableRight = position(availableEnd, width: width, duration: duration)
 
-            ZStack(alignment: .topLeading) {
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(.white.opacity(isFocused ? 0.24 : 0.16))
-                    .frame(height: 16)
+            interactiveTimeline(
+                ZStack(alignment: .topLeading) {
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(.white.opacity(isFocused ? 0.24 : 0.16))
+                        .frame(height: 16)
 
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(AppTheme.accent.opacity(0.82))
-                    .frame(width: max(0, availableRight - availableX), height: 16)
-                    .offset(x: availableX)
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(AppTheme.accent.opacity(0.82))
+                        .frame(width: max(0, availableRight - availableX), height: 16)
+                        .offset(x: availableX)
 
-                Rectangle()
-                    .fill(.white)
-                    .frame(width: 3, height: 31)
-                    .offset(x: min(max(0, playhead - 1.5), width - 3))
+                    Rectangle()
+                        .fill(.white)
+                        .frame(width: 3, height: 31)
+                        .offset(x: min(max(0, playhead - 1.5), width - 3))
 
-                Text(playbackTimeLabel(playbackDate))
-                    .font(.callout.bold().monospacedDigit())
-                    .foregroundStyle(.white)
-                    .fixedSize()
-                    .position(
-                        x: min(max(timeLabelInset, playhead), width - timeLabelInset),
-                        y: 38
-                    )
-            }
+                    Text(playbackTimeLabel(playbackDate))
+                        .font(.callout.bold().monospacedDigit())
+                        .foregroundStyle(.white)
+                        .fixedSize()
+                        .position(
+                            x: min(max(timeLabelInset, playhead), width - timeLabelInset),
+                            y: 38
+                        )
+                },
+                width: width
+            )
         }
         .frame(height: 52)
+        .accessibilityLabel("Playback position")
+        .accessibilityValue(playbackTimeLabel(playbackDate))
+        .accessibilityAdjustableAction { direction in
+            guard canSeek else { return }
+            let delta: TimeInterval = direction == .increment ? 15 : -15
+            commitSeek(
+                min(max(playbackDate.addingTimeInterval(delta), availableStart), availableEnd)
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func interactiveTimeline<Content: View>(_ content: Content, width: CGFloat) -> some View {
+#if os(tvOS)
+        content
+#else
+        if canSeek {
+            content
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            previewSeek(target(at: value.location.x, width: width))
+                        }
+                        .onEnded { value in
+                            commitSeek(target(at: value.location.x, width: width))
+                        }
+                )
+        } else {
+            content
+        }
+#endif
+    }
+
+    private func target(at x: CGFloat, width: CGFloat) -> Date {
+        TimelineScrubbing.liveTarget(
+            at: x,
+            width: width,
+            rangeStart: program.start,
+            rangeEnd: program.end,
+            availableStart: availableStart,
+            availableEnd: availableEnd
+        )
     }
 
     private func position(_ date: Date, width: CGFloat, duration: TimeInterval) -> CGFloat {

@@ -21,6 +21,74 @@ final class PlatformAdaptationTests: XCTestCase {
         XCTAssertEqual(directions.count, 4)
     }
 
+    func testTimelineScrubbingClampsRecordingTargetsToAvailableContent() {
+        XCTAssertEqual(
+            TimelineScrubbing.recordingTarget(
+                at: -20,
+                width: 200,
+                availableDuration: 600
+            ),
+            0
+        )
+        XCTAssertEqual(
+            TimelineScrubbing.recordingTarget(
+                at: 100,
+                width: 200,
+                availableDuration: 600
+            ),
+            300
+        )
+        XCTAssertEqual(
+            TimelineScrubbing.recordingTarget(
+                at: 250,
+                width: 200,
+                availableDuration: 600
+            ),
+            600
+        )
+    }
+
+    func testTimelineScrubbingClampsLiveTargetsToTimeshiftAvailability() {
+        let programStart = Date(timeIntervalSinceReferenceDate: 1_000)
+        let programEnd = programStart.addingTimeInterval(1_000)
+        let availableStart = programStart.addingTimeInterval(200)
+        let availableEnd = programStart.addingTimeInterval(800)
+
+        XCTAssertEqual(
+            TimelineScrubbing.liveTarget(
+                at: 0,
+                width: 100,
+                rangeStart: programStart,
+                rangeEnd: programEnd,
+                availableStart: availableStart,
+                availableEnd: availableEnd
+            ),
+            availableStart
+        )
+        XCTAssertEqual(
+            TimelineScrubbing.liveTarget(
+                at: 50,
+                width: 100,
+                rangeStart: programStart,
+                rangeEnd: programEnd,
+                availableStart: availableStart,
+                availableEnd: availableEnd
+            ),
+            programStart.addingTimeInterval(500)
+        )
+        XCTAssertEqual(
+            TimelineScrubbing.liveTarget(
+                at: 100,
+                width: 100,
+                rangeStart: programStart,
+                rangeEnd: programEnd,
+                availableStart: availableStart,
+                availableEnd: availableEnd
+            ),
+            availableEnd
+        )
+    }
+
 #if os(macOS)
     func testMacOSPlayerPlaybackShortcuts() {
         XCTAssertEqual(
