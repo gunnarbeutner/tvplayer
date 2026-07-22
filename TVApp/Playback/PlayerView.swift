@@ -131,6 +131,9 @@ struct PlaybackView: View {
     @State private var timelineSeekRepeatTask: Task<Void, Never>?
     @State private var transientPlaybackStatus: String?
     @State private var playbackStatusDismissTask: Task<Void, Never>?
+    @State private var isUserPaused = false
+    @State private var userPauseRequestPending = false
+    @State private var userResumeRequestPending = false
 #if os(tvOS)
     @State private var timelineSeekRepeatedDuringPress = false
 #endif
@@ -219,7 +222,7 @@ struct PlaybackView: View {
                             recording: recording,
                             elapsedSeconds: engine.elapsedSeconds,
                             isPlaying: engine.state == .playing,
-                            isPaused: engine.state == .paused,
+                            isPaused: isUserPaused,
                             canSeek: engine.isSeekable,
                             usesCompactLayout: usesCompactLayout,
                             usesCompactHeight: usesCompactHeight,
@@ -243,7 +246,7 @@ struct PlaybackView: View {
                             canPause: engine.canPause,
                             canSeek: engine.isSeekable,
                             isPlaying: engine.state == .playing,
-                            isPaused: engine.state == .paused,
+                            isPaused: isUserPaused,
                             usesCompactLayout: usesCompactLayout,
                             usesCompactHeight: usesCompactHeight,
                             seekBackward: { stageTimelineSeek(by: -$0) },
@@ -364,6 +367,9 @@ struct PlaybackView: View {
         }
         .task(id: presentation.id) {
             hasStartedCurrentPresentation = false
+            isUserPaused = false
+            userPauseRequestPending = false
+            userResumeRequestPending = false
             if engine.state == .paused {
                 engine.play()
                 requestVideoReattachment()
@@ -516,11 +522,17 @@ struct PlaybackView: View {
             return .handled
         }
 #endif
-        .onChange(of: engine.state) { previousState, state in
-            let announcesPause = state == .paused
-                && previousState != .paused
-                && hasStartedCurrentPresentation
-            let announcesResume = state == .playing && previousState == .paused
+        .onChange(of: engine.state) { _, state in
+            let announcesPause = state == .paused && userPauseRequestPending
+            let announcesResume = state == .playing && userResumeRequestPending
+
+            if announcesPause {
+                userPauseRequestPending = false
+                isUserPaused = true
+            }
+            if announcesResume {
+                userResumeRequestPending = false
+            }
 
             if state == .playing {
                 hasStartedCurrentPresentation = true
@@ -606,6 +618,14 @@ struct PlaybackView: View {
 
     private func toggleTimelinePlayback() {
         let wasPlaying = engine.mediaPlayer.isPlaying
+        if wasPlaying, engine.canPause {
+            userPauseRequestPending = true
+            userResumeRequestPending = false
+        } else if isUserPaused {
+            isUserPaused = false
+            userPauseRequestPending = false
+            userResumeRequestPending = true
+        }
         engine.togglePlayPause()
         if !wasPlaying { requestVideoReattachment() }
         showTimeline()
@@ -1225,18 +1245,19 @@ private struct ProgrammePlaybackTimeline: View {
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(.white.opacity(0.76))
 
-                if let seekTargetDate {
-                    Label(
+                Label(
+                    seekTargetDate.map {
                         seekTargetsLiveEdge
                             ? "Go to live"
-                            : seekDescription(target: seekTargetDate, liveEdge: liveDate),
-                        systemImage: "scope"
-                    )
-                    .font(.callout.weight(.semibold).monospacedDigit())
-                    .foregroundStyle(AppTheme.accent)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .transition(.opacity)
-                }
+                            : seekDescription(target: $0, liveEdge: liveDate)
+                    } ?? "Seek position",
+                    systemImage: "scope"
+                )
+                .font(.callout.weight(.semibold).monospacedDigit())
+                .foregroundStyle(AppTheme.accent)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .opacity(seekTargetDate == nil ? 0 : 1)
+                .accessibilityHidden(seekTargetDate == nil)
             } else {
                 Capsule().fill(.white.opacity(0.25)).frame(height: 14)
             }
