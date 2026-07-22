@@ -249,6 +249,7 @@ final class GuideTimelineTests: XCTestCase {
         )
         let snapshot = PersistedGuideSnapshot(
             serverIdentifier: "server|viewer||",
+            channelPreferencesIdentifier: "profile:stable-id",
             serverName: "Test TVHeadend",
             savedAt: now,
             channels: [channel]
@@ -267,6 +268,7 @@ final class GuideTimelineTests: XCTestCase {
 
         XCTAssertEqual(restored.first?.name, channel.name)
         XCTAssertEqual(restored.first?.programs.map(\.id), ["current"])
+        XCTAssertEqual(loaded.startupChannelPreferencesIdentifier, "profile:stable-id")
         let mismatchedSnapshot = await store.load(serverIdentifier: "another-server")
         XCTAssertNil(mismatchedSnapshot)
     }

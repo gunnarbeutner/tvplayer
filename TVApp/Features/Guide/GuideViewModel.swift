@@ -208,6 +208,7 @@ final class GuideViewModel: ObservableObject {
 
             let persistedSnapshot = PersistedGuideSnapshot(
                 serverIdentifier: snapshotIdentifier,
+                channelPreferencesIdentifier: configuration.channelPreferencesIdentifier,
                 serverName: snapshot.serverName,
                 savedAt: date,
                 channels: snapshot.channels

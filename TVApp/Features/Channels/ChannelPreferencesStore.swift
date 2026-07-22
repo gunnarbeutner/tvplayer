@@ -41,9 +41,14 @@ final class ChannelPreferencesStore: ObservableObject {
             persist()
         }
         activeServerIdentifier = serverIdentifier
-        favoriteChannelIDs = serverIdentifier
+        let activatedFavoriteChannelIDs = serverIdentifier
             .flatMap { payload.profiles[$0]?.favoriteChannelIDs }
             ?? []
+        // A discovered server may replace a legacy/cache identifier without
+        // changing the actual favourites. Do not make the guide rebuild and
+        // restore focus when its visible ordering is already correct.
+        guard favoriteChannelIDs != activatedFavoriteChannelIDs else { return }
+        favoriteChannelIDs = activatedFavoriteChannelIDs
         revision &+= 1
     }
 

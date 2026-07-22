@@ -5,6 +5,10 @@ struct PersistedGuideSnapshot: Codable, Sendable {
 
     let version: Int
     let serverIdentifier: String
+    /// Lets startup restore the channel ordering before discovery has rebuilt
+    /// the active server configuration. Older snapshots fall back to deriving
+    /// this from `serverIdentifier` below.
+    let channelPreferencesIdentifier: String?
     let serverName: String
     let savedAt: Date
     let channels: [PersistedGuideChannel]
@@ -12,15 +16,49 @@ struct PersistedGuideSnapshot: Codable, Sendable {
     @MainActor
     init(
         serverIdentifier: String,
+        channelPreferencesIdentifier: String? = nil,
         serverName: String,
         savedAt: Date = Date(),
         channels: [GuideChannel]
     ) {
         version = Self.currentVersion
         self.serverIdentifier = serverIdentifier
+        self.channelPreferencesIdentifier = channelPreferencesIdentifier
         self.serverName = serverName
         self.savedAt = savedAt
         self.channels = channels.map(PersistedGuideChannel.init)
+    }
+
+    /// The guide cache can be restored before mDNS has supplied a
+    /// configuration. Use the cache's source identity to restore the matching
+    /// favourites during that same synchronous startup pass.
+    var startupChannelPreferencesIdentifier: String? {
+        if let channelPreferencesIdentifier {
+            return channelPreferencesIdentifier
+        }
+        if serverIdentifier.hasPrefix("profile:") {
+            return serverIdentifier
+        }
+
+        // Version-1 guide identifiers were encoded as
+        // baseURL|username|guideCacheURL|xmltvURL. Reconstruct the older
+        // preference key so existing caches also get a stable first frame.
+        let components = serverIdentifier.split(
+            separator: "|",
+            maxSplits: 3,
+            omittingEmptySubsequences: false
+        )
+        guard components.count == 4,
+              let baseURL = URL(string: String(components[0]))
+        else { return nil }
+        return TVHeadendConfiguration(
+            baseURL: baseURL,
+            username: String(components[1]),
+            password: "",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil
+        ).legacyChannelPreferencesIdentifier
     }
 
     @MainActor

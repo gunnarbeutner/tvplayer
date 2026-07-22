@@ -73,15 +73,35 @@ final class ChannelPreferencesTests: XCTestCase {
         store.toggleFavorite("two")
 
         store = ChannelPreferencesStore(defaults: defaults)
+        store.activate(serverIdentifier: "legacy-url-and-user")
+        let revisionBeforeMigration = store.revision
         store.activate(
             serverIdentifier: "profile:stable-id",
             migratingFrom: "legacy-url-and-user"
         )
 
         XCTAssertEqual(store.favoriteChannelIDs, ["two"])
+        XCTAssertEqual(store.revision, revisionBeforeMigration)
+        store.toggleFavorite("three")
         store.activate(serverIdentifier: "another-profile")
         XCTAssertTrue(store.favoriteChannelIDs.isEmpty)
         store.activate(serverIdentifier: "profile:stable-id")
+        XCTAssertEqual(store.favoriteChannelIDs, ["two", "three"])
+    }
+
+    @MainActor func testCachedGuideIdentityRestoresFavoritesBeforeDiscovery() {
+        var store = makeStore(server: "http://tvheadend.local:9981|viewer")
+        store.toggleFavorite("two")
+
+        store = ChannelPreferencesStore(defaults: defaults)
+        let snapshot = PersistedGuideSnapshot(
+            serverIdentifier: "http://tvheadend.local:9981|viewer||",
+            serverName: "Cached TVHeadend",
+            channels: []
+        )
+        store.activate(serverIdentifier: snapshot.startupChannelPreferencesIdentifier)
+
+        XCTAssertEqual(snapshot.startupChannelPreferencesIdentifier, "http://tvheadend.local:9981|viewer")
         XCTAssertEqual(store.favoriteChannelIDs, ["two"])
     }
 

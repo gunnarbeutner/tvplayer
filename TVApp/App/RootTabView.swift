@@ -65,7 +65,8 @@ struct RootTabView: View {
         _settings = StateObject(wrappedValue: settings)
         let channelPreferences = ChannelPreferencesStore()
         channelPreferences.activate(
-            serverIdentifier: configuration.channelPreferencesIdentifier,
+            serverIdentifier: configuration.channelPreferencesIdentifier
+                ?? cachedSnapshot?.startupChannelPreferencesIdentifier,
             migratingFrom: configuration.legacyChannelPreferencesIdentifier
         )
         _channelPreferences = StateObject(wrappedValue: channelPreferences)
