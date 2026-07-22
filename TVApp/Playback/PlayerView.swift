@@ -306,6 +306,7 @@ struct PlaybackView: View {
                             seekTargetDate: timelineSeekTargetDate,
                             seekTargetsLiveEdge: timelineSeekTargetsLiveEdge,
                             seekBoundaryFeedback: timelineSeekBoundaryFeedback,
+                            commercialBreaks: playback.commercialBreaks,
                             liveDelaySeconds: engine.liveDelaySeconds,
                             bufferStartedAt: engine.bufferStartedAt,
                             canPause: engine.canPause,
@@ -609,6 +610,11 @@ struct PlaybackView: View {
                 announcePlaybackStatus("paused")
             } else if announcesResume {
                 announcePlaybackStatus("playing")
+            }
+        }
+        .onChange(of: engine.bufferStartedAt) { _, bufferStartedAt in
+            if let bufferStartedAt {
+                playback.pruneCommercialBreaks(before: bufferStartedAt)
             }
         }
     }
@@ -1229,6 +1235,7 @@ private struct ProgrammePlaybackTimeline: View {
     let seekTargetDate: Date?
     let seekTargetsLiveEdge: Bool
     let seekBoundaryFeedback: TimelineSeekBoundaryFeedback?
+    let commercialBreaks: [CommercialBreak]
     let liveDelaySeconds: TimeInterval
     let bufferStartedAt: Date?
     let canPause: Bool
@@ -1316,6 +1323,7 @@ private struct ProgrammePlaybackTimeline: View {
                     playbackDate: playbackDate,
                     availableStart: max(program.start, bufferStartedAt ?? liveDate),
                     availableEnd: min(program.end, liveDate),
+                    commercialBreaks: commercialBreaks,
                     isPaused: isPaused,
                     isFocused: isFocused,
                     canSeek: canSeek,
@@ -1487,6 +1495,7 @@ private struct TimelineBar: View {
     let playbackDate: Date
     let availableStart: Date
     let availableEnd: Date
+    let commercialBreaks: [CommercialBreak]
     let isPaused: Bool
     let isFocused: Bool
     let canSeek: Bool
@@ -1512,6 +1521,24 @@ private struct TimelineBar: View {
                         .frame(width: max(0, availableRight - availableX), height: 16)
                         .offset(x: availableX)
 
+                    ForEach(commercialBreaks) { commercial in
+                        let start = max(commercial.start, max(program.start, availableStart))
+                        let end = min(commercial.end, min(program.end, availableEnd))
+                        if end > start {
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(Color.orange.opacity(0.92))
+                                .frame(
+                                    width: max(
+                                        2,
+                                        position(end, width: width, duration: duration)
+                                            - position(start, width: width, duration: duration)
+                                    ),
+                                    height: 16
+                                )
+                                .offset(x: position(start, width: width, duration: duration))
+                        }
+                    }
+
                     Rectangle()
                         .fill(.white)
                         .frame(width: 3, height: 31)
@@ -1531,7 +1558,12 @@ private struct TimelineBar: View {
         }
         .frame(height: 52)
         .accessibilityLabel("Playback position")
-        .accessibilityValue(playbackTimeLabel(playbackDate))
+        .accessibilityValue(
+            playbackTimeLabel(playbackDate)
+                + (commercialBreaks.contains(where: { $0.contains(playbackDate) })
+                    ? ", Commercial"
+                    : "")
+        )
         .accessibilityAdjustableAction { direction in
             guard canSeek else { return }
             let delta = direction == .increment

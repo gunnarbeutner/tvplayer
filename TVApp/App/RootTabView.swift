@@ -128,6 +128,16 @@ struct RootTabView: View {
 
     var body: some View {
         ZStack {
+            // The commercial analyser follows the live edge independently of
+            // the visible player. Keep a tiny native drawable mounted so VLC
+            // can retain hardware decoding while snapshots are sampled.
+            VLCVideoSurface(mediaPlayer: playback.commercialAnalyzer.mediaPlayer)
+                .frame(width: 160, height: 90)
+                .opacity(0.001)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+                .zIndex(-2)
+
             // The player is a sibling layer rather than a full-screen cover,
             // so the tab content underneath stays mounted and focusable.
             // Disable it while the player is up; otherwise remote presses

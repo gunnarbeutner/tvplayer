@@ -98,14 +98,18 @@ final class PlaybackCoordinator: ObservableObject {
 
     private static let livePrefetchLifetime: TimeInterval = 8
     private let logger = Logger(subsystem: "de.beutner.TVPlayer", category: "PlaybackCoordinator")
-    @Published var presentation: PlaybackPresentation?
+    @Published var presentation: PlaybackPresentation? {
+        didSet { synchronizeCommercialAnalysis() }
+    }
     @Published private(set) var launchPresentation: PlaybackLaunchPresentation?
     @Published var isPlayerPresented = false
     @Published var errorMessage: String?
     @Published private(set) var navigationSelection: PlaybackNavigationSelection?
     @Published private(set) var focusReturnRevision = 0
     @Published private(set) var isUserInitiatedPlayback = false
+    @Published private(set) var commercialBreaks: [CommercialBreak] = []
     let engine: VLCPlaybackEngine
+    let commercialAnalyzer: CommercialLiveAnalyzer
 #if os(tvOS)
     let pictureInPicture: PictureInPictureCoordinator
 #endif
@@ -119,6 +123,7 @@ final class PlaybackCoordinator: ObservableObject {
     private var engineStartIntentID: UUID?
     private var playbackClient: TVHeadendClient?
     private var playbackClientConfiguration: TVHeadendConfiguration?
+    private var commercialAnalysisStartTask: Task<Void, Never>?
 #if os(tvOS)
     private struct BackgroundSuspension {
         let presentationID: UUID
@@ -131,11 +136,16 @@ final class PlaybackCoordinator: ObservableObject {
 
     init() {
         let engine = VLCPlaybackEngine()
+        let commercialAnalyzer = CommercialLiveAnalyzer()
         self.engine = engine
+        self.commercialAnalyzer = commercialAnalyzer
 #if os(tvOS)
         pictureInPicture = PictureInPictureCoordinator(engine: engine)
         pictureInPicture.connect(to: self)
 #endif
+        commercialAnalyzer.breaksChanged = { [weak self] breaks in
+            self?.commercialBreaks = breaks
+        }
     }
 
     var isUserInitiatedLivePlayback: Bool {
@@ -341,6 +351,10 @@ final class PlaybackCoordinator: ObservableObject {
         isPlayerPresented = false
     }
 
+    func pruneCommercialBreaks(before date: Date) {
+        commercialAnalyzer.prune(before: date)
+    }
+
     func returnToPlayer() {
         guard presentation != nil else { return }
         isPlayerPresented = true
@@ -441,6 +455,8 @@ final class PlaybackCoordinator: ObservableObject {
             presentationID: presentation.id,
             wasPlaying: wasPlaying
         )
+        commercialAnalysisStartTask?.cancel()
+        commercialAnalyzer.stop(resetMarkers: false)
 
         if presentation.isRecording {
             if wasPlaying { engine.pause() }
@@ -456,6 +472,8 @@ final class PlaybackCoordinator: ObservableObject {
         guard let suspension = backgroundSuspension else { return }
         backgroundSuspension = nil
         guard let presentation, presentation.id == suspension.presentationID else { return }
+
+        synchronizeCommercialAnalysis(forceRestart: true)
 
         try? AVAudioSession.sharedInstance().setActive(true)
 
@@ -686,6 +704,42 @@ final class PlaybackCoordinator: ObservableObject {
         playbackClient = client
         playbackClientConfiguration = configuration
         return client
+    }
+
+    private func synchronizeCommercialAnalysis(forceRestart: Bool = false) {
+        commercialAnalysisStartTask?.cancel()
+        guard let presentation,
+              presentation.recording == nil,
+              case let .live(.nativeTimeshift(htsp)) = presentation.request.kind
+        else {
+            commercialAnalyzer.stop(resetMarkers: true)
+            commercialBreaks = []
+            return
+        }
+        if !forceRestart, commercialAnalyzer.channelID == presentation.channel.id { return }
+
+        commercialAnalyzer.stop(
+            resetMarkers: commercialAnalyzer.channelID != presentation.channel.id
+        )
+        let presentationID = presentation.id
+        let channelID = presentation.channel.id
+        let profile = presentation.request.profile
+        commercialAnalysisStartTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let url = try await TVHeadendClient(configuration: htsp.configuration)
+                    .canonicalLiveStreamURL(channelID: channelID, profile: profile)
+                try Task.checkCancellation()
+                guard self.presentation?.id == presentationID else { return }
+                self.commercialAnalyzer.start(channelID: channelID, url: url)
+            } catch is CancellationError {
+                return
+            } catch {
+                self.logger.info(
+                    "Commercial analysis unavailable: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
     }
 
     private func cancelPlaybackStartIntent() {
