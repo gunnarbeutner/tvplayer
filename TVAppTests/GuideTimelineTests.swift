@@ -390,6 +390,58 @@ final class GuideTimelineTests: XCTestCase {
         XCTAssertEqual(model.loadState, .loaded(serverName: "Cached TVHeadend", channelCount: 1))
     }
 
+    @MainActor
+    func testGuideModelSupersedesAnInFlightLoadForANewServer() async {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let oldConfiguration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://old-guide-race.test:9981")!,
+            username: "",
+            password: "",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil
+        )
+        let newConfiguration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://new-guide-race.test:9981")!,
+            username: "",
+            password: "",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil
+        )
+        let oldLoadStarted = expectation(description: "Old guide load started")
+        let model = GuideViewModel(now: now) { configuration, _, _ in
+            if configuration == oldConfiguration {
+                oldLoadStarted.fulfill()
+                try await Task.sleep(for: .seconds(30))
+                return TVProviderSnapshot(channels: [], serverName: "Old server")
+            }
+            return TVProviderSnapshot(
+                channels: [GuideChannel(
+                    id: "new-channel",
+                    number: 1,
+                    name: "New channel",
+                    monogram: "NC",
+                    tint: .blue,
+                    iconURL: nil,
+                    programs: []
+                )],
+                serverName: "New server"
+            )
+        }
+
+        let oldLoad = Task {
+            await model.load(configuration: oldConfiguration, at: now, force: true)
+        }
+        await fulfillment(of: [oldLoadStarted], timeout: 1)
+
+        await model.load(configuration: newConfiguration, at: now, force: true)
+        await oldLoad.value
+
+        XCTAssertEqual(model.channels.map(\.id), ["new-channel"])
+        XCTAssertEqual(model.loadState, .loaded(serverName: "New server", channelCount: 1))
+    }
+
     func testOffsetsAreClampedToTimeline() {
         let start = Date(timeIntervalSince1970: 10_000)
         let timeline = GuideTimeline(start: start, end: start.addingTimeInterval(3_600))

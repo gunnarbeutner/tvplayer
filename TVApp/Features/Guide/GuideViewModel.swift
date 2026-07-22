@@ -9,6 +9,12 @@ enum GuideLoadState: Equatable {
 
 @MainActor
 final class GuideViewModel: ObservableObject {
+    typealias GuideFetch = @MainActor (
+        _ configuration: TVHeadendConfiguration,
+        _ timeline: GuideTimeline,
+        _ channelUpdate: (@MainActor @Sendable ([GuideChannel]) -> Void)?
+    ) async throws -> TVProviderSnapshot
+
     @Published private(set) var now: Date
     @Published private(set) var timeline: GuideTimeline {
         didSet { guideRevision &+= 1 }
@@ -29,7 +35,9 @@ final class GuideViewModel: ObservableObject {
     private var lastConfiguration: TVHeadendConfiguration?
     private var lastLoadedAt: Date?
     private var activeSnapshotIdentifier: String?
-    private var isLoading = false
+    private var loadTask: Task<Void, Never>?
+    private var loadGeneration = 0
+    private let fetchGuide: GuideFetch
     private var programByID: [GuideProgram.ID: GuideProgram] = [:]
     private var channelByID: [GuideChannel.ID: GuideChannel] = [:]
 
@@ -38,11 +46,18 @@ final class GuideViewModel: ObservableObject {
     init(
         now: Date = Date(),
         configuration: TVHeadendConfiguration? = nil,
-        cachedSnapshot: PersistedGuideSnapshot? = nil
+        cachedSnapshot: PersistedGuideSnapshot? = nil,
+        fetchGuide: @escaping GuideFetch = { configuration, timeline, channelUpdate in
+            try await TVHeadendClient(configuration: configuration).fetchGuide(
+                for: timeline,
+                channelUpdate: channelUpdate
+            )
+        }
     ) {
         let timeline = GuideTimeline.surrounding(now)
         self.now = now
         self.timeline = timeline
+        self.fetchGuide = fetchGuide
         channels = []
         defer { rebuildGuideIndexes() }
 
@@ -82,6 +97,7 @@ final class GuideViewModel: ObservableObject {
         now = date
 
         guard configuration.isComplete else {
+            cancelActiveLoad()
             // mDNS may restore configuration just after the first frame. Keep
             // showing a usable local snapshot during that brief interval.
             guard !hasUsableGuide else { return }
@@ -97,6 +113,7 @@ final class GuideViewModel: ObservableObject {
 
         let snapshotIdentifier = configuration.guideSnapshotIdentifier
         if activeSnapshotIdentifier != snapshotIdentifier {
+            cancelActiveLoad()
             timeline = refreshedTimeline
             channels = []
             hasUsableGuide = false
@@ -108,10 +125,40 @@ final class GuideViewModel: ObservableObject {
         let isFresh = lastConfiguration == configuration
             && lastLoadedAt.map { date.timeIntervalSince($0) < Self.refreshInterval } == true
         guard force || !isFresh else { return }
-        guard !isLoading else { return }
+        guard loadTask == nil || force else { return }
 
-        isLoading = true
-        defer { isLoading = false }
+        cancelActiveLoad()
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performLoad(
+                configuration: configuration,
+                snapshotIdentifier: snapshotIdentifier,
+                timeline: refreshedTimeline,
+                date: date,
+                generation: generation
+            )
+        }
+        loadTask = task
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        if generation == loadGeneration {
+            loadTask = nil
+        }
+    }
+
+    private func performLoad(
+        configuration: TVHeadendConfiguration,
+        snapshotIdentifier: String,
+        timeline refreshedTimeline: GuideTimeline,
+        date: Date,
+        generation: Int
+    ) async {
+        guard isCurrentLoad(generation, snapshotIdentifier: snapshotIdentifier) else { return }
 
         if !hasUsableGuide {
             loadState = .loading
@@ -119,7 +166,9 @@ final class GuideViewModel: ObservableObject {
 
         if !hasUsableGuide,
            let cached = await GuideSnapshotStore.shared.load(serverIdentifier: snapshotIdentifier) {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled,
+                  isCurrentLoad(generation, snapshotIdentifier: snapshotIdentifier)
+            else { return }
             let restoredChannels = cached.restoredChannels(for: refreshedTimeline)
             let hasCurrentOrFutureProgramme = restoredChannels.lazy
                 .flatMap(\.programs)
@@ -136,16 +185,20 @@ final class GuideViewModel: ObservableObject {
         }
 
         do {
-            let client = TVHeadendClient(configuration: configuration)
-            let snapshot = try await client.fetchGuide(
-                for: refreshedTimeline,
-                channelUpdate: { [weak self] channelShells in
-                    guard let self, !self.hasUsableGuide else { return }
+            let snapshot = try await fetchGuide(
+                configuration,
+                refreshedTimeline,
+                { [weak self] channelShells in
+                    guard let self,
+                          self.isCurrentLoad(generation, snapshotIdentifier: snapshotIdentifier),
+                          !self.hasUsableGuide
+                    else { return }
                     self.timeline = refreshedTimeline
                     self.channels = channelShells
                 }
             )
             try Task.checkCancellation()
+            guard isCurrentLoad(generation, snapshotIdentifier: snapshotIdentifier) else { return }
             timeline = refreshedTimeline
             channels = snapshot.channels
             hasUsableGuide = true
@@ -163,8 +216,20 @@ final class GuideViewModel: ObservableObject {
         } catch is CancellationError {
             return
         } catch {
+            guard isCurrentLoad(generation, snapshotIdentifier: snapshotIdentifier) else { return }
             loadState = .failed(error.localizedDescription)
         }
+    }
+
+    private func isCurrentLoad(_ generation: Int, snapshotIdentifier: String) -> Bool {
+        generation == loadGeneration && activeSnapshotIdentifier == snapshotIdentifier
+    }
+
+    private func cancelActiveLoad() {
+        guard let loadTask else { return }
+        loadGeneration &+= 1
+        loadTask.cancel()
+        self.loadTask = nil
     }
 
     func program(withID id: GuideProgram.ID?) -> GuideProgram? {
