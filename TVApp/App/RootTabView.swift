@@ -222,7 +222,10 @@ struct RootTabView: View {
             }
 
             if playback.isPlayerPresented, let launch = playback.launchPresentation {
-                PlaybackLaunchView(presentation: launch)
+                PlaybackLaunchView(
+                    presentation: launch,
+                    engine: playback.engine
+                )
                     .environmentObject(playback)
                     .transition(.opacity)
                     .zIndex(12)
@@ -235,12 +238,18 @@ struct RootTabView: View {
                         guard !Task.isCancelled else { return }
                         if hasOutput {
                             playback.playbackDidStart(presentationID: launch.id)
-                        } else if case .failed = playback.engine.state {
-                            playback.playbackDidFail(presentationID: launch.id)
                         } else {
-                            // Do not leave an audio-only or malformed stream
-                            // trapped behind the launch surface indefinitely.
-                            playback.playbackDidStart(presentationID: launch.id)
+                            let message: String
+                            if case let .failed(engineMessage) = playback.engine.state {
+                                message = engineMessage
+                            } else {
+                                message = "No audio or video was received from this channel."
+                                playback.engine.reportFailure(message)
+                            }
+                            playback.playbackDidFail(
+                                presentationID: launch.id,
+                                message: message
+                            )
                         }
                     }
             }

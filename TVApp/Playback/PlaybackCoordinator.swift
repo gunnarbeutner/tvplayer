@@ -103,6 +103,7 @@ final class PlaybackCoordinator: ObservableObject {
         didSet { synchronizeCommercialAnalysis() }
     }
     @Published private(set) var launchPresentation: PlaybackLaunchPresentation?
+    @Published private(set) var launchFailureMessage: String?
     @Published var isPlayerPresented = false
     @Published var errorMessage: String?
     @Published private(set) var navigationSelection: PlaybackNavigationSelection?
@@ -384,9 +385,10 @@ final class PlaybackCoordinator: ObservableObject {
         stagePredictedAdjacentChannel()
     }
 
-    func playbackDidFail(presentationID: UUID) {
+    func playbackDidFail(presentationID: UUID, message: String) {
+        guard launchPresentation?.id == presentationID else { return }
         logLaunchStage("playback-failed", id: presentationID)
-        finishLaunch(presentationID, dismissPlayer: false)
+        launchFailureMessage = message
     }
 
     func prefetchLivePlaybackRequest(
@@ -840,6 +842,7 @@ final class PlaybackCoordinator: ObservableObject {
     }
 
     private func beginLaunch(_ presentation: PlaybackLaunchPresentation) {
+        launchFailureMessage = nil
         launchPresentation = presentation
         launchStartedAt[presentation.id] = Date()
         logLaunchStage("intent", id: presentation.id)
@@ -851,6 +854,7 @@ final class PlaybackCoordinator: ObservableObject {
 
     private func clearLaunch(dismissPlayer: Bool) {
         if let id = launchPresentation?.id { launchStartedAt[id] = nil }
+        launchFailureMessage = nil
         launchPresentation = nil
         if launchShouldRestoreAudio {
             engine.mediaPlayer.audio?.isMuted = false

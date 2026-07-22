@@ -856,14 +856,31 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(20))
         guard let initialNativeInputStream = nativeInputStream else {
-            // Preserve the direct HTTP/recording contract: those pipelines do
-            // not exhibit TVHeadend's skewed startup burst and should reveal
-            // as soon as VLC has a video output, as they did before native
-            // tuning gained its cadence gate.
+            // VLC can create a video-output object for an unavailable HTTP
+            // channel without ever displaying a picture. Treat actual output,
+            // rather than hasVideoOut alone, as proof that tuning succeeded.
+            // Audio-only services remain valid once their output has advanced
+            // continuously for a short grace interval without a video output.
+            let initialOutput = playbackOutputCounters
+            var audioOnlyOutputStartedAt: Date?
             while clock.now < deadline {
                 guard !Task.isCancelled else { return false }
                 refreshPlaybackInformation()
-                if mediaPlayer.hasVideoOut { return true }
+                let output = playbackOutputCounters
+                if output.displayedPictures > initialOutput.displayedPictures {
+                    return true
+                }
+                if !mediaPlayer.hasVideoOut,
+                   output.playedAudioBuffers > initialOutput.playedAudioBuffers {
+                    let now = Date()
+                    audioOnlyOutputStartedAt = audioOnlyOutputStartedAt ?? now
+                    if let audioOnlyOutputStartedAt,
+                       now.timeIntervalSince(audioOnlyOutputStartedAt) >= 0.5 {
+                        return true
+                    }
+                } else {
+                    audioOnlyOutputStartedAt = nil
+                }
                 if case .failed = state { return false }
                 try? await Task.sleep(for: .milliseconds(100))
             }
@@ -914,6 +931,14 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             // subscription may become ready without video.
             let expectsVideo = health.expectsVideo
             let expectsAudio = health.expectsAudio
+            // An empty subscription is not an audio-only service. It means
+            // TVHeadend did not expose a playable elementary stream (as with
+            // an unavailable input), so it must not satisfy the launch gate.
+            guard expectsVideo || expectsAudio else {
+                if case .failed = state { return false }
+                try? await Task.sleep(for: .seconds(tuningPolicy.revealPollInterval))
+                continue
+            }
             outputGate.requireSustainedOutput(tuningPolicy.revealDuration(
                 for: health.initialTuneStagingQuality,
                 generation: health.initialTuneStagingGeneration,
