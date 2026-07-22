@@ -39,13 +39,15 @@ struct CommercialFrameFeatures: Equatable, Sendable {
     let darkPixelFraction: Double
     let cornerEdges: [[UInt8]]
     let perimeterEdges: [UInt8]
+    let perimeterMatchingEdges: [UInt8]
 
     init(
         pixels: [UInt8],
         meanLuma: Double,
         darkPixelFraction: Double,
         cornerEdges: [[UInt8]],
-        perimeterEdges: [UInt8]? = nil
+        perimeterEdges: [UInt8]? = nil,
+        perimeterMatchingEdges: [UInt8]? = nil
     ) {
         self.pixels = pixels
         self.meanLuma = meanLuma
@@ -56,6 +58,7 @@ struct CommercialFrameFeatures: Equatable, Sendable {
         } else {
             self.perimeterEdges = Self.perimeterMask(from: cornerEdges)
         }
+        self.perimeterMatchingEdges = perimeterMatchingEdges ?? self.perimeterEdges
     }
 
     var isDark: Bool { meanLuma < 20 || darkPixelFraction > 0.90 }
@@ -226,7 +229,12 @@ enum CommercialFrameFeatureExtractor {
                     startsAtX: width - CommercialFrameFeatures.cornerWidth
                 )
             ],
-            perimeterEdges: perimeterEdgeMask(pixels)
+            // Learning remains conservative so transient texture does not
+            // become a logo candidate. Matching also gets a permissive map:
+            // translucent white station bugs can fall below the strong edge
+            // threshold whenever the picture behind them is bright.
+            perimeterEdges: perimeterEdgeMask(pixels, threshold: 52),
+            perimeterMatchingEdges: perimeterEdgeMask(pixels, threshold: 20)
         )
     }
 
@@ -263,7 +271,10 @@ enum CommercialFrameFeatureExtractor {
         return CommercialArtworkFingerprint(edgeMask: edges)
     }
 
-    private static func perimeterEdgeMask(_ pixels: [UInt8]) -> [UInt8] {
+    private static func perimeterEdgeMask(
+        _ pixels: [UInt8],
+        threshold: Int
+    ) -> [UInt8] {
         let width = CommercialFrameFeatures.width
         let height = CommercialFrameFeatures.height
         let horizontalBand = max(1, Int(Double(height) * 0.20))
@@ -281,7 +292,7 @@ enum CommercialFrameFeatureExtractor {
                 let vertical = abs(
                     Int(pixels[(y + 1) * width + x]) - Int(pixels[(y - 1) * width + x])
                 )
-                if horizontal + vertical >= 52 { mask[y * width + x] = 1 }
+                if horizontal + vertical >= threshold { mask[y * width + x] = 1 }
             }
         }
         return mask
@@ -580,7 +591,7 @@ struct CommercialBreakDetector: Sendable {
     ) {
         registerSceneChange(features.pixels)
         for index in candidates.indices {
-            let score = Self.match(candidates[index], in: features.perimeterEdges)
+            let score = Self.match(candidates[index], in: features.perimeterMatchingEdges)
             lastMatches[candidates[index].id] = score
             let presence: Bool?
             if score >= Self.logoPresentThreshold {
@@ -787,26 +798,41 @@ struct CommercialBreakDetector: Sendable {
         for offsetY in -3...3 {
             for offsetX in -3...3 {
                 var reference = 0
+                var matchedReference = 0
                 var observed = 0
-                var intersection = 0
                 for y in 0..<candidate.bounds.height {
                     for x in 0..<candidate.bounds.width {
                         let template = candidate.edgeMask[y * candidate.bounds.width + x]
-                        if template != 0 { reference += 1 }
                         let frameX = candidate.bounds.x + x + offsetX
                         let frameY = candidate.bounds.y + y + offsetY
                         guard frameX >= 0, frameX < width,
                               frameY >= 0, frameY < CommercialFrameFeatures.height
                         else { continue }
                         let current = frame[frameY * width + frameX]
-                        if current != 0 { observed += 1 }
-                        if template != 0, current == template { intersection += 1 }
+                        if template != 0 {
+                            reference += 1
+                            if current != 0 {
+                                matchedReference += 1
+                            }
+                        }
+                        if current != 0 {
+                            observed += 1
+                        }
                     }
                 }
                 guard reference > 0, observed > 0 else { continue }
-                let recall = Double(intersection) / Double(reference)
-                let precision = Double(intersection) / Double(observed)
-                let score = 2 * recall * precision / max(0.0001, recall + precision)
+                let recall = Double(matchedReference) / Double(reference)
+                // Estimate how many template points would be hit merely by
+                // the background's edge density. This removes chance matches
+                // without treating every unrelated texture edge as evidence
+                // against a translucent logo.
+                let density = min(
+                    0.95,
+                    Double(observed)
+                        / Double(candidate.bounds.width * candidate.bounds.height)
+                )
+                let chanceRecall = density
+                let score = max(0, (recall - chanceRecall) / max(0.01, 1 - chanceRecall))
                 best = max(best, score)
             }
         }

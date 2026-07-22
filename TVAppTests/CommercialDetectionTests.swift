@@ -43,6 +43,45 @@ final class CommercialDetectionTests: XCTestCase {
         XCTAssertTrue(breaks.isEmpty)
     }
 
+    func testFaintLogoEdgesDoNotCreateCommercialMarker() {
+        var detector = learnedDetector()
+
+        for second in 0...20 {
+            _ = detector.consume(
+                frame(logoVisible: false, faintLogoVisible: true),
+                at: date(second)
+            )
+        }
+
+        XCTAssertTrue(detector.breaks.isEmpty)
+    }
+
+    func testBackgroundTextureInsideLogoBoundsDoesNotHideLogo() {
+        var detector = learnedDetector()
+
+        for second in 0...20 {
+            _ = detector.consume(
+                frame(logoVisible: true, backgroundEdgeCount: 500),
+                at: date(second)
+            )
+        }
+
+        XCTAssertTrue(detector.breaks.isEmpty)
+    }
+
+    func testBackgroundTextureAloneDoesNotImitateLogo() {
+        var detector = learnedDetector()
+
+        for second in 0...15 {
+            _ = detector.consume(
+                frame(logoVisible: false, backgroundEdgeCount: 500),
+                at: date(second)
+            )
+        }
+
+        XCTAssertEqual(detector.breaks.first?.start, date(0))
+    }
+
     func testTimestampDiscontinuityPreservesLearnedLogo() {
         var detector = learnedDetector()
         XCTAssertTrue(detector.hasLearnedLogo)
@@ -225,7 +264,9 @@ final class CommercialDetectionTests: XCTestCase {
     private func frame(
         logoVisible: Bool,
         auxiliaryLogoVisible: Bool = false,
-        sceneValue: UInt8 = 100
+        sceneValue: UInt8 = 100,
+        faintLogoVisible: Bool = false,
+        backgroundEdgeCount: Int = 0
     ) -> CommercialFrameFeatures {
         let edgeCount = CommercialFrameFeatures.cornerWidth
             * CommercialFrameFeatures.cornerHeight
@@ -235,12 +276,44 @@ final class CommercialDetectionTests: XCTestCase {
         let rightEdges = auxiliaryLogoVisible
             ? rightLogoMask()
             : [UInt8](repeating: 0, count: edgeCount)
+        let logoMask = leftLogoMask()
+        var perimeterEdges = CommercialFrameFeatures(
+            pixels: [], meanLuma: 0, darkPixelFraction: 0,
+            cornerEdges: [leftEdges, rightEdges]
+        ).perimeterEdges
+        if backgroundEdgeCount > 0 {
+            var inserted = 0
+            for y in stride(
+                from: CommercialFrameFeatures.cornerHeight - 1,
+                through: 0,
+                by: -1
+            ) {
+                for x in 0..<CommercialFrameFeatures.cornerWidth
+                    where logoMask[y * CommercialFrameFeatures.cornerWidth + x] == 0 {
+                    perimeterEdges[y * CommercialFrameFeatures.width + x] = 1
+                    inserted += 1
+                    if inserted == backgroundEdgeCount { break }
+                }
+                if inserted == backgroundEdgeCount { break }
+            }
+        }
+        var matchingEdges = perimeterEdges
+        if faintLogoVisible {
+            for y in 0..<CommercialFrameFeatures.cornerHeight {
+                for x in 0..<CommercialFrameFeatures.cornerWidth
+                    where logoMask[y * CommercialFrameFeatures.cornerWidth + x] != 0 {
+                    matchingEdges[y * CommercialFrameFeatures.width + x] = 1
+                }
+            }
+        }
         return CommercialFrameFeatures(
             pixels: [UInt8](repeating: sceneValue, count: CommercialFrameFeatures.width
                 * CommercialFrameFeatures.height),
             meanLuma: Double(sceneValue),
             darkPixelFraction: 0,
-            cornerEdges: [leftEdges, rightEdges]
+            cornerEdges: [leftEdges, rightEdges],
+            perimeterEdges: perimeterEdges,
+            perimeterMatchingEdges: matchingEdges
         )
     }
 
