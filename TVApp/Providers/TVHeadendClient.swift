@@ -1,26 +1,30 @@
 @preconcurrency import Foundation
 import SwiftUI
 
-final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unchecked Sendable {
+final class TVHeadendClient: TVProvider, @unchecked Sendable {
     private let configuration: TVHeadendConfiguration
-    private let urlSessionConfiguration: URLSessionConfiguration
     private let serverCapabilitiesCache = TVHeadendServerCapabilitiesCache()
     private let ticketedPlaylistCache = TVHeadendTicketedPlaylistCache()
-    private lazy var session: URLSession = {
+    private let session: URLSession
+
+    init(
+        configuration: TVHeadendConfiguration,
+        sessionConfiguration urlSessionConfiguration: URLSessionConfiguration = .default
+    ) {
+        self.configuration = configuration
         let sessionConfiguration = urlSessionConfiguration.copy() as! URLSessionConfiguration
         sessionConfiguration.timeoutIntervalForRequest = 20
         sessionConfiguration.timeoutIntervalForResource = 45
         sessionConfiguration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        return URLSession(configuration: sessionConfiguration, delegate: self, delegateQueue: nil)
-    }()
+        session = URLSession(
+            configuration: sessionConfiguration,
+            delegate: TVHeadendHTTPAuthenticationDelegate(configuration: configuration),
+            delegateQueue: nil
+        )
+    }
 
-    init(
-        configuration: TVHeadendConfiguration,
-        sessionConfiguration: URLSessionConfiguration = .default
-    ) {
-        self.configuration = configuration
-        urlSessionConfiguration = sessionConfiguration
-        super.init()
+    deinit {
+        session.invalidateAndCancel()
     }
 
     func fetchGuide(for timeline: GuideTimeline) async throws -> TVProviderSnapshot {
@@ -390,48 +394,6 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
             return url
         }
         throw TVProviderError.channelNotInPlaylist
-    }
-
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-    ) {
-        let method = challenge.protectionSpace.authenticationMethod
-        let supported = [
-            NSURLAuthenticationMethodHTTPBasic,
-            NSURLAuthenticationMethodHTTPDigest,
-            NSURLAuthenticationMethodNTLM,
-            NSURLAuthenticationMethodNegotiate,
-        ]
-
-        guard supported.contains(method), challenge.previousFailureCount == 0 else {
-            completionHandler(.performDefaultHandling, nil)
-            return
-        }
-
-        guard configuration.usesAuthentication else {
-            completionHandler(.cancelAuthenticationChallenge, nil)
-            return
-        }
-
-        guard Self.isServerProtectionSpace(
-            challenge.protectionSpace,
-            for: configuration
-        ) else {
-            completionHandler(.performDefaultHandling, nil)
-            return
-        }
-
-        completionHandler(
-            .useCredential,
-            URLCredential(
-                user: configuration.username,
-                password: configuration.password,
-                persistence: .forSession
-            )
-        )
     }
 
     private func get<Value: Decodable & Sendable>(
@@ -861,6 +823,53 @@ final class TVHeadendClient: NSObject, TVProvider, URLSessionTaskDelegate, @unch
         guard let value = channel.iconPublicURL ?? channel.icon, !value.isEmpty else { return nil }
         if let absolute = URL(string: value), absolute.scheme != nil { return absolute }
         return baseURL?.appending(path: value.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
+    }
+}
+
+final class TVHeadendHTTPAuthenticationDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let configuration: TVHeadendConfiguration
+
+    init(configuration: TVHeadendConfiguration) {
+        self.configuration = configuration
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let method = challenge.protectionSpace.authenticationMethod
+        let supportedMethods = [
+            NSURLAuthenticationMethodHTTPBasic,
+            NSURLAuthenticationMethodHTTPDigest,
+            NSURLAuthenticationMethodNTLM,
+            NSURLAuthenticationMethodNegotiate,
+        ]
+        guard supportedMethods.contains(method), challenge.previousFailureCount == 0 else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        guard configuration.usesAuthentication else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        guard TVHeadendClient.isServerProtectionSpace(
+            challenge.protectionSpace,
+            for: configuration
+        ) else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+
+        completionHandler(
+            .useCredential,
+            URLCredential(
+                user: configuration.username,
+                password: configuration.password,
+                persistence: .forSession
+            )
+        )
     }
 }
 

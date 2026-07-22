@@ -93,6 +93,34 @@ final class TVHeadendClientTests: XCTestCase {
         ))
     }
 
+    func testClientIsReleasedAfterCompletingRequest() async throws {
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [PlaybackURLProtocol.self]
+        let configuration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://tvheadend.test:9981")!,
+            username: "",
+            password: "",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil
+        )
+        weak var weakClient: TVHeadendClient?
+
+        do {
+            let client = TVHeadendClient(
+                configuration: configuration,
+                sessionConfiguration: sessionConfiguration
+            )
+            weakClient = client
+            _ = try await client.serverInfo()
+        }
+
+        for _ in 0..<20 where weakClient != nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNil(weakClient)
+    }
+
     @MainActor
     func testPlaybackStartIntentSupersedesAndCancelsPreviousTask() {
         let intents = PlaybackStartIntentTracker()
