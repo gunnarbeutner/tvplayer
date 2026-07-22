@@ -82,6 +82,21 @@ struct RootTabView: View {
                 .prefix(initialGuideLogoPreloadLimit)
                 .compactMap(\.iconURL)
             ChannelLogoImageCache.shared.warmMemoryFromDisk(for: initialLogoURLs)
+
+            let startupDate = Date()
+            let startupTimeline = GuideTimeline.surrounding(startupDate)
+            let initialPrograms = (favoriteChannels + otherChannels).first?.programs.filter {
+                $0.end > startupTimeline.start && $0.start < startupTimeline.end
+            } ?? []
+            if let artworkURL = GuideFocusSelection
+                .initialProgram(in: initialPrograms, at: startupDate)?
+                .metadata.imageURL
+                .flatMap(URL.init(string:)) {
+                ChannelLogoImageCache.shared.warmMemoryFromDisk(
+                    for: [artworkURL],
+                    kind: .programmeArtwork
+                )
+            }
         }
         _channelPreferences = StateObject(wrappedValue: channelPreferences)
         _guide = StateObject(

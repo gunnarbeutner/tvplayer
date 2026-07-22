@@ -78,6 +78,33 @@ final class GuideGridLayoutTests: XCTestCase {
         XCTAssertNotNil(cache.memoryArtwork(for: url))
     }
 
+    func testPersistedProgrammeArtworkCanBeWarmedForTheFirstFrame() throws {
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(
+            at: directoryURL,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+
+        let url = try XCTUnwrap(URL(string: "https://example.test/programme/42.jpg"))
+        let data = try solidPNGData(width: 1_600, height: 900)
+        let fileURL = directoryURL
+            .appending(path: ChannelLogoImageCache.cacheKey(for: url))
+            .appendingPathExtension("image")
+        try data.write(to: fileURL)
+
+        let cache = ChannelLogoImageCache(directoryURL: directoryURL)
+        XCTAssertNil(cache.memoryArtwork(for: url, kind: .programmeArtwork))
+        XCTAssertEqual(
+            cache.warmMemoryFromDisk(for: [url], kind: .programmeArtwork),
+            1
+        )
+        let artwork = try XCTUnwrap(cache.memoryArtwork(for: url, kind: .programmeArtwork))
+        let image = try XCTUnwrap(cgImage(for: artwork.image))
+        XCTAssertLessThanOrEqual(max(image.width, image.height), 1_280)
+    }
+
     func testPlaybackFocusRestoresThePlayingChannelAndCurrentProgramme() throws {
         let now = Date(timeIntervalSince1970: 10_000)
         let firstChannel = channel(
