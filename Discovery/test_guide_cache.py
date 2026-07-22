@@ -263,6 +263,79 @@ class GuideCacheTests(unittest.TestCase):
                 [1],
             )
 
+    def test_removed_channel_is_hidden_while_its_history_obeys_retention(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "guide-cache.json"
+            now = 100_000
+            opener = FakeOpener(
+                channels=[{"uuid": "channel-1", "name": "Temporary"}],
+                events=[
+                    {
+                        "eventId": 1,
+                        "channelUuid": "channel-1",
+                        "title": "Finished Show",
+                        "start": now - 1_800,
+                        "stop": now - 300,
+                    }
+                ],
+            )
+            cache = GuideCache(
+                base_url="http://tvheadend.test:9981",
+                username="viewer",
+                password="secret",
+                cache_path=str(path),
+                retention_hours=1,
+                opener=opener,
+            )
+            cache.refresh(now=now)
+
+            opener.channels = []
+            opener.events = []
+            self.assertEqual(cache.refresh(now=now + 60), (0, 0))
+            document = json.loads(cache.json_guide())
+            self.assertEqual(document["channels"], [])
+            self.assertEqual(document["events"], [])
+
+            persisted = json.loads(path.read_text())
+            self.assertEqual(
+                [channel["id"] for channel in persisted["channels"]],
+                ["channel-1"],
+            )
+            self.assertEqual(
+                [event["eventId"] for event in persisted["events"]],
+                [1],
+            )
+
+            restored = GuideCache(
+                base_url="http://tvheadend.test:9981",
+                username="viewer",
+                password="secret",
+                cache_path=str(path),
+                retention_hours=1,
+                opener=opener,
+            )
+            document = json.loads(restored.json_guide())
+            self.assertEqual(document["channels"], [])
+            self.assertEqual(document["events"], [])
+
+            opener.channels = [{"uuid": "channel-1", "name": "Temporary"}]
+            restored.refresh(now=now + 120)
+            document = json.loads(restored.json_guide())
+            self.assertEqual(
+                [channel["id"] for channel in document["channels"]],
+                ["channel-1"],
+            )
+            self.assertEqual(
+                [event["eventId"] for event in document["events"]],
+                [1],
+            )
+
+            opener.channels = []
+            restored.refresh(now=now + 4_000)
+            persisted = json.loads(path.read_text())
+            self.assertEqual(persisted["channels"], [])
+            self.assertEqual(persisted["events"], [])
+
     def test_cache_survives_process_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "guide-cache.json")

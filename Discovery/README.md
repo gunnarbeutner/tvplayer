@@ -77,6 +77,9 @@ The JSON guide retains the complete native TVheadend event object, including
 event and series identifiers, episode metadata, ratings, format flags, and DVR
 state when TVheadend provides them. This lets recording actions continue to use
 TVheadend event IDs instead of falling back to title/time matching.
+Channels absent from a successful TVheadend refresh are hidden immediately.
+Their retained programme history remains cached until the normal retention
+window expires and is exposed again if the same channel UUID reappears.
 
 Compose uses host networking because mDNS is link-local multicast. Therefore
 the guide server binds directly to the host's configured

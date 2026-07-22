@@ -36,6 +36,7 @@ class GuideCache:
         self.request_timeout = request_timeout
         self._lock = threading.RLock()
         self._channels: dict[str, dict[str, Any]] = {}
+        self._active_channel_ids: set[str] = set()
         self._events: dict[str, dict[str, Any]] = {}
         self._last_refresh: float | None = None
         self._opener = opener or self._request_opener(username, password)
@@ -68,6 +69,7 @@ class GuideCache:
         newest_start = int(now + self.future_seconds)
         with self._lock:
             self._channels.update(fresh_channels)
+            self._active_channel_ids = set(fresh_channels)
 
             # A successful TVHeadend response is authoritative for every
             # event that has not ended yet. The grabber can amend a current
@@ -91,9 +93,18 @@ class GuideCache:
                 for key, event in self._events.items()
                 if event["stop"] > oldest_stop and event["start"] < newest_start
             }
+            retained_channel_ids = {
+                event["channelUuid"] for event in self._events.values()
+            }
+            self._channels = {
+                identifier: channel
+                for identifier, channel in self._channels.items()
+                if identifier in self._active_channel_ids
+                or identifier in retained_channel_ids
+            }
             self._last_refresh = now
             self._save_locked()
-            return len(self._channels), len(self._events)
+            return len(self._active_channel_ids), self._visible_event_count_locked()
 
     def json_guide(self) -> bytes:
         body, _ = self.guide_response()
@@ -101,9 +112,20 @@ class GuideCache:
 
     def guide_response(self) -> tuple[bytes, str]:
         with self._lock:
-            channels = sorted(self._channels.values(), key=lambda item: item["name"].casefold())
+            channels = sorted(
+                (
+                    channel
+                    for identifier, channel in self._channels.items()
+                    if identifier in self._active_channel_ids
+                ),
+                key=lambda item: item["name"].casefold(),
+            )
             events = sorted(
-                self._events.values(),
+                (
+                    event
+                    for event in self._events.values()
+                    if event["channelUuid"] in self._active_channel_ids
+                ),
                 key=lambda item: (item["start"], item["channelUuid"], item["title"]),
             )
             guide_content = {
@@ -134,10 +156,16 @@ class GuideCache:
     def status(self) -> dict[str, Any]:
         with self._lock:
             return {
-                "channels": len(self._channels),
-                "events": len(self._events),
+                "channels": len(self._active_channel_ids),
+                "events": self._visible_event_count_locked(),
                 "last_refresh": self._last_refresh,
             }
+
+    def _visible_event_count_locked(self) -> int:
+        return sum(
+            event["channelUuid"] in self._active_channel_ids
+            for event in self._events.values()
+        )
 
     def _request_opener(
         self,
@@ -252,6 +280,17 @@ class GuideCache:
                 for channel in payload.get("channels", [])
                 if channel.get("id") and channel.get("name")
             }
+            active_channel_ids = payload.get("active_channel_ids")
+            if isinstance(active_channel_ids, list):
+                self._active_channel_ids = {
+                    identifier
+                    for identifier in active_channel_ids
+                    if identifier in self._channels
+                }
+            else:
+                # Version 2 caches created before active-channel tracking
+                # represented every cached channel as active.
+                self._active_channel_ids = set(self._channels)
             self._events = {
                 event["key"]: {key: value for key, value in event.items() if key != "key"}
                 for event in payload.get("events", [])
@@ -267,6 +306,7 @@ class GuideCache:
             "version": self.CACHE_VERSION,
             "last_refresh": self._last_refresh,
             "channels": list(self._channels.values()),
+            "active_channel_ids": sorted(self._active_channel_ids),
             "events": [dict(event, key=key) for key, event in self._events.items()],
         }
         descriptor, temporary_path = tempfile.mkstemp(
