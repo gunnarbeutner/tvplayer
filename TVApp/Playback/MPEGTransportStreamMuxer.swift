@@ -43,6 +43,14 @@ struct HTSPPostSeekPacketStager: Sendable {
             entries.reduce(into: 0) { $0 += $1.packet.payload.count }
         }
 
+        var containsInitialVideoKeyframe: Bool {
+            entries.contains { $0.isVideo && $0.packet.frameType == 0x49 }
+        }
+
+        func containsPacket(streamIndex: Int) -> Bool {
+            entries.contains { $0.packet.streamIndex == streamIndex }
+        }
+
         var interleavedPackets: [HTSPMuxPacket] {
             guard !entries.isEmpty else { return [] }
 
@@ -188,6 +196,318 @@ struct HTSPPostSeekPacketStager: Sendable {
     }
 }
 
+/// Collects the first decodable, timestamp-aligned A/V window of a new live
+/// subscription before any bytes are exposed to VLC. TVHeadend can begin a
+/// subscription with audio that predates the first video keyframe by more than
+/// a second; handing that backlog straight to VLC makes it display the
+/// keyframe as preroll and then hold video while its audio clock catches up.
+struct HTSPInitialTunePacketStager: Sendable {
+    enum Disposition: Sendable {
+        case passthrough(HTSPMuxPacket)
+        case waiting
+        case ready(
+            batch: HTSPPostSeekPacketStager.Batch,
+            primaryVideoStreamIndex: Int?,
+            primaryAudioStreamIndex: Int?,
+            diagnostics: String
+        )
+        case overflow(
+            batch: HTSPPostSeekPacketStager.Batch,
+            trailingPacket: HTSPMuxPacket?,
+            containsPrimaryAudio: Bool,
+            diagnostics: String
+        )
+        case failure(String)
+    }
+
+    private struct ProvisionalPacket: Sendable {
+        let packet: HTSPMuxPacket
+        let isAudio: Bool
+    }
+
+    private var coverage = HTSPPostSeekBufferTracker()
+    private var packets = HTSPPostSeekPacketStager()
+    private var maximumPayloadBytes = 0
+    private var primaryVideoStreamIndex: Int?
+    private var primaryAudioStreamIndex: Int?
+    private var provisionalPackets: [ProvisionalPacket] = []
+    private var provisionalPayloadBytes = 0
+    private var stagingStartedAt: Date?
+    private var acceptedVideoKeyframeAt: Date?
+    private var acceptedVideoAnchorTime: Int64?
+    private var maximumWaitBeforeVideoKeyframe: TimeInterval = 3
+    private var maximumWaitAfterVideoKeyframe: TimeInterval = 2
+    private(set) var isActive = false
+
+    mutating func begin(
+        hasVideo: Bool,
+        primaryVideoStreamIndex: Int?,
+        primaryAudioStreamIndex: Int?,
+        requiredDuration: Int64 = HTSPPostSeekBufferTracker.minimumRequiredDuration,
+        maximumPayloadBytes: Int,
+        maximumWaitBeforeVideoKeyframe: TimeInterval = 3,
+        maximumWaitAfterVideoKeyframe: TimeInterval = 2
+    ) {
+        cancel()
+        guard hasVideo,
+              primaryVideoStreamIndex != nil,
+              primaryAudioStreamIndex != nil
+        else { return }
+        self.maximumPayloadBytes = max(1, maximumPayloadBytes)
+        self.primaryVideoStreamIndex = primaryVideoStreamIndex
+        self.primaryAudioStreamIndex = primaryAudioStreamIndex
+        self.maximumWaitBeforeVideoKeyframe = max(0, maximumWaitBeforeVideoKeyframe)
+        self.maximumWaitAfterVideoKeyframe = max(0, maximumWaitAfterVideoKeyframe)
+        coverage.beginInitialTune(
+            hasVideo: hasVideo,
+            audioStreamIndexes: primaryAudioStreamIndex.map { [$0] } ?? [],
+            requiredDuration: requiredDuration
+        )
+        packets.begin(pinsInitialVideoKeyframe: hasVideo)
+        isActive = true
+    }
+
+    mutating func append(
+        _ packet: HTSPMuxPacket,
+        isVideo: Bool,
+        isAudio: Bool,
+        at date: Date = Date()
+    ) -> Disposition {
+        guard isActive else { return .passthrough(packet) }
+        stagingStartedAt = stagingStartedAt ?? date
+        let packetTime = packet.presentationTime ?? packet.decodeTime
+        let isPrimaryVideo = isVideo
+            && primaryVideoStreamIndex.map { $0 == packet.streamIndex } != false
+
+        if acceptedVideoKeyframeAt == nil {
+            if let stagingStartedAt,
+               date.timeIntervalSince(stagingStartedAt) >= maximumWaitBeforeVideoKeyframe,
+               !(isPrimaryVideo && packet.frameType == 0x49) {
+                return finishFailure(
+                    "No primary video keyframe arrived during initial A/V staging."
+                )
+            }
+            guard isPrimaryVideo, packet.frameType == 0x49 else {
+                if !isVideo { retainProvisional(packet, isAudio: isAudio) }
+                return .waiting
+            }
+
+            trimProvisionalPacketsToMakeRoom(for: packet.payload.count)
+            guard packets.append(
+                packet,
+                isVideo: true,
+                maximumPayloadBytes: maximumPayloadBytes
+            ) else {
+                if packets.append(packet, isVideo: true, maximumPayloadBytes: .max) {
+                    return finishOverflow(trailingPacket: nil)
+                }
+                return finishOverflow(trailingPacket: packet)
+            }
+            guard coverage.shouldAcceptPacket(
+                time: packetTime,
+                decodeTime: packet.decodeTime,
+                duration: packet.durationMicroseconds,
+                isVideo: true,
+                isAudio: false,
+                frameType: packet.frameType
+            ) else { return .waiting }
+            acceptedVideoKeyframeAt = date
+            acceptedVideoAnchorTime = packet.decodeTime ?? packet.presentationTime
+            _ = coverage.observePacket(
+                time: packetTime,
+                decodeTime: packet.decodeTime,
+                duration: packet.durationMicroseconds,
+                streamIndex: packet.streamIndex,
+                isVideo: true,
+                isAudio: false,
+                frameType: packet.frameType
+            )
+
+            // With no video timestamp we cannot trim the provisional epoch,
+            // but retaining it is still essential for a bounded recovery:
+            // the pinned keyframe keeps the fallback decodable and preserves
+            // primary audio instead of creating a deterministic reconnect loop.
+            let provisional = provisionalPackets
+            provisionalPackets.removeAll(keepingCapacity: true)
+            provisionalPayloadBytes = 0
+            for provisionalPacket in provisional {
+                let stagedPacket = provisionalPacket.packet
+                let stagedTime = stagedPacket.presentationTime ?? stagedPacket.decodeTime
+                if !provisionalPacket.isAudio,
+                   !shouldAcceptAncillaryPacket(stagedPacket) {
+                    continue
+                }
+                if provisionalPacket.isAudio,
+                   !coverage.shouldAcceptPacket(
+                       time: stagedTime,
+                       decodeTime: stagedPacket.decodeTime,
+                       duration: stagedPacket.durationMicroseconds,
+                       isVideo: false,
+                       isAudio: true,
+                       frameType: stagedPacket.frameType
+                   ) {
+                    continue
+                }
+                guard packets.append(
+                    stagedPacket,
+                    isVideo: false,
+                    maximumPayloadBytes: maximumPayloadBytes
+                ) else {
+                    return finishOverflow(trailingPacket: stagedPacket)
+                }
+                _ = coverage.observePacket(
+                    time: stagedTime,
+                    decodeTime: stagedPacket.decodeTime,
+                    duration: stagedPacket.durationMicroseconds,
+                    streamIndex: stagedPacket.streamIndex,
+                    isVideo: false,
+                    isAudio: provisionalPacket.isAudio,
+                    frameType: stagedPacket.frameType
+                )
+            }
+            return .waiting
+        }
+
+        let exceededDeadline = acceptedVideoKeyframeAt.map {
+            date.timeIntervalSince($0) >= maximumWaitAfterVideoKeyframe
+        } == true
+        if !isVideo, !isAudio, !shouldAcceptAncillaryPacket(packet) {
+            return exceededDeadline
+                ? finishOverflow(trailingPacket: nil)
+                : .waiting
+        }
+        guard coverage.shouldAcceptPacket(
+            time: packetTime,
+            decodeTime: packet.decodeTime,
+            duration: packet.durationMicroseconds,
+            isVideo: isPrimaryVideo,
+            isAudio: isAudio,
+            frameType: packet.frameType
+        ) else {
+            return exceededDeadline
+                ? finishOverflow(trailingPacket: nil)
+                : .waiting
+        }
+
+        guard packets.append(
+            packet,
+            isVideo: isVideo,
+            maximumPayloadBytes: maximumPayloadBytes
+        ) else {
+            if packets.append(packet, isVideo: isVideo, maximumPayloadBytes: .max) {
+                return finishOverflow(trailingPacket: nil)
+            }
+            return finishOverflow(trailingPacket: packet)
+        }
+
+        let completion = coverage.observePacket(
+            time: packetTime,
+            decodeTime: packet.decodeTime,
+            duration: packet.durationMicroseconds,
+            streamIndex: packet.streamIndex,
+            isVideo: isPrimaryVideo,
+            isAudio: isAudio,
+            frameType: packet.frameType
+        )
+        guard completion != nil else {
+            return exceededDeadline
+                ? finishOverflow(trailingPacket: nil)
+                : .waiting
+        }
+
+        let batch = packets.finish()
+        let diagnostics = coverage.completionDiagnostics ?? coverage.progressDiagnostics
+        coverage.cancel()
+        isActive = false
+        return .ready(
+            batch: batch,
+            primaryVideoStreamIndex: primaryVideoStreamIndex,
+            primaryAudioStreamIndex: primaryAudioStreamIndex,
+            diagnostics: diagnostics
+        )
+    }
+
+    mutating func cancel() {
+        coverage.cancel()
+        packets.cancel()
+        maximumPayloadBytes = 0
+        primaryVideoStreamIndex = nil
+        primaryAudioStreamIndex = nil
+        provisionalPackets.removeAll(keepingCapacity: true)
+        provisionalPayloadBytes = 0
+        stagingStartedAt = nil
+        acceptedVideoKeyframeAt = nil
+        acceptedVideoAnchorTime = nil
+        maximumWaitBeforeVideoKeyframe = 3
+        maximumWaitAfterVideoKeyframe = 2
+        isActive = false
+    }
+
+    private mutating func retainProvisional(
+        _ packet: HTSPMuxPacket,
+        isAudio: Bool
+    ) {
+        guard packet.payload.count <= maximumPayloadBytes else { return }
+        provisionalPackets.append(ProvisionalPacket(packet: packet, isAudio: isAudio))
+        provisionalPayloadBytes += packet.payload.count
+        while provisionalPayloadBytes > maximumPayloadBytes,
+              !provisionalPackets.isEmpty {
+            provisionalPayloadBytes -= provisionalPackets.removeFirst().packet.payload.count
+        }
+    }
+
+    private mutating func trimProvisionalPacketsToMakeRoom(for payloadByteCount: Int) {
+        let availableBytes = max(0, maximumPayloadBytes - payloadByteCount)
+        while provisionalPayloadBytes > availableBytes,
+              !provisionalPackets.isEmpty {
+            provisionalPayloadBytes -= provisionalPackets.removeFirst().packet.payload.count
+        }
+    }
+
+    private mutating func finishOverflow(
+        trailingPacket: HTSPMuxPacket?
+    ) -> Disposition {
+        let batch = packets.finish()
+        let diagnostics = coverage.completionDiagnostics ?? coverage.progressDiagnostics
+        let containsPrimaryAudio = primaryAudioStreamIndex.map { streamIndex in
+            batch.containsPacket(streamIndex: streamIndex)
+                || trailingPacket?.streamIndex == streamIndex
+        } ?? false
+        coverage.cancel()
+        provisionalPackets.removeAll(keepingCapacity: true)
+        provisionalPayloadBytes = 0
+        stagingStartedAt = nil
+        acceptedVideoKeyframeAt = nil
+        acceptedVideoAnchorTime = nil
+        isActive = false
+        return .overflow(
+            batch: batch,
+            trailingPacket: trailingPacket,
+            containsPrimaryAudio: containsPrimaryAudio,
+            diagnostics: diagnostics
+        )
+    }
+
+    private mutating func finishFailure(_ reason: String) -> Disposition {
+        cancel()
+        return .failure(reason)
+    }
+
+    private func shouldAcceptAncillaryPacket(_ packet: HTSPMuxPacket) -> Bool {
+        guard let acceptedVideoAnchorTime,
+              let packetTime = packet.presentationTime ?? packet.decodeTime
+        else { return true }
+        let subtraction = acceptedVideoAnchorTime.subtractingReportingOverflow(
+            HTSPPostSeekBufferTracker.audioLeadTolerance
+        )
+        let earliestTime = subtraction.overflow ? Int64.min : subtraction.partialValue
+        if packetTime >= earliestTime { return true }
+        guard let duration = packet.durationMicroseconds, duration >= 0 else { return false }
+        let end = packetTime.addingReportingOverflow(duration)
+        return end.overflow || end.partialValue >= earliestTime
+    }
+}
+
 /// Continues the timestamp merge across the boundary between a staged seek
 /// batch and TVHeadend's subsequent packets. Only packets covered by both the
 /// primary video and primary audio watermarks are released. This prevents a
@@ -267,6 +587,8 @@ struct HTSPPostSeekTailInterleaver: Sendable {
         queuedPayloadByteCount > 8 * 1_024 * 1_024
     }
 
+    var isEmpty: Bool { queuedPayloadByteCount == 0 }
+
     mutating func drainAvailable() -> [HTSPMuxPacket] {
         guard let videoTime = latestTimeByStream[primaryVideoStreamIndex],
               let audioTime = latestTimeByStream[primaryAudioStreamIndex]
@@ -280,9 +602,9 @@ struct HTSPPostSeekTailInterleaver: Sendable {
 
     private mutating func appendEntry(_ packet: HTSPMuxPacket, ordinal: Int) {
         let streamIndex = packet.streamIndex
-        let rawTime = streamIndex == primaryAudioStreamIndex
-            ? (packet.presentationTime ?? packet.decodeTime)
-            : (packet.decodeTime ?? packet.presentationTime)
+        let rawTime = streamIndex == primaryVideoStreamIndex
+            ? (packet.decodeTime ?? packet.presentationTime)
+            : (packet.presentationTime ?? packet.decodeTime)
         let previousTime = previousTimeByStream[streamIndex]
         let decodeTime: Int64?
         if let rawTime, let previousTime {

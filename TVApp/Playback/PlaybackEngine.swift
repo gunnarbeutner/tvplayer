@@ -752,13 +752,54 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 
     func waitForInitialPlaybackOutput() async -> Bool {
+        guard nativeInputStream != nil else {
+            // Preserve the direct HTTP/recording contract: those pipelines do
+            // not exhibit TVHeadend's skewed startup burst and should reveal
+            // as soon as VLC has a video output, as they did before native
+            // tuning gained its cadence gate.
+            for _ in 0..<200 {
+                guard !Task.isCancelled else { return false }
+                refreshPlaybackInformation()
+                if mediaPlayer.hasVideoOut { return true }
+                if case .failed = state { return false }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            return false
+        }
+
+        let initialOutput = playbackOutputCounters
+        var outputGate = PostSeekPlaybackOutputGate()
+        outputGate.arm(from: initialOutput)
+        // A short decoded burst can precede VLC's final startup cache wait.
+        // Reveal only after A/V has advanced continuously beyond that burst.
+        outputGate.requireSustainedOutput(0.75)
+        outputGate.markPipelineRecreated()
+        _ = outputGate.beginConcealing(from: initialOutput)
+        var requiresVideoOutput = false
+        var requiresAudioOutput = false
+
         for attempt in 0..<200 {
             guard !Task.isCancelled else { return false }
             refreshPlaybackInformation()
             let output = playbackOutputCounters
-            let expectsAudio = nativeInputStream?.healthSnapshot.expectsAudio == true
-            let hasExpectedAudio = !expectsAudio || output.playedAudioBuffers > 0
-            if mediaPlayer.hasVideoOut, hasExpectedAudio { return true }
+            let health = nativeInputStream?.healthSnapshot
+            // A missing native-health snapshot means this is an HTTP,
+            // recording, or otherwise non-HTSP pipeline. Preserve the normal
+            // player contract there: do not dismiss the launch surface until
+            // video is actually present. Only an explicitly audio-only native
+            // subscription may become ready without video.
+            let expectsVideo = health?.expectsVideo ?? true
+            let expectsAudio = health?.expectsAudio == true
+            if expectsVideo, !requiresVideoOutput {
+                outputGate.requireDisplayedPictures(12)
+                requiresVideoOutput = true
+            }
+            if expectsAudio, !requiresAudioOutput {
+                outputGate.requireAudioOutput()
+                requiresAudioOutput = true
+            }
+            let hasExpectedVideo = !expectsVideo || mediaPlayer.hasVideoOut
+            if hasExpectedVideo, outputGate.observe(output) { return true }
 
             if attempt == 30,
                mediaPlayer.hasVideoOut,

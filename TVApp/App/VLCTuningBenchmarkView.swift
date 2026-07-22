@@ -265,7 +265,7 @@ final class VLCTuningBenchmarkModel: ObservableObject {
         append(
             failureCount == 0 ? .success : .warning,
             "Tuning benchmark complete",
-            "\(totalAttempts) attempts · \(failureCount) recoveries or output failures"
+            "\(totalAttempts) attempts · \(failureCount) recoveries, startup stalls, or output failures"
         )
         finish()
     }
@@ -299,12 +299,30 @@ final class VLCTuningBenchmarkModel: ObservableObject {
             return
         }
         let preparedAt = Date()
+        engine.refreshPlaybackInformation()
+        let prePlayOutput = counters
+        let playStarted = Date()
         engine.play()
         videoAttachmentRevision &+= 1
         await HTSPConnectionPrewarmer.shared.preconnect(configuration: configuration)
-        let productionReadinessTask = Task { @MainActor [engine] in
-            guard await engine.waitForPlaybackStart() else { return false }
-            return await engine.waitForInitialPlaybackOutput()
+        let productionReadinessProbe = ProductionReadinessProbe()
+        let productionReadinessTask = Task { @MainActor [weak self, engine] () -> Date? in
+            defer { productionReadinessProbe.isComplete = true }
+            guard await engine.waitForPlaybackStart(),
+                  await engine.waitForInitialPlaybackOutput(),
+                  let self
+            else { return nil }
+
+            let readyAt = Date()
+            let health = engine.nativeTimeshiftHealthSnapshot
+            productionReadinessProbe.readySample = StartupContinuitySample(
+                date: readyAt,
+                output: self.counters,
+                videoPackets: health?.videoPacketCount ?? 0,
+                audioPackets: health?.audioPacketCount ?? 0,
+                queuedBytes: engine.bufferedBytes
+            )
+            return readyAt
         }
         defer { productionReadinessTask.cancel() }
 
@@ -312,8 +330,16 @@ final class VLCTuningBenchmarkModel: ObservableObject {
         var firstHTSPAudioAt: Date?
         var firstVLCPictureAt: Date?
         var firstVLCAudioAt: Date?
+        var lastPictureAdvance: StartupContinuitySample?
+        var lastFlatPictureSample: StartupContinuitySample?
+        var longestPictureGap: StartupContinuityGap?
+        var longestConfirmedPictureStall: StartupContinuityGap?
+        var continuityWindowEnd: Date?
+        var continuityWindowFinished = false
+        var previousOutput = prePlayOutput
+        var postRevealContinuity: PictureContinuityWindow?
         var expectsAudio = false
-        let deadline = started.addingTimeInterval(15)
+        let deadline = playStarted.addingTimeInterval(15)
 
         while Date() < deadline {
             try Task.checkCancellation()
@@ -324,23 +350,109 @@ final class VLCTuningBenchmarkModel: ObservableObject {
             firstHTSPAudioAt = earliest(firstHTSPAudioAt, health?.firstAudioPacketAt)
             expectsAudio = expectsAudio || health?.expectsAudio == true
             let output = counters
-            if firstHTSPVideoAt != nil,
-               engine.mediaPlayer.hasVideoOut || output.displayedPictures > 0 {
-                firstVLCPictureAt = firstVLCPictureAt ?? now
+            let sample = StartupContinuitySample(
+                date: now,
+                output: output,
+                videoPackets: health?.videoPacketCount ?? 0,
+                audioPackets: health?.audioPacketCount ?? 0,
+                queuedBytes: engine.bufferedBytes
+            )
+            let pictureCountersReset = output.displayedPictures
+                < previousOutput.displayedPictures
+            let pictureAdvanced = output.displayedPictures
+                > previousOutput.displayedPictures
+            let audioAdvanced = output.playedAudioBuffers
+                > previousOutput.playedAudioBuffers
+            if pictureCountersReset {
+                lastPictureAdvance = nil
+                lastFlatPictureSample = nil
+                continuityWindowEnd = nil
+                continuityWindowFinished = false
             }
-            if firstHTSPAudioAt != nil, output.playedAudioBuffers > 0 {
+            if !continuityWindowFinished, pictureAdvanced {
+                continuityWindowEnd = continuityWindowEnd
+                    ?? now.addingTimeInterval(2)
+                if firstHTSPVideoAt != nil {
+                    firstVLCPictureAt = firstVLCPictureAt ?? now
+                }
+                if let lastPictureAdvance {
+                    let closedGap = StartupContinuityGap(
+                        start: lastPictureAdvance,
+                        end: sample,
+                        evidenceEnd: lastFlatPictureSample
+                    )
+                    longestPictureGap = longerGap(longestPictureGap, closedGap)
+                    let hasRecentFlatEvidence = lastFlatPictureSample.map {
+                        sample.date.timeIntervalSince($0.date) <= 0.15
+                    } == true
+                    if closedGap.isVisibleStall, hasRecentFlatEvidence {
+                        longestConfirmedPictureStall = longerGap(
+                            longestConfirmedPictureStall,
+                            closedGap
+                        )
+                    }
+                }
+                lastPictureAdvance = sample
+                lastFlatPictureSample = nil
+            }
+            if firstHTSPAudioAt != nil, audioAdvanced {
                 firstVLCAudioAt = firstVLCAudioAt ?? now
             }
+            if !continuityWindowFinished,
+               !pictureAdvanced,
+               let lastPictureAdvance {
+                let openGap = StartupContinuityGap(start: lastPictureAdvance, end: sample)
+                longestPictureGap = longerGap(longestPictureGap, openGap)
+                if openGap.isVisibleStall {
+                    longestConfirmedPictureStall = longerGap(
+                        longestConfirmedPictureStall,
+                        openGap
+                    )
+                }
+                lastFlatPictureSample = sample
+            }
+            previousOutput = output
 
-            if firstVLCPictureAt != nil, !expectsAudio || firstVLCAudioAt != nil {
-                break
+            if postRevealContinuity == nil,
+               let readySample = productionReadinessProbe.readySample {
+                postRevealContinuity = PictureContinuityWindow(startingAt: readySample)
+            }
+            if var window = postRevealContinuity {
+                window.observe(sample)
+                postRevealContinuity = window
+            }
+
+            if !continuityWindowFinished,
+               let continuityWindowEnd,
+               now >= continuityWindowEnd,
+               pictureAdvanced || longestConfirmedPictureStall != nil {
+                continuityWindowFinished = true
+            }
+
+            if continuityWindowFinished,
+               firstVLCPictureAt != nil,
+               !expectsAudio || firstVLCAudioAt != nil {
+                let productionObservationFinished: Bool
+                if productionReadinessProbe.isComplete {
+                    productionObservationFinished = productionReadinessProbe.readySample == nil
+                        || postRevealContinuity?.isFinished == true
+                } else {
+                    productionObservationFinished = false
+                }
+                if productionObservationFinished { break }
             }
             if case .failed = engine.state { break }
             try await Task.sleep(for: .milliseconds(50))
         }
 
-        let reachedReadyOutput = firstVLCPictureAt != nil
+        if !productionReadinessProbe.isComplete { productionReadinessTask.cancel() }
+        let productionReadyAt = await productionReadinessTask.value
+        let reachedRawReadyOutput = continuityWindowFinished
+            && firstVLCPictureAt != nil
             && (!expectsAudio || firstVLCAudioAt != nil)
+        let reachedProductionReadyOutput = productionReadyAt != nil
+            && postRevealContinuity?.isFinished == true
+        let reachedReadyOutput = reachedRawReadyOutput && reachedProductionReadyOutput
         if reachedReadyOutput {
             phase = "Attempt \(attempt) of \(totalAttempts): playing \(channel.name) for \(dwellSeconds) seconds"
             for _ in 0..<(dwellSeconds * 10) {
@@ -361,7 +473,13 @@ final class VLCTuningBenchmarkModel: ObservableObject {
         }
         let ready = reachedReadyOutput && !didFail
         let recovered = engine.nativeTimeshiftRecoveryCount > 0
-        let suspicious = !ready || recovered
+        let startupStalled = longestConfirmedPictureStall != nil
+        let postRevealStalled = postRevealContinuity?.longestConfirmedPictureStall != nil
+        // Raw VLC preroll can pause while the launch surface is still
+        // concealing it. Only continuity after the production reveal boundary
+        // is a user-visible tuning failure; retain the raw result as a
+        // diagnostic without failing the attempt.
+        let suspicious = !ready || recovered || postRevealStalled
         if suspicious { failureCount += 1 }
 
         let codecs = health?.audioStreamTypes.joined(separator: ",").nilIfEmpty ?? "none"
@@ -370,6 +488,9 @@ final class VLCTuningBenchmarkModel: ObservableObject {
             + "htspAudio=\(milliseconds(firstHTSPAudioAt, since: started)) "
             + "vlcVideo=\(milliseconds(firstVLCPictureAt, since: started)) "
             + "vlcAudio=\(milliseconds(firstVLCAudioAt, since: started)) "
+            + "revealPlayFirst=\(milliseconds(firstVLCPictureAt, since: playStarted)) "
+            + "revealFirstReady=\(milliseconds(from: firstVLCPictureAt, to: productionReadyAt)) "
+            + "revealPlayReady=\(milliseconds(productionReadyAt, since: playStarted)) "
             + "codec=\(codecs) packets=\(health?.videoPacketCount ?? 0)v/\(health?.audioPacketCount ?? 0)a "
             + "output=\(output.displayedPictures)v/\(output.playedAudioBuffers)a recoveries=\(engine.nativeTimeshiftRecoveryCount)"
         if let startup = health?.transportStartup {
@@ -378,9 +499,29 @@ final class VLCTuningBenchmarkModel: ObservableObject {
         if let diagnostic = engine.lastNativePipelineDiagnostic {
             detail += " | \(diagnostic)"
         }
+        let continuitySummary = startupContinuitySummary(
+            longestConfirmedPictureStall ?? longestPictureGap,
+            confirmedStall: startupStalled
+        )
+        detail += " | \(continuitySummary)"
+        let postRevealSummary = startupContinuitySummary(
+            postRevealContinuity?.longestConfirmedPictureStall
+                ?? postRevealContinuity?.longestPictureGap,
+            confirmedStall: postRevealStalled,
+            label: "postRevealContinuity"
+        )
+        detail += " | \(postRevealSummary)"
 
-        let kind: VLCTuningEvent.Kind = !ready ? .failure : (recovered ? .warning : .success)
-        let outcome = !ready ? "failed" : (recovered ? "recovered" : "ready")
+        let kind: VLCTuningEvent.Kind = !ready
+            ? .failure
+            : (recovered || postRevealStalled ? .warning : .success)
+        let outcome = !ready
+            ? "failed"
+            : (recovered
+                ? "recovered"
+                : (postRevealStalled
+                    ? "post-reveal stalled"
+                    : (startupStalled ? "ready (startup stall concealed)" : "ready")))
         append(kind, "#\(attempt) \(channel.name): \(outcome)", detail)
     }
 
@@ -395,7 +536,178 @@ final class VLCTuningBenchmarkModel: ObservableObject {
             demuxDiscontinuities: count(statistics?.demuxDiscontinuity ?? 0),
             playbackTimeMilliseconds: engine.mediaPlayer.time.intValue > 0
                 ? Int64(engine.mediaPlayer.time.intValue)
-                : nil
+                : nil,
+            decodedVideo: count(statistics?.decodedVideo ?? 0),
+            decodedAudio: count(statistics?.decodedAudio ?? 0),
+            lostPictures: count(statistics?.lostPictures ?? 0),
+            lostAudioBuffers: count(statistics?.lostAudioBuffers ?? 0)
+        )
+    }
+
+    private struct StartupContinuitySample {
+        let date: Date
+        let output: PlaybackOutputCounters
+        let videoPackets: Int64
+        let audioPackets: Int64
+        let queuedBytes: Int64
+    }
+
+    @MainActor
+    private final class ProductionReadinessProbe {
+        var readySample: StartupContinuitySample?
+        var isComplete = false
+    }
+
+    private struct PictureContinuityWindow {
+        private let targetEnd: Date
+        private var previousOutput: PlaybackOutputCounters
+        private var lastPictureAdvance: StartupContinuitySample
+        private var lastFlatPictureSample: StartupContinuitySample?
+
+        private(set) var longestPictureGap: StartupContinuityGap?
+        private(set) var longestConfirmedPictureStall: StartupContinuityGap?
+        private(set) var isFinished = false
+
+        init(startingAt sample: StartupContinuitySample) {
+            targetEnd = sample.date.addingTimeInterval(2)
+            previousOutput = sample.output
+            lastPictureAdvance = sample
+        }
+
+        mutating func observe(_ sample: StartupContinuitySample) {
+            guard !isFinished, sample.date >= lastPictureAdvance.date else { return }
+
+            let countersReset = sample.output.displayedPictures
+                < previousOutput.displayedPictures
+            let pictureAdvanced = sample.output.displayedPictures
+                > previousOutput.displayedPictures
+            if countersReset {
+                lastPictureAdvance = sample
+                lastFlatPictureSample = nil
+            } else if pictureAdvanced {
+                let closedGap = StartupContinuityGap(
+                    start: lastPictureAdvance,
+                    end: sample,
+                    evidenceEnd: lastFlatPictureSample
+                )
+                longestPictureGap = longer(longestPictureGap, closedGap)
+                let hasRecentFlatEvidence = lastFlatPictureSample.map {
+                    sample.date.timeIntervalSince($0.date) <= 0.15
+                } == true
+                if closedGap.isVisibleStall, hasRecentFlatEvidence {
+                    longestConfirmedPictureStall = longer(
+                        longestConfirmedPictureStall,
+                        closedGap
+                    )
+                }
+                lastPictureAdvance = sample
+                lastFlatPictureSample = nil
+            } else {
+                let openGap = StartupContinuityGap(start: lastPictureAdvance, end: sample)
+                longestPictureGap = longer(longestPictureGap, openGap)
+                if openGap.isVisibleStall {
+                    longestConfirmedPictureStall = longer(
+                        longestConfirmedPictureStall,
+                        openGap
+                    )
+                }
+                lastFlatPictureSample = sample
+            }
+            previousOutput = sample.output
+
+            if sample.date >= targetEnd,
+               pictureAdvanced || longestConfirmedPictureStall != nil {
+                isFinished = true
+            }
+        }
+
+        private func longer(
+            _ current: StartupContinuityGap?,
+            _ candidate: StartupContinuityGap
+        ) -> StartupContinuityGap {
+            guard let current else { return candidate }
+            return candidate.duration > current.duration ? candidate : current
+        }
+    }
+
+    private struct StartupContinuityGap {
+        let start: StartupContinuitySample
+        let end: StartupContinuitySample
+        let evidenceEnd: StartupContinuitySample?
+
+        init(
+            start: StartupContinuitySample,
+            end: StartupContinuitySample,
+            evidenceEnd: StartupContinuitySample? = nil
+        ) {
+            self.start = start
+            self.end = end
+            self.evidenceEnd = evidenceEnd
+        }
+
+        var duration: TimeInterval { max(0, end.date.timeIntervalSince(start.date)) }
+        private var evidence: StartupContinuitySample { evidenceEnd ?? end }
+        var videoPacketDelta: Int64 { max(0, evidence.videoPackets - start.videoPackets) }
+        var audioPacketDelta: Int64 { max(0, evidence.audioPackets - start.audioPackets) }
+        var decodedVideoDelta: Int {
+            max(0, evidence.output.decodedVideo - start.output.decodedVideo)
+        }
+        var lostPictureDelta: Int {
+            max(0, evidence.output.lostPictures - start.output.lostPictures)
+        }
+        var audioOutputDelta: Int {
+            max(0, evidence.output.playedAudioBuffers - start.output.playedAudioBuffers)
+        }
+        var mediaTimeDelta: Int64 {
+            guard let startTime = start.output.playbackTimeMilliseconds,
+                  let endTime = evidence.output.playbackTimeMilliseconds
+            else { return 0 }
+            return max(0, endTime - startTime)
+        }
+        var isVisibleStall: Bool { duration >= 0.75 }
+        var classification: String {
+            guard isVisibleStall else { return "continuous" }
+            if lostPictureDelta > 0 { return "dropped-video-output" }
+            if decodedVideoDelta > 0 {
+                return audioOutputDelta > 0 || mediaTimeDelta > 0
+                    ? "av-clock-wait"
+                    : "video-output-wait"
+            }
+            if videoPacketDelta > 0 { return "demux/decode-wait" }
+            if start.queuedBytes > 0 || evidence.queuedBytes > 0 {
+                return "demux/decode-wait"
+            }
+            return "source-starvation"
+        }
+    }
+
+    private func longerGap(
+        _ current: StartupContinuityGap?,
+        _ candidate: StartupContinuityGap
+    ) -> StartupContinuityGap {
+        guard let current else { return candidate }
+        return candidate.duration > current.duration ? candidate : current
+    }
+
+    private func startupContinuitySummary(
+        _ gap: StartupContinuityGap?,
+        confirmedStall: Bool,
+        label: String = "startupContinuity"
+    ) -> String {
+        guard let gap else { return "\(label)={no displayed-picture cadence}" }
+        return String(
+            format: "\(label)={gap=%.0fms class=%@ confirmed=%@ htsp=%lldv/%llda decoded=%d lost=%d audio=%d clock=%lldms queue=%lld→%lldB}",
+            gap.duration * 1_000,
+            gap.classification,
+            confirmedStall ? "yes" : "no",
+            gap.videoPacketDelta,
+            gap.audioPacketDelta,
+            gap.decodedVideoDelta,
+            gap.lostPictureDelta,
+            gap.audioOutputDelta,
+            gap.mediaTimeDelta,
+            gap.start.queuedBytes,
+            gap.end.queuedBytes
         )
     }
 
@@ -433,6 +745,11 @@ final class VLCTuningBenchmarkModel: ObservableObject {
     private func milliseconds(_ date: Date?, since start: Date) -> String {
         guard let date else { return "never" }
         return String(format: "%.0fms", max(0, date.timeIntervalSince(start)) * 1_000)
+    }
+
+    private func milliseconds(from start: Date?, to end: Date?) -> String {
+        guard let start, let end else { return "never" }
+        return String(format: "%.0fms", max(0, end.timeIntervalSince(start)) * 1_000)
     }
 
     private func append(_ kind: VLCTuningEvent.Kind, _ title: String, _ detail: String? = nil) {

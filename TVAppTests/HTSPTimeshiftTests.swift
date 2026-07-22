@@ -286,6 +286,333 @@ final class HTSPTimeshiftTests: XCTestCase {
         XCTAssertEqual(stager.payloadByteCount, 0)
     }
 
+    func testInitialTuneStagerDropsOldAudioAndPublishesBalancedAV() throws {
+        var stager = HTSPInitialTunePacketStager()
+        stager.begin(
+            hasVideo: true,
+            primaryVideoStreamIndex: 1,
+            primaryAudioStreamIndex: 2,
+            requiredDuration: 500_000,
+            maximumPayloadBytes: .max
+        )
+
+        let inputs: [(HTSPMuxPacket, Bool, Bool)] = [
+            (taggedPacket(stream: 2, pts: 300_000, dts: nil, duration: 20_000, tag: 1), false, true),
+            (taggedPacket(stream: 1, frameType: 0x50, pts: 900_000, dts: 900_000, tag: 2), true, false),
+            (taggedPacket(stream: 2, pts: 850_000, dts: nil, duration: 20_000, tag: 4), false, true),
+            (taggedPacket(stream: 2, pts: 990_000, dts: nil, duration: 20_000, tag: 5), false, true),
+            (taggedPacket(stream: 3, pts: 995_000, dts: nil, tag: 8), false, false),
+            (taggedPacket(stream: 1, frameType: 0x49, pts: 2_200_000, dts: 1_000_000, tag: 3), true, false),
+            (taggedPacket(stream: 3, pts: -500_000, dts: nil, tag: 9), false, false),
+            (taggedPacket(stream: 1, frameType: 0x50, pts: 2_700_000, dts: 1_500_000, tag: 6), true, false),
+            (taggedPacket(stream: 2, pts: 1_480_000, dts: nil, duration: 20_000, tag: 7), false, true),
+        ]
+        var readyBatch: HTSPPostSeekPacketStager.Batch?
+        var diagnostics = ""
+        for (packet, isVideo, isAudio) in inputs {
+            switch stager.append(packet, isVideo: isVideo, isAudio: isAudio) {
+            case let .ready(batch, video, audio, detail):
+                readyBatch = batch
+                diagnostics = detail
+                XCTAssertEqual(video, 1)
+                XCTAssertEqual(audio, 2)
+            case .passthrough, .overflow, .failure:
+                XCTFail("Initial tune staging ended unexpectedly.")
+            case .waiting:
+                break
+            }
+        }
+
+        let batch = try XCTUnwrap(readyBatch)
+        var interleaver = HTSPPostSeekTailInterleaver(
+            batch: batch,
+            primaryVideoStreamIndex: 1,
+            primaryAudioStreamIndex: 2
+        )
+        let outputTags = interleaver.drainAvailable().map { $0.payload[0] }
+        XCTAssertEqual(outputTags, [3, 5, 8, 7, 6])
+        XCTAssertFalse(outputTags.contains(1))
+        XCTAssertFalse(outputTags.contains(2))
+        XCTAssertFalse(outputTags.contains(4))
+        XCTAssertFalse(outputTags.contains(9))
+        XCTAssertTrue(diagnostics.contains("droppedAudio=2"))
+        XCTAssertFalse(stager.isActive)
+    }
+
+    func testInitialTuneStagerBypassesSingleTrackStreams() {
+        var stager = HTSPInitialTunePacketStager()
+        stager.begin(
+            hasVideo: true,
+            primaryVideoStreamIndex: 1,
+            primaryAudioStreamIndex: nil,
+            requiredDuration: 500_000,
+            maximumPayloadBytes: .max
+        )
+
+        let video = taggedPacket(
+            stream: 1,
+            frameType: 0x50,
+            pts: 900_000,
+            dts: 900_000,
+            tag: 1
+        )
+        guard case let .passthrough(passthroughVideo) = stager.append(
+            video,
+            isVideo: true,
+            isAudio: false
+        ) else { return XCTFail("Video-only streams should preserve their existing path.") }
+        XCTAssertEqual(passthroughVideo.payload, video.payload)
+        XCTAssertFalse(stager.isActive)
+
+        stager.begin(
+            hasVideo: false,
+            primaryVideoStreamIndex: nil,
+            primaryAudioStreamIndex: 2,
+            maximumPayloadBytes: .max
+        )
+        let audio = taggedPacket(stream: 2, pts: 1_000_000, dts: nil, tag: 2)
+        guard case let .passthrough(passthroughAudio) = stager.append(
+            audio,
+            isVideo: false,
+            isAudio: true
+        ) else { return XCTFail("Audio-only streams should preserve their existing path.") }
+        XCTAssertEqual(passthroughAudio.payload, audio.payload)
+        XCTAssertFalse(stager.isActive)
+    }
+
+    func testInitialTuneTimestampFallbackDoesNotLoseTriggeringPacket() throws {
+        var stager = HTSPInitialTunePacketStager()
+        stager.begin(
+            hasVideo: true,
+            primaryVideoStreamIndex: 1,
+            primaryAudioStreamIndex: 2,
+            maximumPayloadBytes: .max,
+            maximumWaitAfterVideoKeyframe: 1
+        )
+        let started = Date(timeIntervalSinceReferenceDate: 100)
+        let keyframe = taggedPacket(
+            stream: 1,
+            frameType: 0x49,
+            pts: nil,
+            dts: nil,
+            tag: 1
+        )
+        if case .waiting = stager.append(
+            keyframe,
+            isVideo: true,
+            isAudio: false,
+            at: started
+        ) {} else { XCTFail("A timestamp-less keyframe still needs a bounded wait.") }
+
+        let audio = taggedPacket(stream: 2, pts: nil, dts: nil, tag: 2)
+        let overflow = stager.append(
+            audio,
+            isVideo: false,
+            isAudio: true,
+            at: started.addingTimeInterval(1)
+        )
+        guard case let .overflow(batch, trailingPacket, containsPrimaryAudio, _) = overflow else {
+            return XCTFail("The elapsed-time cap should trigger the fallback.")
+        }
+        XCTAssertEqual(batch.interleavedPackets.map { $0.payload[0] }, [1, 2])
+        XCTAssertNil(trailingPacket)
+        XCTAssertTrue(containsPrimaryAudio)
+        XCTAssertFalse(stager.isActive)
+
+        let next = taggedPacket(stream: 2, pts: nil, dts: nil, tag: 3)
+        guard case let .passthrough(packet) = stager.append(
+            next,
+            isVideo: false,
+            isAudio: true
+        ) else { return XCTFail("Packets after fallback must pass through.") }
+        XCTAssertEqual(packet.payload[0], 3)
+    }
+
+    func testInitialTuneTimestampFallbackRetainsProvisionalPrimaryAudio() {
+        var stager = HTSPInitialTunePacketStager()
+        stager.begin(
+            hasVideo: true,
+            primaryVideoStreamIndex: 1,
+            primaryAudioStreamIndex: 2,
+            maximumPayloadBytes: .max,
+            maximumWaitAfterVideoKeyframe: 1
+        )
+        let started = Date(timeIntervalSinceReferenceDate: 150)
+        _ = stager.append(
+            taggedPacket(stream: 2, pts: nil, dts: nil, tag: 1),
+            isVideo: false,
+            isAudio: true,
+            at: started
+        )
+        _ = stager.append(
+            taggedPacket(stream: 1, frameType: 0x49, pts: nil, dts: nil, tag: 2),
+            isVideo: true,
+            isAudio: false,
+            at: started
+        )
+        let result = stager.append(
+            taggedPacket(stream: 1, frameType: 0x50, pts: nil, dts: nil, tag: 3),
+            isVideo: true,
+            isAudio: false,
+            at: started.addingTimeInterval(1)
+        )
+        guard case let .overflow(batch, trailingPacket, containsPrimaryAudio, _) = result else {
+            return XCTFail("Timestamp-less A/V must reach the bounded fallback.")
+        }
+        XCTAssertNil(trailingPacket)
+        XCTAssertTrue(containsPrimaryAudio)
+        XCTAssertTrue(batch.containsInitialVideoKeyframe)
+        XCTAssertEqual(batch.interleavedPackets.map { $0.payload[0] }, [2, 1, 3])
+    }
+
+    func testInitialTuneFailsWhenNoPrimaryVideoKeyframeArrives() {
+        var stager = HTSPInitialTunePacketStager()
+        stager.begin(
+            hasVideo: true,
+            primaryVideoStreamIndex: 1,
+            primaryAudioStreamIndex: 2,
+            maximumPayloadBytes: .max,
+            maximumWaitBeforeVideoKeyframe: 1
+        )
+        let started = Date(timeIntervalSinceReferenceDate: 200)
+        if case .waiting = stager.append(
+            taggedPacket(stream: 1, frameType: 0x50, pts: 0, dts: 0, tag: 1),
+            isVideo: true,
+            isAudio: false,
+            at: started
+        ) {} else { XCTFail("The initial P-frame should wait for a keyframe.") }
+
+        guard case .failure = stager.append(
+            taggedPacket(stream: 2, pts: 1_000_000, dts: nil, tag: 2),
+            isVideo: false,
+            isAudio: true,
+            at: started.addingTimeInterval(1)
+        ) else { return XCTFail("A continuously active stream must not wait forever for an I-frame.") }
+        XCTAssertFalse(stager.isActive)
+    }
+
+    func testInitialTuneKeyframeWinsAtPreKeyframeDeadline() {
+        var stager = HTSPInitialTunePacketStager()
+        stager.begin(
+            hasVideo: true,
+            primaryVideoStreamIndex: 1,
+            primaryAudioStreamIndex: 2,
+            maximumPayloadBytes: .max,
+            maximumWaitBeforeVideoKeyframe: 1
+        )
+        let started = Date(timeIntervalSinceReferenceDate: 250)
+        _ = stager.append(
+            taggedPacket(stream: 2, pts: 900_000, dts: nil, tag: 1),
+            isVideo: false,
+            isAudio: true,
+            at: started
+        )
+        guard case .waiting = stager.append(
+            taggedPacket(stream: 1, frameType: 0x49, pts: 2_200_000, dts: 1_000_000, tag: 2),
+            isVideo: true,
+            isAudio: false,
+            at: started.addingTimeInterval(1)
+        ) else { return XCTFail("A keyframe arriving at the deadline must start the A/V window.") }
+        XCTAssertTrue(stager.isActive)
+    }
+
+    func testInitialTuneDeadlineDropsRejectedOldAudioWithoutLosingBatch() throws {
+        var stager = HTSPInitialTunePacketStager()
+        stager.begin(
+            hasVideo: true,
+            primaryVideoStreamIndex: 1,
+            primaryAudioStreamIndex: 2,
+            maximumPayloadBytes: .max,
+            maximumWaitAfterVideoKeyframe: 1
+        )
+        let started = Date(timeIntervalSinceReferenceDate: 300)
+        _ = stager.append(
+            taggedPacket(stream: 1, frameType: 0x49, pts: 1_000_000, dts: 1_000_000, tag: 1),
+            isVideo: true,
+            isAudio: false,
+            at: started
+        )
+        let result = stager.append(
+            taggedPacket(stream: 2, pts: 300_000, dts: nil, duration: 20_000, tag: 2),
+            isVideo: false,
+            isAudio: true,
+            at: started.addingTimeInterval(1)
+        )
+        guard case let .overflow(batch, trailingPacket, containsPrimaryAudio, _) = result else {
+            return XCTFail("Rejected packets must not bypass the elapsed-time bound.")
+        }
+        XCTAssertEqual(batch.interleavedPackets.map { $0.payload[0] }, [1])
+        XCTAssertNil(trailingPacket)
+        XCTAssertFalse(containsPrimaryAudio)
+    }
+
+    func testInitialTuneCompletionWinsAtDeadline() throws {
+        var stager = HTSPInitialTunePacketStager()
+        stager.begin(
+            hasVideo: true,
+            primaryVideoStreamIndex: 1,
+            primaryAudioStreamIndex: 2,
+            requiredDuration: 500_000,
+            maximumPayloadBytes: .max,
+            maximumWaitAfterVideoKeyframe: 1
+        )
+        let started = Date(timeIntervalSinceReferenceDate: 400)
+        _ = stager.append(
+            taggedPacket(stream: 1, frameType: 0x49, pts: 2_200_000, dts: 1_000_000, tag: 1),
+            isVideo: true,
+            isAudio: false,
+            at: started
+        )
+        _ = stager.append(
+            taggedPacket(stream: 1, frameType: 0x50, pts: 2_700_000, dts: 1_500_000, tag: 2),
+            isVideo: true,
+            isAudio: false,
+            at: started.addingTimeInterval(0.5)
+        )
+        let result = stager.append(
+            taggedPacket(stream: 2, pts: 1_480_000, dts: nil, duration: 20_000, tag: 3),
+            isVideo: false,
+            isAudio: true,
+            at: started.addingTimeInterval(1)
+        )
+        guard case let .ready(batch, _, _, _) = result else {
+            return XCTFail("A packet proving balanced coverage must beat the fallback deadline.")
+        }
+        XCTAssertEqual(batch.interleavedPackets.map { $0.payload[0] }, [1, 3, 2])
+    }
+
+    func testInitialTunePayloadOverflowMergesTriggeringAudioByTimestamp() {
+        var stager = HTSPInitialTunePacketStager()
+        stager.begin(
+            hasVideo: true,
+            primaryVideoStreamIndex: 1,
+            primaryAudioStreamIndex: 2,
+            requiredDuration: 500_000,
+            maximumPayloadBytes: 2
+        )
+        _ = stager.append(
+            taggedPacket(stream: 1, frameType: 0x49, pts: 2_200_000, dts: 1_000_000, tag: 1),
+            isVideo: true,
+            isAudio: false
+        )
+        _ = stager.append(
+            taggedPacket(stream: 1, frameType: 0x50, pts: 2_700_000, dts: 1_500_000, tag: 2),
+            isVideo: true,
+            isAudio: false
+        )
+        let result = stager.append(
+            taggedPacket(stream: 2, pts: 1_480_000, dts: nil, duration: 20_000, tag: 3),
+            isVideo: false,
+            isAudio: true
+        )
+        guard case let .overflow(batch, trailingPacket, containsPrimaryAudio, _) = result else {
+            return XCTFail("The payload cap should publish one final merged batch.")
+        }
+        XCTAssertNil(trailingPacket)
+        XCTAssertTrue(containsPrimaryAudio)
+        XCTAssertEqual(batch.interleavedPackets.map { $0.payload[0] }, [1, 3, 2])
+    }
+
     func testPostSeekTailInterleaverReleasesOnlyCommonAudioVideoHorizon() {
         var stager = HTSPPostSeekPacketStager()
         stager.begin(pinsInitialVideoKeyframe: true)
@@ -322,6 +649,65 @@ final class HTSPTimeshiftTests: XCTestCase {
             [5, 3]
         )
         XCTAssertEqual(interleaver.queuedPayloadByteCount, 0)
+    }
+
+    func testTailCatchUpDrainCanBringQueueBackBelowPayloadLimit() {
+        var stager = HTSPPostSeekPacketStager()
+        stager.begin(pinsInitialVideoKeyframe: true)
+        XCTAssertTrue(stager.append(
+            taggedPacket(
+                stream: 1,
+                frameType: 0x49,
+                pts: 1_000,
+                dts: 1_000,
+                tag: 1
+            ),
+            isVideo: true,
+            maximumPayloadBytes: .max
+        ))
+        XCTAssertTrue(stager.append(
+            HTSPMuxPacket(
+                streamIndex: 1,
+                frameType: 0x50,
+                presentationTime: 2_000,
+                decodeTime: 2_000,
+                payload: Data(repeating: 2, count: 8 * 1_024 * 1_024 + 1)
+            ),
+            isVideo: true,
+            maximumPayloadBytes: .max
+        ))
+        XCTAssertTrue(stager.append(
+            taggedPacket(
+                stream: 2,
+                pts: 1_000,
+                dts: nil,
+                duration: 100,
+                tag: 3
+            ),
+            isVideo: false,
+            maximumPayloadBytes: .max
+        ))
+
+        var interleaver = HTSPPostSeekTailInterleaver(
+            batch: stager.finish(),
+            primaryVideoStreamIndex: 1,
+            primaryAudioStreamIndex: 2
+        )
+        XCTAssertEqual(interleaver.drainAvailable().map { $0.payload[0] }, [1, 3])
+        XCTAssertTrue(interleaver.hasExceededPayloadLimit)
+
+        interleaver.append(
+            taggedPacket(
+                stream: 2,
+                pts: 2_000,
+                dts: nil,
+                duration: 20,
+                tag: 4
+            )
+        )
+        XCTAssertEqual(interleaver.drainAvailable().map { $0.payload[0] }, [2, 4])
+        XCTAssertFalse(interleaver.hasExceededPayloadLimit)
+        XCTAssertTrue(interleaver.isEmpty)
     }
 
     func testPostSeekTailInterleaverIgnoresAlternateAudioWatermark() {

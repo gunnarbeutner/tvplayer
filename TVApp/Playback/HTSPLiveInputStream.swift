@@ -116,13 +116,31 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         let primaryAudioStreamIndex: Int?
     }
 
+    private struct ReadyInitialTuneDelivery {
+        let batch: HTSPPostSeekPacketStager.Batch
+        let trailingPacket: HTSPMuxPacket?
+        let epoch: UInt64
+        let primaryVideoStreamIndex: Int?
+        let primaryAudioStreamIndex: Int?
+        let diagnostics: String
+        let flushesExistingDecoder: Bool
+    }
+
     private enum MuxPacketDisposition {
         case drop
         case live
         case staged
+        case initialTuneFailure(reason: String, epoch: UInt64)
+        case flushInitialTune(ReadyInitialTuneDelivery)
         case flush(ReadyPostSeekDelivery)
         case interleaved(packets: [HTSPMuxPacket], epoch: UInt64, fellBack: Bool)
         case stagingOverflow(navigationGeneration: Int)
+    }
+
+    private enum InitialTunePublishResult {
+        case published
+        case stale
+        case failed
     }
 
     private let configuration: TVHeadendConfiguration
@@ -170,9 +188,12 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     private var navigationCompletionHandler: (
         @Sendable (Result<HTSPNavigationResult, HTSPNavigationError>) -> Void
     )?
+    private var initialTunePacketStager = HTSPInitialTunePacketStager()
+    private var initialTuneFlushesExistingDecoder = false
     private var postSeekBuffer = HTSPPostSeekBufferTracker()
     private var postSeekPacketStager = HTSPPostSeekPacketStager()
     private var postSeekTailInterleaver: HTSPPostSeekTailInterleaver?
+    private var hasInitialTuneTailInterleaver = false
     private var postSeekStagingEpoch: UInt64 = 0
     private var postSeekNavigationGeneration = 0
     private var postSeekPrimaryVideoStreamIndex: Int?
@@ -212,6 +233,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         self.acceptedTimeshiftPeriod = acceptedTimeshiftPeriod
         vlcCacheDuration = Int64(max(0, vlcCacheMilliseconds)) * 1_000
         super.init(data: Data())
+        beginInitialTunePacketStaging()
     }
 
     static func connect(
@@ -610,6 +632,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             guard deliveryGate.shouldDeliverPackets else { return }
             let recoveryAcceptsPacket = condition.withLock {
                 guard recovering, recoveryWaitsForVideoKeyframe else { return true }
+                if initialTunePacketStager.isActive { return true }
                 guard trackKind.isVideo, packet.frameType == Character("I").asciiValue else {
                     return false
                 }
@@ -617,6 +640,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 return true
             }
             guard recoveryAcceptsPacket else { return }
+            var publishedInitialTuneEpoch: UInt64?
             switch routeMuxPacket(
                 packet,
                 isVideo: trackKind.isVideo,
@@ -629,6 +653,23 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 appendIfDeliveryIsOpen(transportData)
             case .staged:
                 break
+            case let .initialTuneFailure(reason, epoch):
+                guard condition.withLock({
+                    epoch == postSeekStagingEpoch
+                        && !stopped
+                        && currentError == nil
+                        && deliveryGate.shouldDeliverPackets
+                }) else { return }
+                throw HTSPError.server(reason)
+            case let .flushInitialTune(completion):
+                switch publishInitialTuneBatch(completion) {
+                case .published:
+                    publishedInitialTuneEpoch = completion.epoch
+                case .stale:
+                    return
+                case .failed:
+                    throw HTSPError.server("The initial live A/V buffer could not be published.")
+                }
             case let .flush(completion):
                 guard publishPostSeekBatch(completion) else {
                     controlQueue.async { [weak self] in
@@ -655,7 +696,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 muxAndAppendInterleavedPackets(packets, stagingEpoch: epoch)
                 if fellBack {
                     benchmarkTrace(
-                        "post-seek tail interleave exceeded its payload limit; "
+                        "A/V tail interleave reached its payload bound; "
                             + "flushed in per-stream order"
                     )
                 }
@@ -670,7 +711,9 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 }
                 return
             }
-            finishRecoveryAfterFirstDecodablePacketIfNeeded()
+            finishRecoveryAfterFirstDecodablePacketIfNeeded(
+                publishedInitialTuneEpoch: publishedInitialTuneEpoch
+            )
 
         case "timeshiftStatus":
             let metrics = HTSPTimeshiftMetrics.decode(from: message)
@@ -706,7 +749,14 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             let streams = HTSPStreamInfo.decodeList(message["streams"])
             let replacement = try MPEGTransportStreamMuxer(streams: streams)
             processLock.withLock { muxer = replacement }
-            resetDeliveryQueue()
+            clearDeliveryQueue()
+            if replacement.hasVideo,
+               replacement.primaryVideoStreamIndex != nil,
+               replacement.primaryAudioStreamIndex != nil {
+                beginInitialTunePacketStaging(flushesExistingDecoder: true)
+            } else {
+                processLock.withLock { muxer.resetAfterDiscontinuity() }
+            }
 
         case "subscriptionSkip":
             controlQueue.async { [weak self] in self?.handleSubscriptionSkip(message) }
@@ -742,6 +792,72 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             condition.unlock()
             return .drop
         }
+        if initialTunePacketStager.isActive {
+            switch initialTunePacketStager.append(
+                packet,
+                isVideo: isVideo,
+                isAudio: isAudio
+            ) {
+            case .passthrough:
+                break
+            case .waiting:
+                condition.unlock()
+                return .staged
+            case let .ready(
+                batch,
+                primaryVideoStreamIndex,
+                primaryAudioStreamIndex,
+                diagnostics
+            ):
+                if recovering { recoveryWaitsForVideoKeyframe = false }
+                let completion = ReadyInitialTuneDelivery(
+                    batch: batch,
+                    trailingPacket: nil,
+                    epoch: postSeekStagingEpoch,
+                    primaryVideoStreamIndex: primaryVideoStreamIndex,
+                    primaryAudioStreamIndex: primaryAudioStreamIndex,
+                    diagnostics: diagnostics,
+                    flushesExistingDecoder: initialTuneFlushesExistingDecoder
+                )
+                condition.unlock()
+                return .flushInitialTune(completion)
+            case let .overflow(
+                batch,
+                trailingPacket,
+                containsPrimaryAudio,
+                diagnostics
+            ):
+                let fallbackContainsKeyframe = batch.containsInitialVideoKeyframe
+                    || (trailingPacket?.frameType == 0x49 && isVideo)
+                if recovering, (!fallbackContainsKeyframe || !containsPrimaryAudio) {
+                    let epoch = postSeekStagingEpoch
+                    condition.unlock()
+                    return .initialTuneFailure(
+                        reason: "Initial A/V alignment could not be established during recovery.",
+                        epoch: epoch
+                    )
+                }
+                if recovering { recoveryWaitsForVideoKeyframe = false }
+                let completion = ReadyInitialTuneDelivery(
+                    batch: batch,
+                    trailingPacket: trailingPacket,
+                    epoch: postSeekStagingEpoch,
+                    // Timestamp coverage was not established. Publish the
+                    // bounded FIFO fallback instead of retaining a tail whose
+                    // common A/V watermark may never become knowable.
+                    primaryVideoStreamIndex: nil,
+                    primaryAudioStreamIndex: nil,
+                    diagnostics: diagnostics,
+                    flushesExistingDecoder: initialTuneFlushesExistingDecoder
+                )
+                condition.unlock()
+                return .flushInitialTune(completion)
+            case let .failure(reason):
+                let epoch = postSeekStagingEpoch
+                condition.unlock()
+                return .initialTuneFailure(reason: reason, epoch: epoch)
+            }
+        }
         guard postSeekBuffer.shouldAcceptPacket(
             time: packetTime,
             decodeTime: packet.decodeTime,
@@ -759,11 +875,19 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 return .live
             }
             interleaver.append(packet)
+            var packets = interleaver.drainAvailable()
+            // A catch-up packet can open the common watermark and release a
+            // large tail. Measure the cap after that normal drain so it does
+            // not force an avoidable, unbalanced full flush.
             let fellBack = interleaver.hasExceededPayloadLimit
-            let packets = fellBack
-                ? interleaver.drainAll()
-                : interleaver.drainAvailable()
-            postSeekTailInterleaver = fellBack ? nil : interleaver
+            if fellBack { packets.append(contentsOf: interleaver.drainAll()) }
+            let retiresInitialTail = hasInitialTuneTailInterleaver && interleaver.isEmpty
+            if fellBack || retiresInitialTail {
+                postSeekTailInterleaver = nil
+                hasInitialTuneTailInterleaver = false
+            } else {
+                postSeekTailInterleaver = interleaver
+            }
             let epoch = postSeekStagingEpoch
             condition.unlock()
             return packets.isEmpty
@@ -813,6 +937,78 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         return completion.map(MuxPacketDisposition.flush) ?? .staged
     }
 
+    private func publishInitialTuneBatch(
+        _ completion: ReadyInitialTuneDelivery
+    ) -> InitialTunePublishResult {
+        var tailInterleaver: HTSPPostSeekTailInterleaver?
+        var orderedPackets: [HTSPMuxPacket]
+        if let primaryVideoStreamIndex = completion.primaryVideoStreamIndex,
+           let primaryAudioStreamIndex = completion.primaryAudioStreamIndex {
+            var interleaver = HTSPPostSeekTailInterleaver(
+                batch: completion.batch,
+                primaryVideoStreamIndex: primaryVideoStreamIndex,
+                primaryAudioStreamIndex: primaryAudioStreamIndex
+            )
+            orderedPackets = interleaver.drainAvailable()
+            tailInterleaver = interleaver
+        } else {
+            orderedPackets = completion.batch.interleavedPackets
+        }
+        if let trailingPacket = completion.trailingPacket {
+            orderedPackets.append(trailingPacket)
+        }
+        guard !orderedPackets.isEmpty else { return .failed }
+
+        processLock.lock()
+        let isCurrent = condition.withLock {
+            completion.epoch == postSeekStagingEpoch
+                && !stopped
+                && currentError == nil
+                && deliveryGate.shouldDeliverPackets
+        }
+        guard isCurrent else {
+            processLock.unlock()
+            return .stale
+        }
+        if completion.flushesExistingDecoder {
+            muxer.resetAfterDiscontinuity()
+        } else {
+            muxer.resetForFreshPipeline()
+        }
+        var transportData = Data()
+        for packet in orderedPackets { transportData.append(muxer.mux(packet)) }
+        guard !transportData.isEmpty else {
+            processLock.unlock()
+            return .failed
+        }
+
+        let published = condition.withLock {
+            guard completion.epoch == postSeekStagingEpoch,
+                  !stopped,
+                  currentError == nil,
+                  deliveryGate.shouldDeliverPackets
+            else { return false }
+            buffer.removeAll(keepingCapacity: true)
+            readOffset = 0
+            let retainedTail = tailInterleaver.flatMap { $0.isEmpty ? nil : $0 }
+            postSeekTailInterleaver = retainedTail
+            hasInitialTuneTailInterleaver = retainedTail != nil
+            buffer.append(transportData)
+            condition.broadcast()
+            return true
+        }
+        processLock.unlock()
+        if published {
+            benchmarkTrace(
+                "initial-tune interleave packets=\(orderedPackets.count) "
+                    + "payload=\(completion.batch.payloadByteCount)B "
+                    + "tail=\(tailInterleaver?.queuedPayloadByteCount ?? 0)B "
+                    + "transport=\(transportData.count)B \(completion.diagnostics)"
+            )
+        }
+        return published ? .published : .stale
+    }
+
     private func publishPostSeekBatch(_ completion: ReadyPostSeekDelivery) -> Bool {
         var tailInterleaver: HTSPPostSeekTailInterleaver?
         let orderedPackets: [HTSPMuxPacket]
@@ -859,6 +1055,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             buffer.removeAll(keepingCapacity: true)
             readOffset = 0
             postSeekTailInterleaver = tailInterleaver
+            hasInitialTuneTailInterleaver = false
             buffer.append(transportData)
             condition.broadcast()
             return true
@@ -917,24 +1114,22 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         }
         var transportData = Data()
         for packet in packets { transportData.append(muxer.mux(packet)) }
-        // Keep processLock until the epoch-checked append completes. A failed
-        // navigation resets this muxer while holding the same lock, so stale
-        // tail packets can neither follow that reset nor perturb continuity in
-        // the pipeline which resumes after the failure.
-        appendIfDeliveryIsOpen(transportData, stagingEpoch: stagingEpoch)
         processLock.unlock()
-    }
-
-    private func resetDeliveryQueue() {
-        processLock.withLock { muxer.resetAfterDiscontinuity() }
-        clearDeliveryQueue()
+        // Do not hold the muxer lock while waiting for VLC-facing buffer
+        // capacity: health monitoring needs that lock to detect and recover a
+        // stalled consumer. Every reset which can invalidate these bytes also
+        // advances the staging epoch and clears the delivery queue, so the
+        // append-side epoch check still prevents stale transport data from
+        // crossing into the replacement pipeline.
+        appendIfDeliveryIsOpen(transportData, stagingEpoch: stagingEpoch)
     }
 
     private func clearDeliveryQueue() {
         let interruptedNavigationGeneration = condition.withLock { () -> Int? in
             let interruptedNavigation = postSeekPacketStager.isActive
                 || postSeekBuffer.result != nil
-            let hadPostSeekInterleaving = interruptedNavigation
+            let hadPostSeekInterleaving = initialTunePacketStager.isActive
+                || interruptedNavigation
                 || postSeekTailInterleaver != nil
             let navigationGeneration = interruptedNavigation
                 ? postSeekNavigationGeneration
@@ -967,10 +1162,60 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     private func cancelPostSeekPacketStagingLocked() {
         postSeekStagingEpoch &+= 1
         postSeekNavigationGeneration = 0
+        initialTunePacketStager.cancel()
+        initialTuneFlushesExistingDecoder = false
         postSeekPacketStager.cancel()
         postSeekTailInterleaver = nil
+        hasInitialTuneTailInterleaver = false
         postSeekPrimaryVideoStreamIndex = nil
         postSeekPrimaryAudioStreamIndex = nil
+    }
+
+    private func beginInitialTunePacketStaging(
+        flushesExistingDecoder: Bool = false
+    ) {
+        let tracks = processLock.withLock {
+            (
+                hasVideo: muxer.hasVideo,
+                primaryVideoStreamIndex: muxer.primaryVideoStreamIndex,
+                primaryAudioStreamIndex: muxer.primaryAudioStreamIndex
+            )
+        }
+        condition.withLock {
+            beginInitialTunePacketStagingLocked(
+                hasVideo: tracks.hasVideo,
+                primaryVideoStreamIndex: tracks.primaryVideoStreamIndex,
+                primaryAudioStreamIndex: tracks.primaryAudioStreamIndex,
+                flushesExistingDecoder: flushesExistingDecoder
+            )
+        }
+    }
+
+    /// Must be called while `condition` is held.
+    private func beginInitialTunePacketStagingLocked(
+        hasVideo: Bool,
+        primaryVideoStreamIndex: Int?,
+        primaryAudioStreamIndex: Int?,
+        flushesExistingDecoder: Bool = false
+    ) {
+        cancelPostSeekPacketStagingLocked()
+        initialTuneFlushesExistingDecoder = flushesExistingDecoder
+        // Hold only a short aligned window here. This removes TVHeadend's
+        // stale pre-keyframe audio without making tune latency depend on
+        // filling VLC's entire cache; the launch-output gate below VLC owns
+        // concealment until presentation cadence is stable.
+        initialTunePacketStager.begin(
+            hasVideo: hasVideo,
+            primaryVideoStreamIndex: primaryVideoStreamIndex,
+            primaryAudioStreamIndex: primaryAudioStreamIndex,
+            requiredDuration: HTSPPostSeekBufferTracker.minimumRequiredDuration,
+            maximumPayloadBytes: Self.maximumQueuedBytes,
+            // TVHeadend often delivers the initial video burst ahead of the
+            // selected audio PID. Give the next audio access unit time to
+            // prove the half-second common horizon instead of publishing the
+            // skewed fallback a few milliseconds early.
+            maximumWaitAfterVideoKeyframe: 2.5
+        )
     }
 
     private func beginNavigation() {
@@ -1417,7 +1662,10 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     }
 
     private func benchmarkTrace(_ message: String) {
-        guard ProcessInfo.processInfo.arguments.contains("--vlc-timeshift-benchmark") else { return }
+        let arguments = ProcessInfo.processInfo.arguments
+        guard arguments.contains("--vlc-timeshift-benchmark")
+            || arguments.contains("--vlc-tuning-benchmark")
+        else { return }
         print("VLC_TIMESHIFT_HTSP \(message)")
         fflush(stdout)
     }
@@ -1541,11 +1789,22 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         _ replacement: any HTSPConnectionTransport,
         muxer replacementMuxer: MPEGTransportStreamMuxer
     ) {
+        let replacementTracks = (
+            hasVideo: replacementMuxer.hasVideo,
+            primaryVideoStreamIndex: replacementMuxer.primaryVideoStreamIndex,
+            primaryAudioStreamIndex: replacementMuxer.primaryAudioStreamIndex
+        )
         connectionLock.withLock {
             connection = replacement
             connectionGeneration += 1
         }
-        processLock.withLock { muxer = replacementMuxer }
+        processLock.withLock {
+            muxer = replacementMuxer
+            if replacementTracks.primaryVideoStreamIndex == nil
+                || replacementTracks.primaryAudioStreamIndex == nil {
+                muxer.resetAfterDiscontinuity()
+            }
+        }
         let desiredSpeed = condition.withLock {
             currentLiveDelay = 0
             currentWindow = 0
@@ -1561,9 +1820,14 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             audioPayloadBytes = 0
             firstAudioPacketAt = nil
             lastAudioPacketAt = nil
-            recoveryWaitsForVideoKeyframe = replacementMuxer.hasVideo
+            recoveryWaitsForVideoKeyframe = replacementTracks.hasVideo
             postSeekBuffer.cancel()
-            cancelPostSeekPacketStagingLocked()
+            beginInitialTunePacketStagingLocked(
+                hasVideo: replacementTracks.hasVideo,
+                primaryVideoStreamIndex: replacementTracks.primaryVideoStreamIndex,
+                primaryAudioStreamIndex: replacementTracks.primaryAudioStreamIndex,
+                flushesExistingDecoder: true
+            )
             buffer.removeAll(keepingCapacity: true)
             readOffset = 0
             condition.broadcast()
@@ -1579,22 +1843,41 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         }
     }
 
-    private func finishRecoveryAfterFirstDecodablePacketIfNeeded() {
+    private func finishRecoveryAfterFirstDecodablePacketIfNeeded(
+        publishedInitialTuneEpoch: UInt64?
+    ) {
         let completion = condition.withLock { () -> (
             handler: (@Sendable (HTSPStreamLifecycleEvent) -> Void)?,
-            desiredSpeed: Int32
+            desiredSpeed: Int32,
+            epoch: UInt64
         )? in
-            guard recovering, !recoveryWaitsForVideoKeyframe else { return nil }
+            guard recovering,
+                  !recoveryWaitsForVideoKeyframe,
+                  !initialTunePacketStager.isActive,
+                  !stopped,
+                  currentError == nil,
+                  publishedInitialTuneEpoch.map({ $0 == postSeekStagingEpoch }) ?? true
+            else { return nil }
             recovering = false
             subscriptionReadyAt = Date()
-            return (lifecycleHandler, desiredPlaybackSpeed)
+            return (lifecycleHandler, desiredPlaybackSpeed, postSeekStagingEpoch)
         }
         guard let completion else { return }
         controlQueue.async { [weak self] in
             guard let self else { return }
+            guard self.condition.withLock({
+                !self.stopped
+                    && self.currentError == nil
+                    && self.postSeekStagingEpoch == completion.epoch
+            }) else { return }
             self.speedController = HTSPSubscriptionSpeedController()
             self.requestSpeed(completion.desiredSpeed)
         }
+        guard condition.withLock({
+            !stopped
+                && currentError == nil
+                && postSeekStagingEpoch == completion.epoch
+        }) else { return }
         completion.handler?(.readyAfterRecovery)
     }
 
