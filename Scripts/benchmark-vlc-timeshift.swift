@@ -65,6 +65,7 @@ do {
     let benchmarkOutput = Pipe()
     benchmark.executableURL = executable
     benchmark.arguments = [
+        "-ApplePersistenceIgnoreState", "YES",
         "--vlc-timeshift-benchmark",
         "--exit-after-benchmark",
         "--benchmark-cycles=\(cycles)",

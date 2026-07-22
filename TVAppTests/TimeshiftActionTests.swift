@@ -1318,7 +1318,7 @@ final class TimeshiftActionTests: XCTestCase {
         XCTAssertTrue(gate.observe(stable, at: readyAt))
     }
 
-    func testPostSeekOutputGateRejectsBurstUntilVideoAdvancesAfterStabilityWindow() {
+    func testPostSeekOutputGateRejectsBurstUntilVideoAdvancesAfterQuarterSecond() {
         var gate = PostSeekPlaybackOutputGate()
         let startedAt = Date(timeIntervalSinceReferenceDate: 2_000)
         let initial = PlaybackOutputCounters(
@@ -1326,7 +1326,7 @@ final class TimeshiftActionTests: XCTestCase {
             playedAudioBuffers: 0
         )
         gate.arm(from: initial)
-        gate.requireSustainedOutput(1)
+        gate.requireSustainedOutput(0.25)
         gate.requireDisplayedPictures(12)
         gate.markPipelineRecreated()
         XCTAssertTrue(gate.beginConcealing(from: initial))
@@ -1337,13 +1337,151 @@ final class TimeshiftActionTests: XCTestCase {
         )
         XCTAssertFalse(gate.observe(burst, at: startedAt))
         XCTAssertFalse(
-            gate.observe(burst, at: startedAt.addingTimeInterval(1.1))
-        )
-        XCTAssertTrue(
             gate.observe(
                 PlaybackOutputCounters(
                     displayedPictures: 13,
                     playedAudioBuffers: 21
+                ),
+                at: startedAt.addingTimeInterval(0.249)
+            )
+        )
+        let quarterSecond = startedAt.addingTimeInterval(0.25)
+        XCTAssertFalse(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 13,
+                    playedAudioBuffers: 21
+                ),
+                at: quarterSecond
+            )
+        )
+        XCTAssertTrue(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 14,
+                    playedAudioBuffers: 22
+                ),
+                at: quarterSecond
+            )
+        )
+    }
+
+    func testPostSeekOutputGateWaitsForStableVideoAfterAudioOutputStarts() {
+        var gate = PostSeekPlaybackOutputGate()
+        let startedAt = Date(timeIntervalSinceReferenceDate: 2_500)
+        let initial = PlaybackOutputCounters(
+            displayedPictures: 0,
+            playedAudioBuffers: 0
+        )
+        gate.arm(from: initial)
+        gate.requireSustainedOutput(0.25)
+        gate.requireDisplayedPictures(2)
+        gate.requireAudioOutput()
+        gate.markPipelineRecreated()
+        XCTAssertTrue(gate.beginConcealing(from: initial))
+
+        let videoOnly = PlaybackOutputCounters(
+            displayedPictures: 2,
+            playedAudioBuffers: 0
+        )
+        XCTAssertFalse(gate.observe(videoOnly, at: startedAt))
+        XCTAssertEqual(
+            gate.diagnostics(for: videoOnly, at: startedAt).phase,
+            .waitingForAudio
+        )
+        let audioStarted = PlaybackOutputCounters(
+            displayedPictures: 3,
+            playedAudioBuffers: 1
+        )
+        XCTAssertFalse(
+            gate.observe(audioStarted, at: startedAt.addingTimeInterval(1))
+        )
+        XCTAssertFalse(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 4,
+                    playedAudioBuffers: 2
+                ),
+                at: startedAt.addingTimeInterval(1.249)
+            )
+        )
+        let readyAt = startedAt.addingTimeInterval(1.25)
+        XCTAssertFalse(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 4,
+                    playedAudioBuffers: 2
+                ),
+                at: readyAt
+            )
+        )
+        XCTAssertTrue(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 5,
+                    playedAudioBuffers: 3
+                ),
+                at: readyAt
+            )
+        )
+    }
+
+    func testPostSeekOutputGatePrerollAndLateAudioStabilityRunIndependently() {
+        var gate = PostSeekPlaybackOutputGate()
+        let startedAt = Date(timeIntervalSinceReferenceDate: 2_750)
+        let initial = PlaybackOutputCounters(
+            displayedPictures: 0,
+            playedAudioBuffers: 0
+        )
+        gate.arm(from: initial)
+        gate.requirePrerollDuration(1.2)
+        gate.requireSustainedOutput(0.25)
+        gate.requireDisplayedPictures(2)
+        gate.requireAudioOutput()
+        gate.markPipelineRecreated()
+        XCTAssertTrue(gate.beginConcealing(from: initial))
+
+        XCTAssertFalse(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 2,
+                    playedAudioBuffers: 0
+                ),
+                at: startedAt
+            )
+        )
+        XCTAssertFalse(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 3,
+                    playedAudioBuffers: 1
+                ),
+                at: startedAt.addingTimeInterval(0.8)
+            )
+        )
+        XCTAssertFalse(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 4,
+                    playedAudioBuffers: 2
+                ),
+                at: startedAt.addingTimeInterval(1.05)
+            )
+        )
+        XCTAssertFalse(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 5,
+                    playedAudioBuffers: 3
+                ),
+                at: startedAt.addingTimeInterval(1.199)
+            )
+        )
+        XCTAssertTrue(
+            gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 6,
+                    playedAudioBuffers: 4
                 ),
                 at: startedAt.addingTimeInterval(1.201)
             )
@@ -1539,6 +1677,7 @@ final class TimeshiftActionTests: XCTestCase {
             playbackTimeMilliseconds: 10_000
         )
         gate.arm(from: beforeResume)
+        gate.requireSustainedOutput(0.25)
         gate.requirePrerollDuration(1.2)
         XCTAssertTrue(gate.beginConcealing(from: beforeResume))
 
@@ -1665,10 +1804,15 @@ final class TimeshiftActionTests: XCTestCase {
         tracker.begin(
             result,
             hasVideo: true,
+            audioStreamIndexes: [2],
             requiredDuration: 1_500_000
         )
 
-        XCTAssertTrue(tracker.shouldAcceptPacket(isVideo: true, frameType: 0x49))
+        XCTAssertTrue(tracker.shouldAcceptPacket(
+            time: 45_000_000,
+            isVideo: true,
+            frameType: 0x49
+        ))
         XCTAssertNil(tracker.observePacket(
             time: 45_000_000,
             isVideo: true,
@@ -1677,6 +1821,7 @@ final class TimeshiftActionTests: XCTestCase {
         ))
         XCTAssertNil(tracker.observePacket(
             time: 45_020_000,
+            streamIndex: 2,
             isVideo: false,
             isAudio: true,
             frameType: 0
@@ -1693,18 +1838,290 @@ final class TimeshiftActionTests: XCTestCase {
             isAudio: false,
             frameType: 0x42
         ))
+        XCTAssertNil(tracker.observePacket(
+            time: 46_500_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x50
+        ))
         XCTAssertEqual(tracker.observePacket(
             time: 46_500_000,
+            streamIndex: 2,
             isVideo: false,
             isAudio: true,
             frameType: 0
         ), result)
-        XCTAssertTrue(tracker.completionDiagnostics?.contains("video=3(I1/P1/B1)") == true)
+        XCTAssertTrue(tracker.completionDiagnostics?.contains("video=4(I1/P2/B1)") == true)
         XCTAssertTrue(tracker.completionDiagnostics?.contains("audio=2") == true)
         XCTAssertTrue(tracker.completionDiagnostics?.contains("firstAV=20ms") == true)
     }
 
-    func testPostSeekBufferIncludesPrerollThroughExactTarget() {
+    func testPostSeekBufferTrimsOnlyAudioEndingBeforeVideoLeadTolerance() {
+        var tracker = HTSPPostSeekBufferTracker()
+        let result = HTSPNavigationResult(
+            landingTime: 45_500_000,
+            bufferStartTime: 0,
+            liveEdgeTime: 120_000_000
+        )
+        tracker.begin(result, hasVideo: true, audioStreamIndexes: [2])
+
+        XCTAssertTrue(tracker.shouldAcceptPacket(
+            time: 45_000_000,
+            isVideo: true,
+            frameType: 0x49
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 45_000_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x49
+        ))
+        XCTAssertFalse(tracker.shouldAcceptPacket(
+            time: 44_870_000,
+            duration: 20_000,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ))
+        XCTAssertTrue(tracker.shouldAcceptPacket(
+            time: nil,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: nil,
+            streamIndex: 2,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 45_500_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x50
+        ))
+        XCTAssertTrue(tracker.shouldAcceptPacket(
+            time: 44_900_000,
+            duration: 20_000,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 44_900_000,
+            duration: 20_000,
+            streamIndex: 2,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ))
+        XCTAssertTrue(tracker.shouldAcceptPacket(
+            time: 45_480_000,
+            duration: 20_000,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 45_480_000,
+            duration: 20_000,
+            streamIndex: 2,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 46_000_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x50
+        ))
+        XCTAssertEqual(tracker.observePacket(
+            time: 45_980_000,
+            duration: 20_000,
+            streamIndex: 2,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ), result)
+        XCTAssertTrue(tracker.completionDiagnostics?.contains("firstAV=-100ms") == true)
+        XCTAssertTrue(tracker.completionDiagnostics?.contains("droppedAudio=1") == true)
+    }
+
+    func testPostSeekBufferAnchorsAudioTrimToVideoDecodeTime() {
+        var tracker = HTSPPostSeekBufferTracker()
+        let result = HTSPNavigationResult(
+            landingTime: 45_000_000,
+            bufferStartTime: 0,
+            liveEdgeTime: 120_000_000
+        )
+        tracker.begin(result, hasVideo: true, audioStreamIndexes: [2])
+
+        XCTAssertTrue(tracker.shouldAcceptPacket(
+            time: 45_000_000,
+            decodeTime: 43_800_000,
+            isVideo: true,
+            frameType: 0x49
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 45_000_000,
+            decodeTime: 43_800_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x49
+        ))
+        XCTAssertFalse(tracker.shouldAcceptPacket(
+            time: 43_670_000,
+            duration: 20_000,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ))
+        XCTAssertTrue(tracker.shouldAcceptPacket(
+            time: 43_680_000,
+            duration: 20_000,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 43_680_000,
+            duration: 20_000,
+            streamIndex: 2,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 44_980_000,
+            duration: 20_000,
+            streamIndex: 2,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 46_200_000,
+            decodeTime: 45_000_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x50
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 45_480_000,
+            duration: 20_000,
+            streamIndex: 2,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ))
+        XCTAssertEqual(tracker.observePacket(
+            time: 46_700_000,
+            decodeTime: 45_500_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x50
+        ), result)
+    }
+
+    func testPostSeekBufferRequiresCoverageFromEveryAudioStream() {
+        var tracker = HTSPPostSeekBufferTracker()
+        let result = HTSPNavigationResult(
+            landingTime: 10_000_000,
+            bufferStartTime: 0,
+            liveEdgeTime: 20_000_000
+        )
+        tracker.begin(result, hasVideo: true, audioStreamIndexes: [2, 3])
+
+        XCTAssertTrue(tracker.shouldAcceptPacket(
+            time: 10_000_000,
+            isVideo: true,
+            frameType: 0x49
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 10_000_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x49
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 10_500_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x50
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 10_480_000,
+            duration: 20_000,
+            streamIndex: 2,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ))
+        XCTAssertEqual(tracker.observePacket(
+            time: 10_480_000,
+            duration: 20_000,
+            streamIndex: 3,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ), result)
+    }
+
+    func testPostSeekBufferKeepsUnknownDurationAudioWithoutUsingItAsCoverage() {
+        var tracker = HTSPPostSeekBufferTracker()
+        let result = HTSPNavigationResult(
+            landingTime: 10_000_000,
+            bufferStartTime: 0,
+            liveEdgeTime: 20_000_000
+        )
+        tracker.begin(result, hasVideo: true, audioStreamIndexes: [2])
+
+        XCTAssertTrue(tracker.shouldAcceptPacket(
+            time: 10_000_000,
+            isVideo: true,
+            frameType: 0x49
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 10_000_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x49
+        ))
+        XCTAssertTrue(tracker.shouldAcceptPacket(
+            time: 9_000_000,
+            duration: nil,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 9_000_000,
+            duration: nil,
+            streamIndex: 2,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 10_500_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x50
+        ))
+        XCTAssertEqual(tracker.observePacket(
+            time: 10_500_000,
+            duration: nil,
+            streamIndex: 2,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ), result)
+    }
+
+    func testPostSeekBufferKeepsReserveAfterPrerollAndExactTarget() {
         var tracker = HTSPPostSeekBufferTracker()
         let result = HTSPNavigationResult(
             landingTime: 45_000_000,
@@ -1716,7 +2133,110 @@ final class TimeshiftActionTests: XCTestCase {
 
         XCTAssertNil(tracker.observePacket(time: 43_000_000))
         XCTAssertNil(tracker.observePacket(time: 44_500_000))
-        XCTAssertEqual(tracker.observePacket(time: 45_000_000), result)
+        XCTAssertNil(tracker.observePacket(time: 45_000_000))
+        XCTAssertNil(tracker.observePacket(time: 45_499_000))
+        XCTAssertEqual(tracker.observePacket(time: 45_500_000), result)
+    }
+
+    func testPostSeekBufferKeepsMatchingAudioAndVideoReserveAfterPreroll() {
+        var tracker = HTSPPostSeekBufferTracker()
+        let result = HTSPNavigationResult(
+            landingTime: 45_000_000,
+            serverLandingTime: 43_000_000,
+            bufferStartTime: 0,
+            liveEdgeTime: 120_000_000
+        )
+        tracker.begin(result, hasVideo: true, audioStreamIndexes: [2])
+
+        XCTAssertTrue(tracker.shouldAcceptPacket(
+            time: 44_200_000,
+            decodeTime: 43_000_000,
+            isVideo: true,
+            frameType: 0x49
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 44_200_000,
+            decodeTime: 43_000_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x49
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 45_200_000,
+            decodeTime: 45_000_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x50
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 44_980_000,
+            duration: 20_000,
+            streamIndex: 2,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ))
+
+        // Reaching the requested position is not enough: the concealed
+        // two-second preroll must not consume the half-second safety reserve.
+        XCTAssertNil(tracker.observePacket(
+            time: 45_700_000,
+            decodeTime: 45_500_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x50
+        ))
+        XCTAssertEqual(tracker.observePacket(
+            time: 45_480_000,
+            duration: 20_000,
+            streamIndex: 2,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ), result)
+    }
+
+    func testPostSeekBufferReportsVideoBurstTail() {
+        var tracker = HTSPPostSeekBufferTracker()
+        let result = HTSPNavigationResult(
+            landingTime: 10_000_000,
+            bufferStartTime: 0,
+            liveEdgeTime: 20_000_000
+        )
+        tracker.begin(result, hasVideo: true, audioStreamIndexes: [2])
+
+        XCTAssertTrue(tracker.shouldAcceptPacket(
+            time: 10_000_000,
+            decodeTime: 10_000_000,
+            isVideo: true,
+            frameType: 0x49
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 10_000_000,
+            decodeTime: 10_000_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x49
+        ))
+        XCTAssertNil(tracker.observePacket(
+            time: 10_480_000,
+            duration: 20_000,
+            streamIndex: 2,
+            isVideo: false,
+            isAudio: true,
+            frameType: 0
+        ))
+
+        // Both streams have the nominal reserve, while diagnostics retain the
+        // scheduling skew that the staging reserve needs to absorb.
+        XCTAssertEqual(tracker.observePacket(
+            time: 12_000_000,
+            decodeTime: 12_000_000,
+            isVideo: true,
+            isAudio: false,
+            frameType: 0x50
+        ), result)
+        XCTAssertTrue(tracker.completionDiagnostics?.contains("audioTailLag=1500ms") == true)
     }
 
     func testDeliveryGateDropsPacketsUntilNavigationCompletes() {

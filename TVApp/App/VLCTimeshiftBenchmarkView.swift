@@ -375,6 +375,13 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
             samples.compactMap(\.discontinuityMilliseconds)
         )
         appendSummary("Cycle \(number) first video", samples.map(\.videoMilliseconds))
+        appendSummary("Cycle \(number) first audio", samples.compactMap(\.audioMilliseconds))
+        appendSummary(
+            "Cycle \(number) A/V start delta (audio − video)",
+            samples.compactMap { sample in
+                sample.audioMilliseconds.map { $0 - sample.videoMilliseconds }
+            }
+        )
         appendSummary("Cycle \(number) player ready", samples.map(\.readyMilliseconds))
         append(.success, "Seek cycle \(number) completed", "The TVHeadend session remains available for another run.")
     }
@@ -434,6 +441,8 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
         number: Int
     ) async throws -> SeekSample {
         engine.refreshPlaybackInformation()
+        let expectsAudio = engine.nativeTimeshiftHealthSnapshot?.expectsAudio == true
+        let audioDiagnosticsBeforeSeek = engine.vlcAudioOutputDiagnostics
         var baseline = counters
         var mediaIdentity = engine.mediaPlayer.media.map(ObjectIdentifier.init)
         let initialNavigationState = engine.timeshiftNavigationDebugState
@@ -462,7 +471,10 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
         var loggedConcealment = false
         var validatedHeldFrame = false
         while ProcessInfo.processInfo.systemUptime - started < 10 {
-            try await Task.sleep(for: .milliseconds(10))
+            // Statistics access crosses into libVLC. Sampling at video-frame
+            // cadence preserves useful timing resolution without letting the
+            // benchmark itself contend with macOS audio output at 100 Hz.
+            try await Task.sleep(for: .milliseconds(50))
             engine.refreshPlaybackInformation()
             try validateSessionContinuity()
             try validateNormalPlaybackRate(context: "seek \(number)")
@@ -527,12 +539,34 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
                     audioAt = now
                     append(.success, "First new VLC audio buffer", elapsedDetail(since: started))
                 }
-            } else if navigationStarted, videoAt == nil,
-                      current.displayedPictures > baseline.displayedPictures {
-                videoAt = now
+            } else if navigationStarted {
+                if videoAt == nil,
+                   current.displayedPictures > baseline.displayedPictures {
+                    videoAt = now
+                }
+                if audioAt == nil,
+                   current.playedAudioBuffers > baseline.playedAudioBuffers {
+                    audioAt = now
+                }
             }
             if let videoAt,
+               !expectsAudio || audioAt != nil,
                engine.state == .playing, !engine.isPlaybackOutputConcealed {
+                let destinationBaseline = atDiscontinuity ?? baseline
+                if expectsAudio,
+                   current.lostAudioBuffers > destinationBaseline.lostAudioBuffers {
+                    throw BenchmarkError.outputInvariant(
+                        "Seek \(number) lost \(current.lostAudioBuffers - destinationBaseline.lostAudioBuffers) audio buffer(s) before reveal. \(debugState)"
+                    )
+                }
+                let audioDiagnosticsAtReveal = engine.vlcAudioOutputDiagnostics
+                if audioDiagnosticsAtReveal.hasAdvanced(since: audioDiagnosticsBeforeSeek) {
+                    throw BenchmarkError.outputInvariant(
+                        "Seek \(number) produced a VLC/CoreAudio underrun or clock correction "
+                            + "during its concealed startup (before: \(audioDiagnosticsBeforeSeek), "
+                            + "after: \(audioDiagnosticsAtReveal))."
+                    )
+                }
                 let sample = SeekSample(
                     discontinuityMilliseconds: discontinuityAt.map { ($0 - started) * 1_000 },
                     videoMilliseconds: (videoAt - started) * 1_000,
@@ -547,13 +581,24 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
                 return sample
             }
         }
+        if expectsAudio, videoAt != nil, audioAt == nil {
+            throw BenchmarkError.outputInvariant(
+                "Seek \(number) produced video but no output from its expected audio stream within 10 seconds. \(debugState)"
+            )
+        }
         throw BenchmarkError.seekTimedOut(number, debugState)
     }
 
     private func validatePostSeekDwell(seekNumber: Int) async throws {
+        let expectsAudio = engine.nativeTimeshiftHealthSnapshot?.expectsAudio == true
+        let initialAudioDiagnostics = engine.vlcAudioOutputDiagnostics
         var previous = counters
-        var lastVideoAdvance = ProcessInfo.processInfo.systemUptime
+        let dwellStarted = ProcessInfo.processInfo.systemUptime
+        var lastVideoAdvance = dwellStarted
+        var lastAudioAdvance = dwellStarted
         var maximumVideoGap: TimeInterval = 0
+        var maximumAudioGap: TimeInterval = 0
+        var observedAudioAdvance = false
 
         for _ in 0..<100 {
             try await Task.sleep(for: .milliseconds(100))
@@ -563,11 +608,12 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
 
             let now = ProcessInfo.processInfo.systemUptime
             let current = counters
-            if current.displayedPictures > previous.displayedPictures {
+            let videoAdvanced = current.displayedPictures > previous.displayedPictures
+            let audioAdvanced = current.playedAudioBuffers > previous.playedAudioBuffers
+            if videoAdvanced {
                 maximumVideoGap = max(maximumVideoGap, now - lastVideoAdvance)
                 lastVideoAdvance = now
-            } else if current.playedAudioBuffers > previous.playedAudioBuffers,
-                      now - lastVideoAdvance >= 0.5 {
+            } else if audioAdvanced, now - lastVideoAdvance >= 0.75 {
                 throw BenchmarkError.outputInvariant(
                     String(
                         format: "Seek %d audio advanced while video stalled for %.0fms after reveal.",
@@ -576,13 +622,60 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
                     )
                 )
             }
+            if expectsAudio {
+                if current.playedAudioBuffers < previous.playedAudioBuffers {
+                    throw BenchmarkError.outputInvariant(
+                        "Seek \(seekNumber) reset its VLC audio output counter during the post-seek dwell."
+                    )
+                }
+                if current.lostAudioBuffers > previous.lostAudioBuffers {
+                    throw BenchmarkError.outputInvariant(
+                        "Seek \(seekNumber) lost \(current.lostAudioBuffers - previous.lostAudioBuffers) audio buffer(s) during the post-seek dwell."
+                    )
+                }
+                if audioAdvanced {
+                    observedAudioAdvance = true
+                    maximumAudioGap = max(maximumAudioGap, now - lastAudioAdvance)
+                    lastAudioAdvance = now
+                } else if now - lastAudioAdvance >= 0.5 {
+                    throw BenchmarkError.outputInvariant(
+                        String(
+                            format: "Seek %d expected audio stalled for %.0fms after reveal.",
+                            seekNumber,
+                            (now - lastAudioAdvance) * 1_000
+                        )
+                    )
+                }
+            }
             previous = current
+        }
+
+        if expectsAudio, !observedAudioAdvance {
+            throw BenchmarkError.outputInvariant(
+                "Seek \(seekNumber) produced no expected audio output during its 10-second post-seek dwell."
+            )
+        }
+        let finalAudioDiagnostics = engine.vlcAudioOutputDiagnostics
+        if finalAudioDiagnostics.hasAdvanced(since: initialAudioDiagnostics) {
+            throw BenchmarkError.outputInvariant(
+                "Seek \(seekNumber) produced a VLC/CoreAudio underrun or clock correction "
+                    + "during its audible dwell (before: \(initialAudioDiagnostics), "
+                    + "after: \(finalAudioDiagnostics))."
+            )
         }
 
         append(
             .success,
-            "Post-seek video remained continuous",
-            String(format: "Longest observed frame interval %.1fms.", maximumVideoGap * 1_000)
+            expectsAudio
+                ? "Post-seek video and audio remained continuous"
+                : "Post-seek video remained continuous",
+            expectsAudio
+                ? String(
+                    format: "Longest observed intervals: video %.1fms · audio %.1fms.",
+                    maximumVideoGap * 1_000,
+                    maximumAudioGap * 1_000
+                )
+                : String(format: "Longest observed frame interval %.1fms.", maximumVideoGap * 1_000)
         )
     }
 
@@ -640,7 +733,8 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
         let current = counters
         let health = engine.nativeTimeshiftHealthSnapshot
         let packetAge = health?.lastMuxPacketAt.map { String(format: "%.2fs", -$0.timeIntervalSinceNow) } ?? "nil"
-        return "engine=\(playerState), vlc=\(engine.mediaPlayer.state), playing=\(engine.mediaPlayer.isPlaying), concealed=\(engine.isPlaybackOutputConcealed), navigation=\(engine.timeshiftNavigationDebugState), streamNavigating=\(health?.isNavigating.description ?? "nil"), desiredSpeed=\(health.map { String($0.desiredSpeed) } ?? "nil"), lastPacketAge=\(packetAge), delay=\(String(format: "%.2f", engine.liveDelaySeconds))s, recoveries=\(engine.nativeTimeshiftRecoveryCount), discontinuities=\(current.demuxDiscontinuities), pictures=\(current.displayedPictures), audio=\(current.playedAudioBuffers), time=\(current.playbackTimeMilliseconds.map(String.init) ?? "nil")ms"
+        let selectedAudio = engine.selectedAudioTrackID.map(String.init) ?? "nil"
+        return "engine=\(playerState), vlc=\(engine.mediaPlayer.state), playing=\(engine.mediaPlayer.isPlaying), concealed=\(engine.isPlaybackOutputConcealed), navigation=\(engine.timeshiftNavigationDebugState), streamNavigating=\(health?.isNavigating.description ?? "nil"), desiredSpeed=\(health.map { String($0.desiredSpeed) } ?? "nil"), lastPacketAge=\(packetAge), queuedBytes=\(engine.bufferedBytes), delay=\(String(format: "%.2f", engine.liveDelaySeconds))s, recoveries=\(engine.nativeTimeshiftRecoveryCount), discontinuities=\(current.demuxDiscontinuities), pictures=\(current.displayedPictures), audio=\(current.playedAudioBuffers), selectedAudio=\(selectedAudio), lostAudio=\(current.lostAudioBuffers), time=\(current.playbackTimeMilliseconds.map(String.init) ?? "nil")ms"
     }
 
     private var automaticCycleCount: Int {
@@ -721,21 +815,7 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
     }
 
     private var counters: PlaybackOutputCounters {
-        let statistics = engine.mediaPlayer.media?.statistics
-        func count(_ value: UInt64) -> Int {
-            value <= UInt64(Int.max) ? Int(value) : 0
-        }
-        return PlaybackOutputCounters(
-            displayedPictures: count(statistics?.displayedPictures ?? 0),
-            playedAudioBuffers: count(statistics?.playedAudioBuffers ?? 0),
-            demuxDiscontinuities: count(statistics?.demuxDiscontinuity ?? 0),
-            playbackTimeMilliseconds: engine.mediaPlayer.time.intValue > 0
-                ? Int64(engine.mediaPlayer.time.intValue)
-                : nil,
-            decodedVideo: count(statistics?.decodedVideo ?? 0),
-            decodedAudio: count(statistics?.decodedAudio ?? 0),
-            lostPictures: count(statistics?.lostPictures ?? 0)
-        )
+        engine.playbackOutputSnapshot
     }
 
     private func firstChannel(

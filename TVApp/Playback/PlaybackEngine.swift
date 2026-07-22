@@ -31,6 +31,61 @@ enum PlaybackRecoveryReason: Equatable {
     }
 }
 
+struct VLCAudioOutputDiagnostics: Equatable {
+    var coreAudioUnderruns = 0
+    var lateClockCorrections = 0
+    var earlyClockCorrections = 0
+
+    func hasAdvanced(since previous: Self) -> Bool {
+        coreAudioUnderruns > previous.coreAudioUnderruns
+            || lateClockCorrections > previous.lateClockCorrections
+            || earlyClockCorrections > previous.earlyClockCorrections
+    }
+}
+
+private final class VLCTimeshiftAudioLogger: NSObject, VLCLogging, @unchecked Sendable {
+    var level: VLCLogLevel = .warning
+
+    private let lock = NSLock()
+    private var diagnostics = VLCAudioOutputDiagnostics()
+
+    var snapshot: VLCAudioOutputDiagnostics {
+        lock.withLock { diagnostics }
+    }
+
+    func handleMessage(
+        _ message: String,
+        logLevel: VLCLogLevel,
+        context: VLCLogContext?
+    ) {
+        let normalized = message.lowercased()
+        let category: String? = lock.withLock {
+            if normalized.contains("underrun of") {
+                diagnostics.coreAudioUnderruns += 1
+                return "coreaudio-underrun"
+            }
+            if normalized.contains("playback way too late")
+                || normalized.contains("up-sampling") {
+                diagnostics.lateClockCorrections += 1
+                return "late-clock-correction"
+            }
+            if normalized.contains("playback too early")
+                || normalized.contains("down-sampling")
+                || normalized.contains("playing silence") {
+                diagnostics.earlyClockCorrections += 1
+                return "early-clock-correction"
+            }
+            return nil
+        }
+        guard let category else { return }
+        print(
+            "VLC_TIMESHIFT_VLC_AUDIO \(category) "
+                + "module=\(context?.module ?? "unknown") \(message)"
+        )
+        fflush(stdout)
+    }
+}
+
 #if DEBUG
 private struct TimeshiftSeekPhaseTrace {
     let startedAt: TimeInterval
@@ -114,7 +169,6 @@ protocol PlaybackEngine: AnyObject {
 
 @MainActor
 final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @preconcurrency VLCMediaPlayerDelegate {
-    private static let bufferedSeekVLCCacheMilliseconds = 500
     private let logger = Logger(subsystem: "de.beutner.TVPlayer", category: "Playback")
     @Published private(set) var state: PlaybackState = .idle
     @Published private(set) var elapsedSeconds: TimeInterval = 0
@@ -141,6 +195,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     @Published private(set) var timeshiftNavigationDebugState = "idle"
     @Published private(set) var nativeTimeshiftRecoveryCount = 0
     @Published private(set) var lastNativePipelineDiagnostic: String?
+    private(set) var playbackOutputSnapshot = PlaybackOutputCounters(
+        displayedPictures: 0,
+        playedAudioBuffers: 0
+    )
 #if os(tvOS)
     @Published private(set) var isPictureInPictureReady = false
     @Published private(set) var usesSampleBufferRendering = false
@@ -155,6 +213,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     // VLCMedia(stream:), and closes it asynchronously. Keep each disposable
     // reader alive for the engine lifetime to make that callback safe.
     private var retainedNativeVLCReaders: [InputStream] = []
+    private let timeshiftAudioLogger: VLCTimeshiftAudioLogger?
     private var nativeTimeshiftActions: NativeTimeshiftActionController?
     private var nativeTimeshiftSessionID: UUID?
     private var pipelineRecoveryTask: Task<Void, Never>?
@@ -181,7 +240,16 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private var pendingSnapshotURL: URL?
 
     override init() {
-        mediaPlayer = VLCMediaPlayer(library: VLCLibrary(options: ["--quiet"]))
+        let runsTimeshiftBenchmark = ProcessInfo.processInfo.arguments.contains(
+            "--vlc-timeshift-benchmark"
+        )
+        let timeshiftAudioLogger = runsTimeshiftBenchmark
+            ? VLCTimeshiftAudioLogger()
+            : nil
+        let library = VLCLibrary(options: runsTimeshiftBenchmark ? [] : ["--quiet"])
+        if let timeshiftAudioLogger { library.loggers = [timeshiftAudioLogger] }
+        self.timeshiftAudioLogger = timeshiftAudioLogger
+        mediaPlayer = VLCMediaPlayer(library: library)
 #if os(tvOS)
         sampleBufferBridge = TVPlayerSampleBufferBridge(mediaPlayer: mediaPlayer)
 #endif
@@ -197,6 +265,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             }
         }
 #endif
+    }
+
+    var vlcAudioOutputDiagnostics: VLCAudioOutputDiagnostics {
+        timeshiftAudioLogger?.snapshot ?? VLCAudioOutputDiagnostics()
     }
 
 #if os(tvOS)
@@ -280,8 +352,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                     }
                     let reader = stream.makeVLCReader()
                     retainedNativeVLCReaders.append(reader)
-                    media = Self.makeMedia(stream: reader)
-                    media.addOption(":demux=ts")
+                    media = Self.makeNativeHTSPMedia(stream: reader)
                     nativeInputStream = stream
                     nativeTimeshiftActions = NativeTimeshiftActionController(sink: stream)
                     let sessionID = UUID()
@@ -605,6 +676,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             bufferedBytes = 0
         }
         let output = playbackOutputCounters
+        playbackOutputSnapshot = output
         updatePostSeekOutputGate(with: output, at: date)
         if !postSeekOutputGate.isConcealing {
             confirmPlaybackResumeIfOutputAdvanced(output: output, at: date)
@@ -792,7 +864,6 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                 let navigationSucceeded: Bool
                 switch result {
                 case let .success(navigation):
-                    navigationSucceeded = true
                     self.timeshiftNavigationDebugState = "server navigation completed"
 #if DEBUG
                     self.traceTimeshiftSeekPhase(
@@ -803,7 +874,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                     )
 #endif
                     self.applyNavigationLanding(navigation)
-                    await self.replaceVLCPipelineAfterTimeshiftNavigation(navigation)
+                    navigationSucceeded = await self.replaceVLCPipelineAfterTimeshiftNavigation()
                 case let .failure(error):
                     navigationSucceeded = false
                     self.isReplacingPipelineForTimeshiftSeek = false
@@ -814,11 +885,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                     )
                 }
 
-                if self.navigationShouldResume {
+                if navigationSucceeded, self.navigationShouldResume {
                     self.resumeLocalPlaybackAfterTimeshiftNavigation()
                 } else if navigationSucceeded {
                     self.primePausedFrameAfterTimeshiftNavigation()
-                } else {
+                } else if self.pipelineRecoveryTask == nil {
                     self.pauseRequested = true
                     self.nativeInputStream?.pause()
                     self.mediaPlayer.pause()
@@ -1030,8 +1101,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 
                 let reader = stream.makeVLCReader()
                 retainedNativeVLCReaders.append(reader)
-                let media = Self.makeMedia(stream: reader)
-                media.addOption(":demux=ts")
+                let media = Self.makeNativeHTSPMedia(stream: reader)
                 addCachingOptions(to: media, milliseconds: request.networkCachingMilliseconds)
                 nativeInputStream = stream
                 nativeTimeshiftActions = NativeTimeshiftActionController(sink: stream)
@@ -1102,10 +1172,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 #endif
     }
 
-    private static func makeMedia(stream: InputStream) -> VLCMedia {
+    private static func makeNativeHTSPMedia(stream: InputStream) -> VLCMedia {
         guard let media = VLCMedia(stream: stream) else {
             preconditionFailure("VLC 4 rejected the native input stream")
         }
+        media.addOption(":demux=ts")
         return media
     }
 
@@ -1168,11 +1239,18 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             // accelerating here leaks fast audio and can starve video after
             // the output gate opens.
             postSeekOutputGate.requireDisplayedPictures(12)
-            // VLC can publish a burst of destination pictures and then pause
-            // video for roughly half a second while audio continues. Require
-            // a full second of wall-clock output and a picture advancing in
-            // the reveal observation; VLC's startup clock is not monotonic.
-            postSeekOutputGate.requireSustainedOutput(1)
+            // The staged transport now retains the full configured A/V reserve
+            // after the requested position, so audio safety does not require a
+            // long fixed reveal delay. Keep only a short debounce for VLC's
+            // initial decoded-picture burst.
+            postSeekOutputGate.requireSustainedOutput(0.25)
+        }
+        if postSeekOutputGate.isArmed,
+           nativeInputStream?.healthSnapshot.expectsAudio == true {
+            // VLC's audio output can join well after video. Keep the held
+            // frame and mute in place until real audio output is advancing;
+            // otherwise the startup clock correction is exposed to the user.
+            postSeekOutputGate.requireAudioOutput()
         }
         playbackRate = 1
         beginPostSeekOutputConcealmentIfNeeded()
@@ -1182,10 +1260,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         lastMetricsUpdate = Date()
     }
 
-    private func replaceVLCPipelineAfterTimeshiftNavigation(
-        _ navigation: HTSPNavigationResult
-    ) async {
-        guard let stream = nativeInputStream, let request = activeRequest else { return }
+    private func replaceVLCPipelineAfterTimeshiftNavigation() async -> Bool {
+        guard let stream = nativeInputStream, let request = activeRequest else { return false }
 #if DEBUG
         let replacementStartedAt = ProcessInfo.processInfo.systemUptime
 #endif
@@ -1193,23 +1269,25 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         // LibVLC 4 stops asynchronously. Installing and playing the fresh
         // media before the Stopped callback lets the old input teardown race
         // the replacement decoder, producing a long video-only stall.
-        for _ in 0..<200 where mediaPlayer.state != .stopped {
-            guard !Task.isCancelled else { return }
+        for _ in 0..<500 where mediaPlayer.state != .stopped {
+            guard !Task.isCancelled else { return false }
             try? await Task.sleep(for: .milliseconds(10))
+        }
+        guard mediaPlayer.state == .stopped else {
+            let detail = "VLC did not stop its previous input within five seconds."
+            timeshiftNavigationDebugState = "pipeline replacement timed out"
+            cancelPostSeekOutputGate()
+            scheduleNativePipelineRecovery(detail: detail)
+            logger.error("\(detail, privacy: .public)")
+            return false
         }
 #if DEBUG
         let stoppedAt = ProcessInfo.processInfo.systemUptime
 #endif
         let reader = stream.makeVLCReader()
         retainedNativeVLCReaders.append(reader)
-        let media = Self.makeMedia(stream: reader)
-        media.addOption(":demux=ts")
-        let cachingMilliseconds = navigation.usesAcceleratedBackfill
-            ? min(
-                request.networkCachingMilliseconds,
-                Self.bufferedSeekVLCCacheMilliseconds
-            )
-            : request.networkCachingMilliseconds
+        let media = Self.makeNativeHTSPMedia(stream: reader)
+        let cachingMilliseconds = request.networkCachingMilliseconds
         addCachingOptions(to: media, milliseconds: cachingMilliseconds)
         mediaPlayer.media = media
         postSeekOutputGate.markPipelineRecreated()
@@ -1232,6 +1310,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             at: Date()
         )
         logger.info("Recreated VLC pipeline at the selected timeshift position")
+        return true
     }
 
     var nativeTimeshiftHealthSnapshot: HTSPStreamHealthSnapshot? {
@@ -1267,7 +1346,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                 : nil,
             decodedVideo: count(statistics?.decodedVideo ?? 0),
             decodedAudio: count(statistics?.decodedAudio ?? 0),
-            lostPictures: count(statistics?.lostPictures ?? 0)
+            lostPictures: count(statistics?.lostPictures ?? 0),
+            lostAudioBuffers: count(statistics?.lostAudioBuffers ?? 0)
         )
     }
 

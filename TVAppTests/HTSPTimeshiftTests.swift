@@ -101,6 +101,7 @@ final class HTSPTimeshiftTests: XCTestCase {
         )
 
         XCTAssertEqual(muxer.audioStreamTypes, ["AAC", "AC3"])
+        XCTAssertEqual(muxer.primaryAudioStreamIndex, 2)
         XCTAssertFalse(muxer.isAudioStream(1))
         XCTAssertTrue(muxer.isAudioStream(2))
         XCTAssertTrue(muxer.isAudioStream(3))
@@ -172,6 +173,306 @@ final class HTSPTimeshiftTests: XCTestCase {
         XCTAssertTrue(firstPacketHasDiscontinuity(pid: 0x0101, in: resumedAudio))
         XCTAssertTrue(firstPacketHasVLCDiscontinuity(pid: 0x0100, in: resumedVideo))
         XCTAssertTrue(firstPacketHasVLCDiscontinuity(pid: 0x0101, in: resumedAudio))
+    }
+
+    func testTransportMuxerStartsFreshPipelineWithoutDecoderFlushMarker() throws {
+        let muxer = try MPEGTransportStreamMuxer(
+            streams: [
+                HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil),
+                HTSPStreamInfo(index: 2, type: "AAC", language: "eng", metadata: nil),
+            ]
+        )
+        let video = HTSPMuxPacket(
+            streamIndex: 1,
+            frameType: 0x49,
+            presentationTime: 30_000_000,
+            decodeTime: 29_980_000,
+            payload: Data([0, 0, 0, 1, 0x65])
+        )
+        let audio = HTSPMuxPacket(
+            streamIndex: 2,
+            frameType: 0,
+            presentationTime: 30_000_000,
+            decodeTime: 30_000_000,
+            payload: Data([0xff, 0xf1, 0x50, 0x80])
+        )
+
+        _ = muxer.mux(video)
+        _ = muxer.mux(audio)
+        muxer.resetForFreshPipeline()
+
+        let resumedVideo = muxer.mux(video)
+        let resumedAudio = muxer.mux(audio)
+        XCTAssertTrue(firstPacketHasDiscontinuity(pid: 0x0100, in: resumedVideo))
+        XCTAssertTrue(firstPacketHasDiscontinuity(pid: 0x0101, in: resumedAudio))
+        XCTAssertFalse(firstPacketHasVLCDiscontinuity(pid: 0x0100, in: resumedVideo))
+        XCTAssertFalse(firstPacketHasVLCDiscontinuity(pid: 0x0101, in: resumedAudio))
+        XCTAssertTrue(firstPacketHasPCR(pid: 0x0100, in: resumedVideo))
+    }
+
+    func testPostSeekInterleaverPinsVideoKeyframeAheadOfEarlierAudio() {
+        var stager = HTSPPostSeekPacketStager()
+        stager.begin(pinsInitialVideoKeyframe: true)
+        XCTAssertTrue(stager.append(
+            taggedPacket(stream: 1, frameType: 0x49, pts: 2_200_000, dts: 1_000_000, tag: 1),
+            isVideo: true,
+            maximumPayloadBytes: .max
+        ))
+        XCTAssertTrue(stager.append(
+            taggedPacket(stream: 2, pts: 950_000, dts: nil, tag: 2),
+            isVideo: false,
+            maximumPayloadBytes: .max
+        ))
+        XCTAssertTrue(stager.append(
+            taggedPacket(stream: 1, frameType: 0x50, pts: 1_040_000, dts: 1_040_000, tag: 3),
+            isVideo: true,
+            maximumPayloadBytes: .max
+        ))
+
+        XCTAssertEqual(
+            stager.finish().interleavedPackets.map { $0.payload[0] },
+            [1, 2, 3]
+        )
+    }
+
+    func testPostSeekInterleaverUsesDTSAcrossStreamsWithoutReorderingAStream() {
+        var stager = HTSPPostSeekPacketStager()
+        stager.begin(pinsInitialVideoKeyframe: true)
+        let packets: [(HTSPMuxPacket, Bool)] = [
+            (taggedPacket(stream: 1, frameType: 0x49, pts: 2_000_000, dts: 1_000_000, tag: 1), true),
+            // Its PTS precedes audio, but its decode time does not.
+            (taggedPacket(stream: 1, frameType: 0x50, pts: 1_010_000, dts: 1_080_000, tag: 2), true),
+            (taggedPacket(stream: 2, pts: 1_020_000, dts: nil, tag: 3), false),
+            // Preserve known-good arrival order inside video PID 1 despite
+            // this timestamp inversion.
+            (taggedPacket(stream: 1, frameType: 0x42, pts: 1_200_000, dts: 1_040_000, tag: 4), true),
+        ]
+        for (packet, isVideo) in packets {
+            XCTAssertTrue(stager.append(
+                packet,
+                isVideo: isVideo,
+                maximumPayloadBytes: .max
+            ))
+        }
+
+        XCTAssertEqual(
+            stager.finish().interleavedPackets.map { $0.payload[0] },
+            [1, 3, 2, 4]
+        )
+    }
+
+    func testPostSeekInterleaverUsesArrivalOrderForTimestampTiesAndMissingTimes() {
+        var stager = HTSPPostSeekPacketStager()
+        stager.begin(pinsInitialVideoKeyframe: true)
+        let packets: [(HTSPMuxPacket, Bool)] = [
+            (taggedPacket(stream: 1, frameType: 0x49, pts: 1_000_000, dts: 1_000_000, tag: 1), true),
+            (taggedPacket(stream: 2, pts: 1_040_000, dts: nil, tag: 2), false),
+            (taggedPacket(stream: 1, frameType: 0x50, pts: 1_040_000, dts: 1_040_000, tag: 3), true),
+            (taggedPacket(stream: 3, pts: nil, dts: nil, tag: 4), false),
+        ]
+        for (packet, isVideo) in packets {
+            XCTAssertTrue(stager.append(
+                packet,
+                isVideo: isVideo,
+                maximumPayloadBytes: .max
+            ))
+        }
+
+        XCTAssertEqual(
+            stager.finish().interleavedPackets.map { $0.payload[0] },
+            [1, 2, 3, 4]
+        )
+        XCTAssertFalse(stager.isActive)
+        XCTAssertEqual(stager.payloadByteCount, 0)
+    }
+
+    func testPostSeekTailInterleaverReleasesOnlyCommonAudioVideoHorizon() {
+        var stager = HTSPPostSeekPacketStager()
+        stager.begin(pinsInitialVideoKeyframe: true)
+        let initialPackets: [(HTSPMuxPacket, Bool)] = [
+            (taggedPacket(stream: 1, frameType: 0x49, pts: 1_000, dts: 1_000, tag: 1), true),
+            (taggedPacket(stream: 1, frameType: 0x50, pts: 1_040, dts: 1_040, tag: 2), true),
+            (taggedPacket(stream: 1, frameType: 0x50, pts: 1_080, dts: 1_080, tag: 3), true),
+            (taggedPacket(stream: 2, pts: 1_020, dts: nil, duration: 20, tag: 4), false),
+        ]
+        for (packet, isVideo) in initialPackets {
+            XCTAssertTrue(stager.append(
+                packet,
+                isVideo: isVideo,
+                maximumPayloadBytes: .max
+            ))
+        }
+
+        var interleaver = HTSPPostSeekTailInterleaver(
+            batch: stager.finish(),
+            primaryVideoStreamIndex: 1,
+            primaryAudioStreamIndex: 2
+        )
+        XCTAssertEqual(
+            interleaver.drainAvailable().map { $0.payload[0] },
+            [1, 4, 2]
+        )
+        XCTAssertEqual(interleaver.queuedPayloadByteCount, 1)
+
+        interleaver.append(
+            taggedPacket(stream: 2, pts: 1_060, dts: nil, duration: 20, tag: 5)
+        )
+        XCTAssertEqual(
+            interleaver.drainAvailable().map { $0.payload[0] },
+            [5, 3]
+        )
+        XCTAssertEqual(interleaver.queuedPayloadByteCount, 0)
+    }
+
+    func testPostSeekTailInterleaverIgnoresAlternateAudioWatermark() {
+        var stager = HTSPPostSeekPacketStager()
+        stager.begin(pinsInitialVideoKeyframe: true)
+        let initialPackets: [(HTSPMuxPacket, Bool)] = [
+            (taggedPacket(stream: 1, frameType: 0x49, pts: 1_000, dts: 1_000, tag: 1), true),
+            (taggedPacket(stream: 1, frameType: 0x50, pts: 1_120, dts: 1_120, tag: 2), true),
+            (taggedPacket(stream: 2, pts: 1_060, dts: nil, duration: 20, tag: 3), false),
+        ]
+        for (packet, isVideo) in initialPackets {
+            XCTAssertTrue(stager.append(
+                packet,
+                isVideo: isVideo,
+                maximumPayloadBytes: .max
+            ))
+        }
+        var interleaver = HTSPPostSeekTailInterleaver(
+            batch: stager.finish(),
+            primaryVideoStreamIndex: 1,
+            primaryAudioStreamIndex: 2
+        )
+        XCTAssertEqual(interleaver.drainAvailable().map { $0.payload[0] }, [1, 3])
+
+        interleaver.append(
+            taggedPacket(stream: 3, pts: 1_200, dts: nil, duration: 20, tag: 4)
+        )
+        XCTAssertTrue(interleaver.drainAvailable().isEmpty)
+
+        interleaver.append(
+            taggedPacket(stream: 2, pts: 1_100, dts: nil, duration: 20, tag: 5)
+        )
+        XCTAssertEqual(
+            interleaver.drainAvailable().map { $0.payload[0] },
+            [5, 2]
+        )
+        // Alternate audio remains queued until the common primary horizon
+        // reaches its timestamp.
+        XCTAssertEqual(interleaver.queuedPayloadByteCount, 1)
+    }
+
+    func testTimestampLessPrimaryAudioDoesNotAdvanceTailWatermark() {
+        var stager = HTSPPostSeekPacketStager()
+        stager.begin(pinsInitialVideoKeyframe: true)
+        let initialPackets: [(HTSPMuxPacket, Bool)] = [
+            (taggedPacket(stream: 1, frameType: 0x49, pts: 1_000, dts: 1_000, tag: 1), true),
+            (taggedPacket(stream: 1, frameType: 0x50, pts: 1_500, dts: 1_500, tag: 2), true),
+            (taggedPacket(stream: 1, frameType: 0x50, pts: 2_000, dts: 2_000, tag: 3), true),
+            (taggedPacket(stream: 2, pts: nil, dts: nil, tag: 4), false),
+        ]
+        for (packet, isVideo) in initialPackets {
+            XCTAssertTrue(stager.append(
+                packet,
+                isVideo: isVideo,
+                maximumPayloadBytes: .max
+            ))
+        }
+        var interleaver = HTSPPostSeekTailInterleaver(
+            batch: stager.finish(),
+            primaryVideoStreamIndex: 1,
+            primaryAudioStreamIndex: 2
+        )
+
+        XCTAssertEqual(interleaver.drainAvailable().map { $0.payload[0] }, [1])
+        interleaver.append(
+            taggedPacket(stream: 2, pts: 1_400, dts: nil, duration: 100, tag: 5)
+        )
+        XCTAssertEqual(
+            interleaver.drainAvailable().map { $0.payload[0] },
+            [4, 5, 2]
+        )
+        XCTAssertEqual(interleaver.queuedPayloadByteCount, 1)
+    }
+
+    func testKnownAudioResolvesLeadingUnknownTimeWhenKeyframeHasNoTimestamp() {
+        var stager = HTSPPostSeekPacketStager()
+        stager.begin(pinsInitialVideoKeyframe: true)
+        let initialPackets: [(HTSPMuxPacket, Bool)] = [
+            (taggedPacket(stream: 1, frameType: 0x49, pts: nil, dts: nil, tag: 1), true),
+            (taggedPacket(stream: 1, frameType: 0x50, pts: 1_500, dts: 1_500, tag: 2), true),
+            (taggedPacket(stream: 2, pts: nil, dts: nil, tag: 3), false),
+        ]
+        for (packet, isVideo) in initialPackets {
+            XCTAssertTrue(stager.append(
+                packet,
+                isVideo: isVideo,
+                maximumPayloadBytes: .max
+            ))
+        }
+        var interleaver = HTSPPostSeekTailInterleaver(
+            batch: stager.finish(),
+            primaryVideoStreamIndex: 1,
+            primaryAudioStreamIndex: 2
+        )
+
+        XCTAssertEqual(interleaver.drainAvailable().map { $0.payload[0] }, [1])
+        interleaver.append(
+            taggedPacket(stream: 2, pts: 1_400, dts: nil, duration: 100, tag: 4)
+        )
+        XCTAssertEqual(
+            interleaver.drainAvailable().map { $0.payload[0] },
+            [3, 4, 2]
+        )
+    }
+
+    func testInterleavedPostSeekBatchStartsWithTablesAndVideoPCR() throws {
+        let muxer = try MPEGTransportStreamMuxer(
+            streams: [
+                HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil),
+                HTSPStreamInfo(index: 2, type: "AAC", language: "eng", metadata: nil),
+            ]
+        )
+        var stager = HTSPPostSeekPacketStager()
+        stager.begin(pinsInitialVideoKeyframe: true)
+        XCTAssertTrue(stager.append(
+            HTSPMuxPacket(
+                streamIndex: 1,
+                frameType: 0x49,
+                presentationTime: 2_000_000,
+                decodeTime: 1_000_000,
+                payload: Data([0, 0, 0, 1, 0x65])
+            ),
+            isVideo: true,
+            maximumPayloadBytes: .max
+        ))
+        XCTAssertTrue(stager.append(
+            HTSPMuxPacket(
+                streamIndex: 2,
+                frameType: 0,
+                presentationTime: 950_000,
+                decodeTime: nil,
+                payload: Data([0xff, 0xf1, 0x50, 0x80])
+            ),
+            isVideo: false,
+            maximumPayloadBytes: .max
+        ))
+
+        muxer.resetForFreshPipeline()
+        var transport = Data()
+        for packet in stager.finish().interleavedPackets {
+            transport.append(muxer.mux(packet))
+        }
+
+        XCTAssertEqual(Array(packetPIDs(in: transport).prefix(3)), [0x0000, 0x1000, 0x0100])
+        XCTAssertTrue(firstPacketHasDiscontinuity(pid: 0x0000, in: transport))
+        XCTAssertTrue(firstPacketHasDiscontinuity(pid: 0x1000, in: transport))
+        XCTAssertTrue(firstPacketHasDiscontinuity(pid: 0x0100, in: transport))
+        XCTAssertTrue(firstPacketHasDiscontinuity(pid: 0x0101, in: transport))
+        XCTAssertTrue(firstPacketHasPCR(pid: 0x0100, in: transport))
+        XCTAssertFalse(firstPacketHasVLCDiscontinuity(pid: 0x0100, in: transport))
+        XCTAssertFalse(firstPacketHasVLCDiscontinuity(pid: 0x0101, in: transport))
     }
 
     func testMuxTimestampsRemainContinuousAcrossForwardAndBackwardSeeks() {
@@ -444,6 +745,31 @@ final class HTSPTimeshiftTests: XCTestCase {
         return false
     }
 
+    private func taggedPacket(
+        stream: Int,
+        frameType: UInt8 = 0,
+        pts: Int64?,
+        dts: Int64?,
+        duration: Int64? = nil,
+        tag: UInt8
+    ) -> HTSPMuxPacket {
+        HTSPMuxPacket(
+            streamIndex: stream,
+            frameType: frameType,
+            presentationTime: pts,
+            decodeTime: dts,
+            durationMicroseconds: duration,
+            payload: Data([tag])
+        )
+    }
+
+    private func packetPIDs(in data: Data) -> [UInt16] {
+        stride(from: 0, to: data.count, by: 188).compactMap { offset in
+            guard offset + 188 <= data.count, data[offset] == 0x47 else { return nil }
+            return UInt16(data[offset + 1] & 0x1f) << 8 | UInt16(data[offset + 2])
+        }
+    }
+
     private func firstPacketHasVLCDiscontinuity(pid: UInt16, in data: Data) -> Bool {
         let marker = Data("VLC_DISCONTINU".utf8)
         for offset in stride(from: 0, to: data.count, by: 188) {
@@ -456,6 +782,17 @@ final class HTSPTimeshiftTests: XCTestCase {
                   Int(data[offset + 6]) == marker.count
             else { return false }
             return Data(data[(offset + 7)..<(offset + 7 + marker.count)]) == marker
+        }
+        return false
+    }
+
+    private func firstPacketHasPCR(pid: UInt16, in data: Data) -> Bool {
+        for offset in stride(from: 0, to: data.count, by: 188) {
+            guard offset + 188 <= data.count, data[offset] == 0x47 else { continue }
+            let packetPID = UInt16(data[offset + 1] & 0x1f) << 8 | UInt16(data[offset + 2])
+            guard packetPID == pid else { continue }
+            guard data[offset + 3] & 0x20 != 0 else { return false }
+            return data[offset + 4] >= 7 && data[offset + 5] & 0x10 != 0
         }
         return false
     }

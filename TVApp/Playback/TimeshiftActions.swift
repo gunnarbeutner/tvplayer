@@ -159,6 +159,7 @@ struct PlaybackOutputCounters: Equatable {
     let decodedVideo: Int
     let decodedAudio: Int
     let lostPictures: Int
+    let lostAudioBuffers: Int
 
     init(
         displayedPictures: Int,
@@ -167,7 +168,8 @@ struct PlaybackOutputCounters: Equatable {
         playbackTimeMilliseconds: Int64? = nil,
         decodedVideo: Int = 0,
         decodedAudio: Int = 0,
-        lostPictures: Int = 0
+        lostPictures: Int = 0,
+        lostAudioBuffers: Int = 0
     ) {
         self.displayedPictures = displayedPictures
         self.playedAudioBuffers = playedAudioBuffers
@@ -176,6 +178,7 @@ struct PlaybackOutputCounters: Equatable {
         self.decodedVideo = decodedVideo
         self.decodedAudio = decodedAudio
         self.lostPictures = lostPictures
+        self.lostAudioBuffers = lostAudioBuffers
     }
 
     func hasAdvanced(since previous: PlaybackOutputCounters) -> Bool {
@@ -194,6 +197,7 @@ struct PostSeekPlaybackOutputGateDiagnostics: Equatable {
         case armed
         case waitingForDiscontinuity
         case establishingDiscontinuityBaseline
+        case waitingForAudio
         case waitingForSustainedOutput
         case waitingForStablePictures
         case ready
@@ -214,8 +218,10 @@ struct PostSeekPlaybackOutputGate {
     private var minimumPrerollDurationMilliseconds: Int64 = 0
     private var minimumSustainedOutputMilliseconds: Int64 = 0
     private var minimumDisplayedPictureAdvance = 0
+    private var requiresAudioOutput = false
     private var outputAfterDiscontinuity: PlaybackOutputCounters?
     private var firstFreshOutputAt: Date?
+    private var firstFreshAudioOutputAt: Date?
     private var previousObservedOutput: PlaybackOutputCounters?
     private var pictureEpochBaseline: PlaybackOutputCounters?
     private var startsWithFreshPipeline = false
@@ -227,6 +233,7 @@ struct PostSeekPlaybackOutputGate {
         baselineDiscontinuities = output.demuxDiscontinuities
         outputAfterDiscontinuity = nil
         firstFreshOutputAt = nil
+        firstFreshAudioOutputAt = nil
         previousObservedOutput = nil
         pictureEpochBaseline = nil
         startsWithFreshPipeline = false
@@ -252,6 +259,10 @@ struct PostSeekPlaybackOutputGate {
         minimumDisplayedPictureAdvance = max(minimumDisplayedPictureAdvance, max(0, count))
     }
 
+    mutating func requireAudioOutput() {
+        requiresAudioOutput = true
+    }
+
     /// A newly-created VLC media pipeline cannot contain samples from the old
     /// position. Treat its first output as post-discontinuity output even when
     /// the fresh MPEG-TS starts cleanly and VLC reports no discontinuity.
@@ -261,6 +272,7 @@ struct PostSeekPlaybackOutputGate {
         baselineDiscontinuities = 0
         outputAfterDiscontinuity = nil
         firstFreshOutputAt = nil
+        firstFreshAudioOutputAt = nil
         previousObservedOutput = nil
         pictureEpochBaseline = nil
     }
@@ -297,6 +309,7 @@ struct PostSeekPlaybackOutputGate {
             baselineDiscontinuities = 0
             outputAfterDiscontinuity = nil
             firstFreshOutputAt = nil
+            firstFreshAudioOutputAt = nil
             previousObservedOutput = nil
             pictureEpochBaseline = nil
         }
@@ -319,23 +332,36 @@ struct PostSeekPlaybackOutputGate {
             || output.playedAudioBuffers < previous.playedAudioBuffers
         if countersReset {
             pictureEpochBaseline = output
+            firstFreshOutputAt = nil
+            firstFreshAudioOutputAt = nil
         }
         let outputAdvancedNow = output.hasAdvanced(since: previous)
         if firstFreshOutputAt == nil, outputAdvancedNow { firstFreshOutputAt = date }
+        let audioAdvancedNow = output.playedAudioBuffers > previous.playedAudioBuffers
+        if requiresAudioOutput,
+           firstFreshAudioOutputAt == nil,
+           audioAdvancedNow {
+            firstFreshAudioOutputAt = date
+        }
         let videoAdvancedNow = output.displayedPictures > previous.displayedPictures
         previousObservedOutput = output
 
         guard let firstFreshOutputAt else { return false }
-        let requiredDuration = max(
-            minimumPrerollDurationMilliseconds,
-            minimumSustainedOutputMilliseconds
-        )
-        let wallProgress = Int64(
-            (max(0, date.timeIntervalSince(firstFreshOutputAt)) * 1_000).rounded(.down)
-        )
-        guard wallProgress >= requiredDuration else { return false }
+        if requiresAudioOutput, firstFreshAudioOutputAt == nil { return false }
+        let stableOutputStart = requiresAudioOutput
+            ? max(firstFreshOutputAt, firstFreshAudioOutputAt ?? firstFreshOutputAt)
+            : firstFreshOutputAt
+        let prerollProgress = Self.elapsedMilliseconds(from: firstFreshOutputAt, to: date)
+        let sustainedProgress = Self.elapsedMilliseconds(from: stableOutputStart, to: date)
+        guard prerollProgress >= minimumPrerollDurationMilliseconds,
+              sustainedProgress >= minimumSustainedOutputMilliseconds
+        else { return false }
 
         let freshnessBaseline = pictureEpochBaseline ?? outputAfterDiscontinuity
+        guard !requiresAudioOutput
+            || audioAdvancedNow
+                && output.playedAudioBuffers > freshnessBaseline.playedAudioBuffers
+        else { return false }
         let hasFreshOutput = minimumDisplayedPictureAdvance > 0
             ? videoAdvancedNow
                 && output.displayedPictures - freshnessBaseline.displayedPictures
@@ -381,32 +407,51 @@ struct PostSeekPlaybackOutputGate {
             ?? (output.hasAdvanced(since: previousObservedOutput ?? outputAfterDiscontinuity)
                 ? date
                 : nil)
-        let sustainedOutput = Int64(
-            (max(0, date.timeIntervalSince(freshOutputAt ?? date)) * 1_000).rounded(.down)
+        let freshnessBaseline = pictureEpochBaseline ?? outputAfterDiscontinuity
+        let audioOutputAt = firstFreshAudioOutputAt
+            ?? (output.playedAudioBuffers > freshnessBaseline.playedAudioBuffers ? date : nil)
+        if requiresAudioOutput, audioOutputAt == nil {
+            return result(.waitingForAudio)
+        }
+        let stableOutputAt = max(
+            freshOutputAt ?? date,
+            requiresAudioOutput ? (audioOutputAt ?? date) : (freshOutputAt ?? date)
         )
+        let prerollProgress = Self.elapsedMilliseconds(from: freshOutputAt ?? date, to: date)
+        let stabilityProgress = Self.elapsedMilliseconds(from: stableOutputAt, to: date)
         let requiredProgress = max(
             minimumPrerollDurationMilliseconds,
             minimumSustainedOutputMilliseconds
         )
-        guard isConcealing, sustainedOutput >= requiredProgress else {
-            return result(.waitingForSustainedOutput, progress: sustainedOutput)
+        let remainingProgress = max(
+            max(0, minimumPrerollDurationMilliseconds - prerollProgress),
+            max(0, minimumSustainedOutputMilliseconds - stabilityProgress)
+        )
+        let readinessProgress = max(0, requiredProgress - remainingProgress)
+        guard isConcealing,
+              prerollProgress >= minimumPrerollDurationMilliseconds,
+              stabilityProgress >= minimumSustainedOutputMilliseconds
+        else {
+            return result(.waitingForSustainedOutput, progress: readinessProgress)
         }
-        let freshnessBaseline = pictureEpochBaseline ?? outputAfterDiscontinuity
         let pictureAdvance = max(
             0,
             output.displayedPictures - freshnessBaseline.displayedPictures
         )
         let videoAdvancedNow = output.displayedPictures
             > (previousObservedOutput ?? outputAfterDiscontinuity).displayedPictures
+        let audioAdvancedNow = output.playedAudioBuffers
+            > (previousObservedOutput ?? outputAfterDiscontinuity).playedAudioBuffers
         guard pictureAdvance >= minimumDisplayedPictureAdvance,
-              minimumDisplayedPictureAdvance == 0 || videoAdvancedNow else {
+              minimumDisplayedPictureAdvance == 0 || videoAdvancedNow,
+              !requiresAudioOutput || audioAdvancedNow else {
             return result(
                 .waitingForStablePictures,
-                progress: sustainedOutput,
+                progress: readinessProgress,
                 pictures: pictureAdvance
             )
         }
-        return result(.ready, progress: sustainedOutput, pictures: pictureAdvance)
+        return result(.ready, progress: readinessProgress, pictures: pictureAdvance)
     }
 
     @discardableResult
@@ -415,6 +460,7 @@ struct PostSeekPlaybackOutputGate {
         isConcealing = false
         outputAfterDiscontinuity = nil
         firstFreshOutputAt = nil
+        firstFreshAudioOutputAt = nil
         previousObservedOutput = nil
         pictureEpochBaseline = nil
         return wasConcealing
@@ -439,11 +485,17 @@ struct PostSeekPlaybackOutputGate {
         minimumPrerollDurationMilliseconds = 0
         minimumSustainedOutputMilliseconds = 0
         minimumDisplayedPictureAdvance = 0
+        requiresAudioOutput = false
         outputAfterDiscontinuity = nil
         firstFreshOutputAt = nil
+        firstFreshAudioOutputAt = nil
         previousObservedOutput = nil
         pictureEpochBaseline = nil
         startsWithFreshPipeline = false
+    }
+
+    private static func elapsedMilliseconds(from start: Date, to end: Date) -> Int64 {
+        Int64((max(0, end.timeIntervalSince(start)) * 1_000).rounded(.down))
     }
 }
 
@@ -758,8 +810,6 @@ struct HTSPTimeshiftMetrics: Equatable {
 }
 
 struct HTSPNavigationResult: Equatable, Sendable {
-    static let acceleratedBackfillMinimumLiveDelay: TimeInterval = 10
-
     let landingTime: Int64
     let serverLandingTime: Int64
     let bufferStartTime: Int64?
@@ -786,9 +836,6 @@ struct HTSPNavigationResult: Equatable, Sendable {
         return max(0, TimeInterval(liveEdgeTime - landingTime) / 1_000_000)
     }
 
-    var usesAcceleratedBackfill: Bool {
-        liveDelay >= Self.acceleratedBackfillMinimumLiveDelay
-    }
 }
 
 enum HTSPNavigationError: LocalizedError, Equatable, Sendable {
@@ -1017,9 +1064,13 @@ enum HTSPNavigationRecoveryPolicy {
 
 struct HTSPPostSeekBufferTracker {
     static let minimumRequiredDuration: Int64 = 500_000
+    static let audioLeadTolerance: Int64 = 100_000
     private(set) var result: HTSPNavigationResult?
     private var requiredDuration = Self.minimumRequiredDuration
     private var waitsForVideoKeyframe = false
+    private var requiredAudioStreamIndexes: Set<Int> = []
+    private var firstAcceptedVideoTime: Int64?
+    private var droppedLeadingAudioPacketCount = 0
     private var firstTime: Int64?
     private var latestTime: Int64?
     private var videoPacketCount = 0
@@ -1027,18 +1078,25 @@ struct HTSPPostSeekBufferTracker {
     private var videoFrameCounts: [UInt8: Int] = [:]
     private var firstVideoTime: Int64?
     private var latestVideoTime: Int64?
+    private var latestVideoDecodeTime: Int64?
     private var firstAudioTime: Int64?
     private var latestAudioTime: Int64?
+    private var firstAudioTimes: [Int: Int64] = [:]
+    private var latestAudioEndTimes: [Int: Int64] = [:]
     private(set) var completionDiagnostics: String?
 
     mutating func begin(
         _ result: HTSPNavigationResult,
         hasVideo: Bool,
+        audioStreamIndexes: Set<Int> = [],
         requiredDuration: Int64 = Self.minimumRequiredDuration
     ) {
         self.result = result
         self.requiredDuration = max(Self.minimumRequiredDuration, requiredDuration)
         waitsForVideoKeyframe = hasVideo
+        requiredAudioStreamIndexes = hasVideo ? audioStreamIndexes : []
+        firstAcceptedVideoTime = nil
+        droppedLeadingAudioPacketCount = 0
         firstTime = nil
         latestTime = nil
         videoPacketCount = 0
@@ -1046,8 +1104,11 @@ struct HTSPPostSeekBufferTracker {
         videoFrameCounts.removeAll(keepingCapacity: true)
         firstVideoTime = nil
         latestVideoTime = nil
+        latestVideoDecodeTime = nil
         firstAudioTime = nil
         latestAudioTime = nil
+        firstAudioTimes.removeAll(keepingCapacity: true)
+        latestAudioEndTimes.removeAll(keepingCapacity: true)
         completionDiagnostics = nil
     }
 
@@ -1055,21 +1116,70 @@ struct HTSPPostSeekBufferTracker {
         result = nil
         requiredDuration = Self.minimumRequiredDuration
         waitsForVideoKeyframe = false
+        requiredAudioStreamIndexes.removeAll(keepingCapacity: true)
+        firstAcceptedVideoTime = nil
+        firstAudioTimes.removeAll(keepingCapacity: true)
+        latestAudioEndTimes.removeAll(keepingCapacity: true)
         firstTime = nil
         latestTime = nil
+        latestVideoDecodeTime = nil
     }
 
-    mutating func shouldAcceptPacket(isVideo: Bool, frameType: UInt8) -> Bool {
+    mutating func shouldAcceptPacket(
+        time: Int64? = nil,
+        decodeTime: Int64? = nil,
+        duration: Int64? = nil,
+        isVideo: Bool,
+        isAudio: Bool = false,
+        frameType: UInt8
+    ) -> Bool {
         guard result != nil else { return true }
-        guard waitsForVideoKeyframe else { return true }
-        guard isVideo, frameType == Character("I").asciiValue else { return false }
-        waitsForVideoKeyframe = false
+        if waitsForVideoKeyframe {
+            guard isVideo, frameType == Character("I").asciiValue else {
+                if isAudio { droppedLeadingAudioPacketCount += 1 }
+                return false
+            }
+            waitsForVideoKeyframe = false
+            // MPEG-TS starts its PCR epoch from video DTS. H.264 open GOPs can
+            // put the I-frame PTS more than a second later because following
+            // B-frames are displayed first. Anchor audio to that DTS/PCR, not
+            // to the I-frame PTS, or those B-frames lose their matching audio.
+            firstAcceptedVideoTime = decodeTime ?? time
+            return true
+        }
+        guard !requiredAudioStreamIndexes.isEmpty, isAudio else { return true }
+        guard let time else { return true }
+        guard let videoTime = firstAcceptedVideoTime else {
+            // A timestamp-less keyframe prevents a meaningful comparison.
+            return true
+        }
+        let subtraction = videoTime.subtractingReportingOverflow(Self.audioLeadTolerance)
+        let earliestAcceptedAudioTime = subtraction.overflow
+            ? Int64.min
+            : subtraction.partialValue
+        if time >= earliestAcceptedAudioTime {
+            return true
+        }
+        guard let duration, duration >= 0 else {
+            // Without a packet end time it is unsafe to discard an access unit
+            // that might overlap the retained A/V window.
+            return true
+        }
+        let addition = time.addingReportingOverflow(duration)
+        guard !addition.overflow else { return true }
+        guard addition.partialValue >= earliestAcceptedAudioTime else {
+            droppedLeadingAudioPacketCount += 1
+            return false
+        }
         return true
     }
 
     mutating func observePacket(time: Int64?) -> HTSPNavigationResult? {
         observePacket(
             time: time,
+            decodeTime: nil,
+            duration: nil,
+            streamIndex: 0,
             isVideo: false,
             isAudio: false,
             frameType: 0
@@ -1078,21 +1188,42 @@ struct HTSPPostSeekBufferTracker {
 
     mutating func observePacket(
         time: Int64?,
+        decodeTime: Int64? = nil,
+        duration: Int64? = nil,
+        streamIndex: Int = 0,
         isVideo: Bool,
         isAudio: Bool,
         frameType: UInt8
     ) -> HTSPNavigationResult? {
         guard let result else { return nil }
         if let time {
-            firstTime = firstTime ?? time
+            firstTime = min(firstTime ?? time, time)
             latestTime = max(latestTime ?? time, time)
             if isVideo {
-                firstVideoTime = firstVideoTime ?? time
+                firstVideoTime = min(firstVideoTime ?? time, time)
                 latestVideoTime = max(latestVideoTime ?? time, time)
             } else if isAudio {
-                firstAudioTime = firstAudioTime ?? time
+                firstAudioTime = min(firstAudioTime ?? time, time)
                 latestAudioTime = max(latestAudioTime ?? time, time)
+                firstAudioTimes[streamIndex] = min(
+                    firstAudioTimes[streamIndex] ?? time,
+                    time
+                )
+                let endTime: Int64
+                if let duration, duration >= 0 {
+                    let addition = time.addingReportingOverflow(duration)
+                    endTime = addition.overflow ? time : addition.partialValue
+                } else {
+                    endTime = time
+                }
+                latestAudioEndTimes[streamIndex] = max(
+                    latestAudioEndTimes[streamIndex] ?? endTime,
+                    endTime
+                )
             }
+        }
+        if isVideo, let videoDecodeTime = decodeTime ?? time {
+            latestVideoDecodeTime = max(latestVideoDecodeTime ?? videoDecodeTime, videoDecodeTime)
         }
         if isVideo {
             videoPacketCount += 1
@@ -1101,10 +1232,29 @@ struct HTSPPostSeekBufferTracker {
             audioPacketCount += 1
         }
         let bufferedDuration = max(0, (latestTime ?? 0) - (firstTime ?? 0))
-        let reachedExactLanding = latestTime.map { $0 >= result.landingTime } ?? false
-        guard bufferedDuration >= requiredDuration,
-              reachedExactLanding
-        else { return nil }
+        if let firstAcceptedVideoTime {
+            // The decoder consumes everything between the preceding keyframe
+            // and the requested position while output is concealed. Keep the
+            // requested reserve *after* that preroll, or a long GOP can leave
+            // CoreAudio with only VLC's small callback-input cushion when the
+            // destination is finally revealed.
+            let reserveStart = max(firstAcceptedVideoTime, result.landingTime)
+            let addition = reserveStart.addingReportingOverflow(requiredDuration)
+            let minimumBufferedEnd = addition.overflow
+                ? Int64.max
+                : addition.partialValue
+            guard latestVideoDecodeTime.map({ $0 >= minimumBufferedEnd }) == true,
+                  requiredAudioStreamIndexes.allSatisfy({ streamIndex in
+                      latestAudioEndTimes[streamIndex].map { $0 >= minimumBufferedEnd } == true
+                  })
+            else { return nil }
+        } else {
+            let addition = result.landingTime.addingReportingOverflow(requiredDuration)
+            let minimumBufferedEnd = addition.overflow
+                ? Int64.max
+                : addition.partialValue
+            guard latestTime.map({ $0 >= minimumBufferedEnd }) == true else { return nil }
+        }
         let span: (Int64?, Int64?) -> String = { first, latest in
             guard let first, let latest else { return "n/a" }
             return String(format: "%.0fms", Double(max(0, latest - first)) / 1_000)
@@ -1112,14 +1262,45 @@ struct HTSPPostSeekBufferTracker {
         let iFrameCount = videoFrameCounts[0x49] ?? 0
         let pFrameCount = videoFrameCounts[0x50] ?? 0
         let bFrameCount = videoFrameCounts[0x42] ?? 0
-        let firstAVDelta = firstVideoTime.flatMap { video in
+        let firstAVDelta = firstAcceptedVideoTime.flatMap { video in
             firstAudioTime.map { audio in Double(audio - video) / 1_000 }
         }.map { String(format: "%.0fms", $0) } ?? "n/a"
+        let audioCoverage = requiredAudioStreamIndexes.sorted().map { streamIndex in
+            guard let anchor = firstAcceptedVideoTime,
+                  let first = firstAudioTimes[streamIndex],
+                  let end = latestAudioEndTimes[streamIndex]
+            else { return "\(streamIndex):n/a" }
+            return String(
+                format: "%d:%.0f…%.0fms",
+                streamIndex,
+                Double(first - anchor) / 1_000,
+                Double(end - anchor) / 1_000
+            )
+        }.joined(separator: ",")
+        let postTargetAudioReserve = requiredAudioStreamIndexes.sorted().map { streamIndex in
+            guard let end = latestAudioEndTimes[streamIndex] else {
+                return "\(streamIndex):n/a"
+            }
+            return String(
+                format: "%d:%.0fms",
+                streamIndex,
+                Double(end - result.landingTime) / 1_000
+            )
+        }.joined(separator: ",")
+        let audioTailLag = latestVideoDecodeTime.flatMap { videoEnd in
+            requiredAudioStreamIndexes.compactMap { latestAudioEndTimes[$0] }.min().map {
+                max(0, videoEnd - $0)
+            }
+        }.map { String(format: "%.0fms", Double($0) / 1_000) } ?? "n/a"
         completionDiagnostics = "video=\(videoPacketCount)"
             + "(I\(iFrameCount)/P\(pFrameCount)/B\(bFrameCount))"
             + " span=\(span(firstVideoTime, latestVideoTime))"
             + " audio=\(audioPacketCount) span=\(span(firstAudioTime, latestAudioTime))"
-            + " firstAV=\(firstAVDelta) total=\(Double(bufferedDuration) / 1_000)ms"
+            + " coverage=[\(audioCoverage)]"
+            + " postTarget=[\(postTargetAudioReserve)]"
+            + " audioTailLag=\(audioTailLag)"
+            + " firstAV=\(firstAVDelta) droppedAudio=\(droppedLeadingAudioPacketCount)"
+            + " total=\(Double(bufferedDuration) / 1_000)ms"
         cancel()
         return result
     }

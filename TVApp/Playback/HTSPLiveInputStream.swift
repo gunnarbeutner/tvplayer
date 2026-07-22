@@ -86,6 +86,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     private static let maximumQueuedBytes = 8 * 1_024 * 1_024
     private static let controlResponseTimeout: TimeInterval = 5
     private static let fastPrebufferSpeed: Int32 = 400
+    private static let fastPrebufferLiveEdgeMargin: TimeInterval = 0.5
 
     private struct PendingControlRequest {
         let method: String
@@ -95,11 +96,33 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     }
 
     private struct BufferedNavigationCompletion {
-        let handler: @Sendable (
+        let handler: (@Sendable (
             Result<HTSPNavigationResult, HTSPNavigationError>
-        ) -> Void
+        ) -> Void)?
         let result: HTSPNavigationResult
         let diagnostics: String
+    }
+
+    private struct ReadyPostSeekDelivery {
+        let batch: HTSPPostSeekPacketStager.Batch
+        let epoch: UInt64
+        let navigationGeneration: Int
+        let handler: (@Sendable (
+            Result<HTSPNavigationResult, HTSPNavigationError>
+        ) -> Void)?
+        let result: HTSPNavigationResult
+        let diagnostics: String
+        let primaryVideoStreamIndex: Int?
+        let primaryAudioStreamIndex: Int?
+    }
+
+    private enum MuxPacketDisposition {
+        case drop
+        case live
+        case staged
+        case flush(ReadyPostSeekDelivery)
+        case interleaved(packets: [HTSPMuxPacket], epoch: UInt64, fellBack: Bool)
+        case stagingOverflow(navigationGeneration: Int)
     }
 
     private let configuration: TVHeadendConfiguration
@@ -148,6 +171,12 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         @Sendable (Result<HTSPNavigationResult, HTSPNavigationError>) -> Void
     )?
     private var postSeekBuffer = HTSPPostSeekBufferTracker()
+    private var postSeekPacketStager = HTSPPostSeekPacketStager()
+    private var postSeekTailInterleaver: HTSPPostSeekTailInterleaver?
+    private var postSeekStagingEpoch: UInt64 = 0
+    private var postSeekNavigationGeneration = 0
+    private var postSeekPrimaryVideoStreamIndex: Int?
+    private var postSeekPrimaryAudioStreamIndex: Int?
 
     // Accessed only from controlQueue.
     private var pendingControlRequests: [Int64: PendingControlRequest] = [:]
@@ -361,6 +390,8 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         }
         stopped = true
         currentStatus = .closed
+        postSeekBuffer.cancel()
+        cancelPostSeekPacketStagingLocked()
         condition.broadcast()
         condition.unlock()
 
@@ -544,11 +575,15 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             guard let streamIndex = message["stream"]?.intValue,
                   let payload = message["payload"]?.dataValue
             else { throw HTSPCodecError.malformedMessage }
+            let durationMicroseconds = message["duration"]?.intValue.flatMap { duration in
+                (0...Int64(UInt32.max)).contains(duration) ? duration : nil
+            }
             let packet = HTSPMuxPacket(
                 streamIndex: Int(streamIndex),
                 frameType: UInt8(truncatingIfNeeded: message["frametype"]?.intValue ?? 0),
                 presentationTime: message["pts"]?.intValue,
                 decodeTime: message["dts"]?.intValue,
+                durationMicroseconds: durationMicroseconds,
                 payload: payload
             )
             let trackKind = processLock.withLock {
@@ -582,29 +617,58 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 return true
             }
             guard recoveryAcceptsPacket else { return }
-            let packetTime = packet.presentationTime ?? packet.decodeTime
-            let acceptsPacket = condition.withLock {
-                postSeekBuffer.shouldAcceptPacket(
-                    isVideo: trackKind.isVideo,
-                    frameType: packet.frameType
-                )
-            }
-            guard acceptsPacket else { return }
-            let transportData = processLock.withLock { muxer.mux(packet) }
-            if let completion = appendIfDeliveryIsOpen(
-                transportData,
-                packetTime: packetTime,
+            switch routeMuxPacket(
+                packet,
                 isVideo: trackKind.isVideo,
-                isAudio: trackKind.isAudio,
-                frameType: packet.frameType
+                isAudio: trackKind.isAudio
             ) {
+            case .drop:
+                return
+            case .live:
+                let transportData = processLock.withLock { muxer.mux(packet) }
+                appendIfDeliveryIsOpen(transportData)
+            case .staged:
+                break
+            case let .flush(completion):
+                guard publishPostSeekBatch(completion) else {
+                    controlQueue.async { [weak self] in
+                        guard let self,
+                              self.navigationGeneration == completion.navigationGeneration
+                        else { return }
+                        self.failNavigation(
+                            .controlFailed("Post-seek media could not be published.")
+                        )
+                    }
+                    return
+                }
                 controlQueue.async { [weak self] in
-                    self?.finishPostSeekBuffering(
+                    guard let self,
+                          self.navigationGeneration == completion.navigationGeneration
+                    else { return }
+                    self.finishPostSeekBuffering(
                         handler: completion.handler,
                         result: completion.result,
                         diagnostics: completion.diagnostics
                     )
                 }
+            case let .interleaved(packets, epoch, fellBack):
+                muxAndAppendInterleavedPackets(packets, stagingEpoch: epoch)
+                if fellBack {
+                    benchmarkTrace(
+                        "post-seek tail interleave exceeded its payload limit; "
+                            + "flushed in per-stream order"
+                    )
+                }
+            case let .stagingOverflow(navigationGeneration):
+                controlQueue.async { [weak self] in
+                    guard let self,
+                          self.navigationGeneration == navigationGeneration
+                    else { return }
+                    self.failNavigation(
+                        .controlFailed("Post-seek media exceeded the staging limit.")
+                    )
+                }
+                return
             }
             finishRecoveryAfterFirstDecodablePacketIfNeeded()
 
@@ -667,55 +731,198 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         }
     }
 
-    private func appendIfDeliveryIsOpen(
-        _ data: Data,
-        packetTime: Int64?,
+    private func routeMuxPacket(
+        _ packet: HTSPMuxPacket,
         isVideo: Bool,
-        isAudio: Bool,
-        frameType: UInt8
-    ) -> (
-        handler: @Sendable (Result<HTSPNavigationResult, HTSPNavigationError>) -> Void,
-        result: HTSPNavigationResult,
-        diagnostics: String
-    )? {
-        guard !data.isEmpty else { return nil }
+        isAudio: Bool
+    ) -> MuxPacketDisposition {
+        let packetTime = packet.presentationTime ?? packet.decodeTime
         condition.lock()
         guard deliveryGate.shouldDeliverPackets else {
             condition.unlock()
-            return nil
+            return .drop
+        }
+        guard postSeekBuffer.shouldAcceptPacket(
+            time: packetTime,
+            decodeTime: packet.decodeTime,
+            duration: packet.durationMicroseconds,
+            isVideo: isVideo,
+            isAudio: isAudio,
+            frameType: packet.frameType
+        ) else {
+            condition.unlock()
+            return .drop
+        }
+        guard postSeekPacketStager.isActive else {
+            guard var interleaver = postSeekTailInterleaver else {
+                condition.unlock()
+                return .live
+            }
+            interleaver.append(packet)
+            let fellBack = interleaver.hasExceededPayloadLimit
+            let packets = fellBack
+                ? interleaver.drainAll()
+                : interleaver.drainAvailable()
+            postSeekTailInterleaver = fellBack ? nil : interleaver
+            let epoch = postSeekStagingEpoch
+            condition.unlock()
+            return packets.isEmpty
+                ? .staged
+                : .interleaved(packets: packets, epoch: epoch, fellBack: fellBack)
+        }
+        guard postSeekPacketStager.append(
+            packet,
+            isVideo: isVideo,
+            maximumPayloadBytes: Self.maximumQueuedBytes
+        ) else {
+            let navigationGeneration = postSeekNavigationGeneration
+            postSeekBuffer.cancel()
+            cancelPostSeekPacketStagingLocked()
+            // Stop accepting ordinary packets until failNavigation has put
+            // the subscription back into a coherent delivery state.
+            deliveryGate.beginNavigation()
+            condition.broadcast()
+            condition.unlock()
+            return .stagingOverflow(navigationGeneration: navigationGeneration)
+        }
+
+        let completion: ReadyPostSeekDelivery?
+        if let result = postSeekBuffer.observePacket(
+            time: packetTime,
+            decodeTime: packet.decodeTime,
+            duration: packet.durationMicroseconds,
+            streamIndex: packet.streamIndex,
+            isVideo: isVideo,
+            isAudio: isAudio,
+            frameType: packet.frameType
+        ) {
+            completion = ReadyPostSeekDelivery(
+                batch: postSeekPacketStager.finish(),
+                epoch: postSeekStagingEpoch,
+                navigationGeneration: postSeekNavigationGeneration,
+                handler: navigationCompletionHandler,
+                result: result,
+                diagnostics: postSeekBuffer.completionDiagnostics ?? "unavailable",
+                primaryVideoStreamIndex: postSeekPrimaryVideoStreamIndex,
+                primaryAudioStreamIndex: postSeekPrimaryAudioStreamIndex
+            )
+        } else {
+            completion = nil
+        }
+        condition.unlock()
+        return completion.map(MuxPacketDisposition.flush) ?? .staged
+    }
+
+    private func publishPostSeekBatch(_ completion: ReadyPostSeekDelivery) -> Bool {
+        var tailInterleaver: HTSPPostSeekTailInterleaver?
+        let orderedPackets: [HTSPMuxPacket]
+        if let primaryVideoStreamIndex = completion.primaryVideoStreamIndex,
+           let primaryAudioStreamIndex = completion.primaryAudioStreamIndex {
+            var interleaver = HTSPPostSeekTailInterleaver(
+                batch: completion.batch,
+                primaryVideoStreamIndex: primaryVideoStreamIndex,
+                primaryAudioStreamIndex: primaryAudioStreamIndex
+            )
+            orderedPackets = interleaver.drainAvailable()
+            tailInterleaver = interleaver
+        } else {
+            orderedPackets = completion.batch.interleavedPackets
+        }
+        guard !orderedPackets.isEmpty else { return false }
+        processLock.lock()
+        let isCurrent = condition.withLock {
+            completion.epoch == postSeekStagingEpoch
+                && completion.navigationGeneration == postSeekNavigationGeneration
+                && !stopped
+                && currentError == nil
+                && deliveryGate.shouldDeliverPackets
+        }
+        guard isCurrent else {
+            processLock.unlock()
+            return false
+        }
+        muxer.resetForFreshPipeline()
+        var transportData = Data()
+        for packet in orderedPackets { transportData.append(muxer.mux(packet)) }
+        guard !transportData.isEmpty else {
+            processLock.unlock()
+            return false
+        }
+
+        let published = condition.withLock {
+            guard completion.epoch == postSeekStagingEpoch,
+                  completion.navigationGeneration == postSeekNavigationGeneration,
+                  !stopped,
+                  currentError == nil,
+                  deliveryGate.shouldDeliverPackets
+            else { return false }
+            buffer.removeAll(keepingCapacity: true)
+            readOffset = 0
+            postSeekTailInterleaver = tailInterleaver
+            buffer.append(transportData)
+            condition.broadcast()
+            return true
+        }
+        processLock.unlock()
+        if published {
+            benchmarkTrace(
+                "post-seek interleave packets=\(orderedPackets.count) "
+                    + "payload=\(completion.batch.payloadByteCount)B "
+                    + "tail=\(tailInterleaver?.queuedPayloadByteCount ?? 0)B "
+                    + "transport=\(transportData.count)B"
+            )
+        }
+        return published
+    }
+
+    private func appendIfDeliveryIsOpen(
+        _ data: Data,
+        stagingEpoch: UInt64? = nil
+    ) {
+        guard !data.isEmpty else { return }
+        condition.lock()
+        guard deliveryGate.shouldDeliverPackets else {
+            condition.unlock()
+            return
         }
         while !stopped,
               currentError == nil,
               buffer.count - readOffset >= Self.maximumQueuedBytes {
             condition.wait()
         }
-        let completion: (
-            handler: @Sendable (Result<HTSPNavigationResult, HTSPNavigationError>) -> Void,
-            result: HTSPNavigationResult,
-            diagnostics: String
-        )?
-        if !stopped, currentError == nil, deliveryGate.shouldDeliverPackets {
+        if !stopped,
+           currentError == nil,
+           stagingEpoch.map({ $0 == postSeekStagingEpoch }) ?? true,
+           deliveryGate.shouldDeliverPackets {
             buffer.append(data)
-            if let result = postSeekBuffer.observePacket(
-                time: packetTime,
-                isVideo: isVideo,
-                isAudio: isAudio,
-                frameType: frameType
-            ), let navigationCompletionHandler {
-                completion = (
-                    navigationCompletionHandler,
-                    result,
-                    postSeekBuffer.completionDiagnostics ?? "unavailable"
-                )
-            } else {
-                completion = nil
-            }
             condition.broadcast()
-        } else {
-            completion = nil
         }
         condition.unlock()
-        return completion
+    }
+
+    private func muxAndAppendInterleavedPackets(
+        _ packets: [HTSPMuxPacket],
+        stagingEpoch: UInt64
+    ) {
+        processLock.lock()
+        let isCurrent = condition.withLock {
+            stagingEpoch == postSeekStagingEpoch
+                && !stopped
+                && currentError == nil
+                && deliveryGate.shouldDeliverPackets
+        }
+        guard isCurrent else {
+            processLock.unlock()
+            return
+        }
+        var transportData = Data()
+        for packet in packets { transportData.append(muxer.mux(packet)) }
+        // Keep processLock until the epoch-checked append completes. A failed
+        // navigation resets this muxer while holding the same lock, so stale
+        // tail packets can neither follow that reset nor perturb continuity in
+        // the pipeline which resumes after the failure.
+        appendIfDeliveryIsOpen(transportData, stagingEpoch: stagingEpoch)
+        processLock.unlock()
     }
 
     private func resetDeliveryQueue() {
@@ -724,22 +931,56 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     }
 
     private func clearDeliveryQueue() {
-        condition.withLock {
+        let interruptedNavigationGeneration = condition.withLock { () -> Int? in
+            let interruptedNavigation = postSeekPacketStager.isActive
+                || postSeekBuffer.result != nil
+            let hadPostSeekInterleaving = interruptedNavigation
+                || postSeekTailInterleaver != nil
+            let navigationGeneration = interruptedNavigation
+                ? postSeekNavigationGeneration
+                : nil
+            if hadPostSeekInterleaving {
+                postSeekBuffer.cancel()
+                cancelPostSeekPacketStagingLocked()
+            }
+            if interruptedNavigation {
+                deliveryGate.beginNavigation()
+            }
             buffer.removeAll(keepingCapacity: true)
             readOffset = 0
             condition.broadcast()
+            return navigationGeneration
+        }
+        if let interruptedNavigationGeneration {
+            controlQueue.async { [weak self] in
+                guard let self,
+                      self.navigationGeneration == interruptedNavigationGeneration
+                else { return }
+                self.failNavigation(
+                    .controlFailed("TVHeadend changed the subscription while seeking.")
+                )
+            }
         }
     }
 
+    /// Must be called while `condition` is held.
+    private func cancelPostSeekPacketStagingLocked() {
+        postSeekStagingEpoch &+= 1
+        postSeekNavigationGeneration = 0
+        postSeekPacketStager.cancel()
+        postSeekTailInterleaver = nil
+        postSeekPrimaryVideoStreamIndex = nil
+        postSeekPrimaryAudioStreamIndex = nil
+    }
+
     private func beginNavigation() {
-        processLock.withLock { muxer.resetAfterDiscontinuity() }
         condition.withLock {
-            // End the current VLC input epoch before any destination bytes can
-            // enter its demux queue. The engine installs a fresh reader once
-            // post-seek keyframe buffering has completed.
-            vlcReaderGeneration += 1
+            // Keep the current reader valid until TVHeadend has accepted and
+            // resolved the navigation. A rejected/timed-out seek can then
+            // reopen this same pipeline instead of resuming an EOF reader.
             deliveryGate.beginNavigation()
             postSeekBuffer.cancel()
+            cancelPostSeekPacketStagingLocked()
             buffer.removeAll(keepingCapacity: true)
             readOffset = 0
             condition.broadcast()
@@ -748,20 +989,41 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
     private func preparePostSeekBuffering(_ result: HTSPNavigationResult) {
         let generation = navigationGeneration
-        let acceleratesBackfill = result.usesAcceleratedBackfill
-        let requiredDuration = acceleratesBackfill
-            ? max(HTSPPostSeekBufferTracker.minimumRequiredDuration, vlcCacheDuration)
-            : HTSPPostSeekBufferTracker.minimumRequiredDuration
-        let hasVideo = processLock.withLock {
-            muxer.resetAfterDiscontinuity()
-            return muxer.hasVideo
+        let tracks = processLock.withLock {
+            muxer.resetForFreshPipeline()
+            return (
+                hasVideo: muxer.hasVideo,
+                primaryVideoStreamIndex: muxer.primaryVideoStreamIndex,
+                primaryAudioStreamIndex: muxer.primaryAudioStreamIndex
+            )
         }
+        // VLC's callback-input access advertises only a small fixed delay, so
+        // the app-side staging buffer must preserve the configured startup
+        // reserve after the requested position for shallow seeks as well.
+        let baseRequiredDuration = max(
+            HTSPPostSeekBufferTracker.minimumRequiredDuration,
+            vlcCacheDuration
+        )
+        let requiredDuration = baseRequiredDuration
+        let requiredSeconds = TimeInterval(requiredDuration) / 1_000_000
+        let acceleratesBackfill = result.liveDelay
+            >= requiredSeconds + Self.fastPrebufferLiveEdgeMargin
         condition.withLock {
+            // Destination media starts a new input epoch. Invalidate the old
+            // VLC reader before opening delivery so it cannot consume any of
+            // the freshly muxed destination bytes.
+            vlcReaderGeneration += 1
             buffer.removeAll(keepingCapacity: true)
             readOffset = 0
+            cancelPostSeekPacketStagingLocked()
+            postSeekPacketStager.begin(pinsInitialVideoKeyframe: tracks.hasVideo)
+            postSeekNavigationGeneration = generation
+            postSeekPrimaryVideoStreamIndex = tracks.primaryVideoStreamIndex
+            postSeekPrimaryAudioStreamIndex = tracks.primaryAudioStreamIndex
             postSeekBuffer.begin(
                 result,
-                hasVideo: hasVideo,
+                hasVideo: tracks.hasVideo,
+                audioStreamIndexes: tracks.primaryAudioStreamIndex.map { [$0] } ?? [],
                 requiredDuration: requiredDuration
             )
             deliveryGate.completeNavigation()
@@ -784,9 +1046,9 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     }
 
     private func finishPostSeekBuffering(
-        handler: @escaping @Sendable (
+        handler: (@Sendable (
             Result<HTSPNavigationResult, HTSPNavigationError>
-        ) -> Void,
+        ) -> Void)?,
         result: HTSPNavigationResult,
         diagnostics: String
     ) {
@@ -809,7 +1071,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             "post-seek backfill handed to VLC at normal speed "
                 + completion.diagnostics
         )
-        completion.handler(.success(completion.result))
+        completion.handler?(.success(completion.result))
     }
 
     private func enqueueSpeed(_ speed: Int32) {
@@ -1062,15 +1324,17 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         navigationTargetsLiveEdge = false
         bufferedNavigationCompletion = nil
         seekCoordinator.fail()
-        processLock.withLock { muxer.resetAfterDiscontinuity() }
-
-        let handler = condition.withLock {
-            postSeekBuffer.cancel()
-            deliveryGate.cancelAllNavigation()
-            buffer.removeAll(keepingCapacity: true)
-            readOffset = 0
-            condition.broadcast()
-            return navigationCompletionHandler
+        let handler = processLock.withLock {
+            muxer.resetAfterDiscontinuity()
+            return condition.withLock {
+                postSeekBuffer.cancel()
+                cancelPostSeekPacketStagingLocked()
+                deliveryGate.cancelAllNavigation()
+                buffer.removeAll(keepingCapacity: true)
+                readOffset = 0
+                condition.broadcast()
+                return navigationCompletionHandler
+            }
         }
         // A rejected or timed-out navigation must not strand the subscription
         // at speed zero. Reopen delivery and continue from the last position
@@ -1234,6 +1498,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             recovering = true
             recoveryWaitsForVideoKeyframe = false
             lastMuxPacketAt = nil
+            cancelPostSeekPacketStagingLocked()
             buffer.removeAll(keepingCapacity: true)
             readOffset = 0
             condition.broadcast()
@@ -1261,7 +1526,10 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             navigationTargetsLiveEdge = false
             bufferedNavigationCompletion = nil
             seekCoordinator.fail()
-            condition.withLock { postSeekBuffer.cancel() }
+            condition.withLock {
+                postSeekBuffer.cancel()
+                cancelPostSeekPacketStagingLocked()
+            }
             return hadNavigation ? condition.withLock({ navigationCompletionHandler }) : nil
         }
         navigationHandler?(
@@ -1294,6 +1562,8 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             firstAudioPacketAt = nil
             lastAudioPacketAt = nil
             recoveryWaitsForVideoKeyframe = replacementMuxer.hasVideo
+            postSeekBuffer.cancel()
+            cancelPostSeekPacketStagingLocked()
             buffer.removeAll(keepingCapacity: true)
             readOffset = 0
             condition.broadcast()
@@ -1351,6 +1621,8 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             guard !stopped else { return nil }
             currentError = error
             currentStatus = .error
+            postSeekBuffer.cancel()
+            cancelPostSeekPacketStagingLocked()
             condition.broadcast()
             return lifecycleHandler
         }

@@ -5,7 +5,384 @@ struct HTSPMuxPacket: Sendable {
     let frameType: UInt8
     let presentationTime: Int64?
     let decodeTime: Int64?
+    let durationMicroseconds: Int64?
     let payload: Data
+
+    init(
+        streamIndex: Int,
+        frameType: UInt8,
+        presentationTime: Int64?,
+        decodeTime: Int64?,
+        durationMicroseconds: Int64? = nil,
+        payload: Data
+    ) {
+        self.streamIndex = streamIndex
+        self.frameType = frameType
+        self.presentationTime = presentationTime
+        self.decodeTime = decodeTime
+        self.durationMicroseconds = durationMicroseconds
+        self.payload = payload
+    }
+}
+
+/// Holds the raw HTSP packets collected while a timeshift destination is being
+/// prepared. TVHeadend may deliver several seconds of one elementary stream
+/// before another. Feeding that burst order directly to a fresh VLC pipeline
+/// can fill the video decoder before VLC has even discovered enough audio.
+///
+/// The completed batch is merged by decode time across stream queues while
+/// retaining the exact arrival order within every stream. The first accepted
+/// video keyframe stays first so that the muxer emits PAT/PMT, bootstrap data,
+/// and the first PCR before any other elementary stream.
+struct HTSPPostSeekPacketStager: Sendable {
+    struct Batch: Sendable {
+        fileprivate let entries: [Entry]
+        fileprivate let pinsInitialVideoKeyframe: Bool
+
+        var payloadByteCount: Int {
+            entries.reduce(into: 0) { $0 += $1.packet.payload.count }
+        }
+
+        var interleavedPackets: [HTSPMuxPacket] {
+            guard !entries.isEmpty else { return [] }
+
+            let pinnedOrdinal: Int?
+            if pinsInitialVideoKeyframe {
+                pinnedOrdinal = entries.first(where: {
+                    $0.isVideo && $0.packet.frameType == 0x49
+                })?.ordinal
+            } else {
+                pinnedOrdinal = nil
+            }
+            let pinnedEntry = pinnedOrdinal.flatMap { ordinal in
+                entries.first(where: { $0.ordinal == ordinal })
+            }
+            let anchorTime = pinnedEntry?.decodeTime
+
+            // HTSP arrival order is already a valid decoder order for an
+            // individual PID. Only choose between the heads of those FIFO
+            // queues; a flat timestamp sort could reorder dependent H.264
+            // access units within one stream.
+            var previousTimeByStream: [Int: Int64] = [:]
+            if let pinnedEntry, let anchorTime {
+                previousTimeByStream[pinnedEntry.packet.streamIndex] = anchorTime
+            }
+            var queues: [Int: [OrderedEntry]] = [:]
+            for entry in entries where entry.ordinal != pinnedOrdinal {
+                let streamIndex = entry.packet.streamIndex
+                let rawTime = entry.decodeTime
+                let previousTime = previousTimeByStream[streamIndex]
+                let time: Int64?
+                if let rawTime, let previousTime {
+                    time = max(previousTime, rawTime)
+                } else {
+                    time = rawTime ?? previousTime
+                }
+                if let time { previousTimeByStream[streamIndex] = time }
+                queues[streamIndex, default: []].append(
+                    OrderedEntry(entry: entry, decodeTime: time)
+                )
+            }
+
+            var queueOffsets = Dictionary(
+                uniqueKeysWithValues: queues.keys.map { ($0, 0) }
+            )
+            var result: [HTSPMuxPacket] = []
+            result.reserveCapacity(entries.count)
+            if let pinnedEntry { result.append(pinnedEntry.packet) }
+
+            while result.count < entries.count {
+                var selectedStream: Int?
+                var selectedEntry: OrderedEntry?
+                for (streamIndex, queue) in queues {
+                    let offset = queueOffsets[streamIndex] ?? 0
+                    guard offset < queue.count else { continue }
+                    let candidate = queue[offset]
+                    if selectedEntry.map({ candidate.precedes($0) }) ?? true {
+                        selectedStream = streamIndex
+                        selectedEntry = candidate
+                    }
+                }
+                guard let selectedStream, let selectedEntry else { break }
+                result.append(selectedEntry.entry.packet)
+                queueOffsets[selectedStream, default: 0] += 1
+            }
+            return result
+        }
+    }
+
+    fileprivate struct Entry: Sendable {
+        let packet: HTSPMuxPacket
+        let isVideo: Bool
+        let ordinal: Int
+
+        var decodeTime: Int64? {
+            isVideo
+                ? (packet.decodeTime ?? packet.presentationTime)
+                : (packet.presentationTime ?? packet.decodeTime)
+        }
+    }
+
+    private struct OrderedEntry {
+        let entry: Entry
+        let decodeTime: Int64?
+
+        func precedes(_ other: OrderedEntry) -> Bool {
+            switch (decodeTime, other.decodeTime) {
+            case let (lhs?, rhs?) where lhs != rhs:
+                return lhs < rhs
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                return entry.ordinal < other.entry.ordinal
+            }
+        }
+    }
+
+    private(set) var isActive = false
+    private var pinsInitialVideoKeyframe = false
+    private var entries: [Entry] = []
+    private(set) var payloadByteCount = 0
+
+    mutating func begin(pinsInitialVideoKeyframe: Bool) {
+        isActive = true
+        self.pinsInitialVideoKeyframe = pinsInitialVideoKeyframe
+        entries.removeAll(keepingCapacity: true)
+        payloadByteCount = 0
+    }
+
+    @discardableResult
+    mutating func append(
+        _ packet: HTSPMuxPacket,
+        isVideo: Bool,
+        maximumPayloadBytes: Int
+    ) -> Bool {
+        guard isActive else { return false }
+        let addition = payloadByteCount.addingReportingOverflow(packet.payload.count)
+        guard !addition.overflow, addition.partialValue <= maximumPayloadBytes else {
+            return false
+        }
+        entries.append(
+            Entry(packet: packet, isVideo: isVideo, ordinal: entries.count)
+        )
+        payloadByteCount = addition.partialValue
+        return true
+    }
+
+    mutating func finish() -> Batch {
+        let batch = Batch(
+            entries: entries,
+            pinsInitialVideoKeyframe: pinsInitialVideoKeyframe
+        )
+        cancel()
+        return batch
+    }
+
+    mutating func cancel() {
+        isActive = false
+        pinsInitialVideoKeyframe = false
+        entries.removeAll(keepingCapacity: true)
+        payloadByteCount = 0
+    }
+}
+
+/// Continues the timestamp merge across the boundary between a staged seek
+/// batch and TVHeadend's subsequent packets. Only packets covered by both the
+/// primary video and primary audio watermarks are released. This prevents a
+/// video-heavy end of the staged batch from sitting in front of the next audio
+/// burst in VLC's byte stream.
+struct HTSPPostSeekTailInterleaver: Sendable {
+    private struct TimedEntry: Sendable {
+        let packet: HTSPMuxPacket
+        let ordinal: Int
+        let decodeTime: Int64?
+
+        func precedes(_ other: TimedEntry) -> Bool {
+            switch (decodeTime, other.decodeTime) {
+            case let (lhs?, rhs?) where lhs != rhs:
+                return lhs < rhs
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                return ordinal < other.ordinal
+            }
+        }
+    }
+
+    private let primaryVideoStreamIndex: Int
+    private let primaryAudioStreamIndex: Int
+    private var queues: [Int: [TimedEntry]] = [:]
+    private var queueOffsets: [Int: Int] = [:]
+    private var previousTimeByStream: [Int: Int64] = [:]
+    private var latestTimeByStream: [Int: Int64] = [:]
+    private var pinnedPacket: HTSPMuxPacket?
+    private var anchorTime: Int64?
+    private var nextOrdinal = 0
+    private(set) var queuedPayloadByteCount = 0
+
+    init(
+        batch: HTSPPostSeekPacketStager.Batch,
+        primaryVideoStreamIndex: Int,
+        primaryAudioStreamIndex: Int
+    ) {
+        self.primaryVideoStreamIndex = primaryVideoStreamIndex
+        self.primaryAudioStreamIndex = primaryAudioStreamIndex
+
+        let pinnedOrdinal: Int?
+        if batch.pinsInitialVideoKeyframe {
+            pinnedOrdinal = batch.entries.first(where: {
+                $0.packet.streamIndex == primaryVideoStreamIndex
+                    && $0.isVideo
+                    && $0.packet.frameType == 0x49
+            })?.ordinal
+        } else {
+            pinnedOrdinal = nil
+        }
+        if let pinnedEntry = batch.entries.first(where: { $0.ordinal == pinnedOrdinal }) {
+            pinnedPacket = pinnedEntry.packet
+            queuedPayloadByteCount += pinnedEntry.packet.payload.count
+            let time = pinnedEntry.decodeTime
+            if let time {
+                anchorTime = time
+                previousTimeByStream[primaryVideoStreamIndex] = time
+                latestTimeByStream[primaryVideoStreamIndex] = time
+            }
+        }
+        nextOrdinal = batch.entries.count
+        for entry in batch.entries where entry.ordinal != pinnedOrdinal {
+            appendEntry(entry.packet, ordinal: entry.ordinal)
+        }
+    }
+
+    mutating func append(_ packet: HTSPMuxPacket) {
+        appendEntry(packet, ordinal: nextOrdinal)
+        nextOrdinal &+= 1
+    }
+
+    var hasExceededPayloadLimit: Bool {
+        queuedPayloadByteCount > 8 * 1_024 * 1_024
+    }
+
+    mutating func drainAvailable() -> [HTSPMuxPacket] {
+        guard let videoTime = latestTimeByStream[primaryVideoStreamIndex],
+              let audioTime = latestTimeByStream[primaryAudioStreamIndex]
+        else { return drainPinnedPacket() }
+        return drain(through: min(videoTime, audioTime))
+    }
+
+    mutating func drainAll() -> [HTSPMuxPacket] {
+        drain(through: nil)
+    }
+
+    private mutating func appendEntry(_ packet: HTSPMuxPacket, ordinal: Int) {
+        let streamIndex = packet.streamIndex
+        let rawTime = streamIndex == primaryAudioStreamIndex
+            ? (packet.presentationTime ?? packet.decodeTime)
+            : (packet.decodeTime ?? packet.presentationTime)
+        let previousTime = previousTimeByStream[streamIndex]
+        let decodeTime: Int64?
+        if let rawTime, let previousTime {
+            decodeTime = max(previousTime, rawTime)
+        } else {
+            decodeTime = rawTime ?? previousTime
+                ?? anchorTime
+        }
+        if let rawTime, previousTime == nil {
+            resolveLeadingUnknownTimes(in: streamIndex, to: rawTime)
+        }
+        // Timestamp-less packets may inherit an ordering key so they cannot
+        // block their PID, but they must not claim real A/V coverage and open
+        // the watermark for an unobserved primary stream.
+        if rawTime != nil, let decodeTime {
+            previousTimeByStream[streamIndex] = decodeTime
+            let coverageTime: Int64
+            if streamIndex == primaryAudioStreamIndex,
+               let duration = packet.durationMicroseconds,
+               duration >= 0 {
+                let addition = decodeTime.addingReportingOverflow(duration)
+                coverageTime = addition.overflow ? decodeTime : addition.partialValue
+            } else {
+                coverageTime = decodeTime
+            }
+            latestTimeByStream[streamIndex] = max(
+                latestTimeByStream[streamIndex] ?? coverageTime,
+                coverageTime
+            )
+        }
+        queues[streamIndex, default: []].append(
+            TimedEntry(packet: packet, ordinal: ordinal, decodeTime: decodeTime)
+        )
+        queueOffsets[streamIndex] = queueOffsets[streamIndex] ?? 0
+        queuedPayloadByteCount += packet.payload.count
+    }
+
+    private mutating func resolveLeadingUnknownTimes(
+        in streamIndex: Int,
+        to time: Int64
+    ) {
+        guard var queue = queues[streamIndex] else { return }
+        let offset = queueOffsets[streamIndex] ?? 0
+        guard offset < queue.count else { return }
+        for index in offset..<queue.count {
+            guard queue[index].decodeTime == nil else { break }
+            let entry = queue[index]
+            queue[index] = TimedEntry(
+                packet: entry.packet,
+                ordinal: entry.ordinal,
+                decodeTime: time
+            )
+        }
+        queues[streamIndex] = queue
+    }
+
+    private mutating func drain(through watermark: Int64?) -> [HTSPMuxPacket] {
+        var result = drainPinnedPacket()
+        while let selection = nextEntry(through: watermark) {
+            result.append(selection.entry.packet)
+            queuedPayloadByteCount -= selection.entry.packet.payload.count
+            queueOffsets[selection.streamIndex, default: 0] += 1
+            compactQueueIfNeeded(selection.streamIndex)
+        }
+        return result
+    }
+
+    private mutating func drainPinnedPacket() -> [HTSPMuxPacket] {
+        guard let pinnedPacket else { return [] }
+        self.pinnedPacket = nil
+        queuedPayloadByteCount -= pinnedPacket.payload.count
+        return [pinnedPacket]
+    }
+
+    private func nextEntry(
+        through watermark: Int64?
+    ) -> (streamIndex: Int, entry: TimedEntry)? {
+        var selected: (streamIndex: Int, entry: TimedEntry)?
+        for (streamIndex, queue) in queues {
+            let offset = queueOffsets[streamIndex] ?? 0
+            guard offset < queue.count else { continue }
+            let candidate = queue[offset]
+            if let watermark {
+                guard candidate.decodeTime.map({ $0 <= watermark }) == true else { continue }
+            }
+            if selected.map({ candidate.precedes($0.entry) }) ?? true {
+                selected = (streamIndex, candidate)
+            }
+        }
+        return selected
+    }
+
+    private mutating func compactQueueIfNeeded(_ streamIndex: Int) {
+        guard var queue = queues[streamIndex] else { return }
+        let offset = queueOffsets[streamIndex] ?? 0
+        guard offset >= 128 || offset == queue.count else { return }
+        queue.removeFirst(offset)
+        queues[streamIndex] = queue
+        queueOffsets[streamIndex] = 0
+    }
 }
 
 struct MPEGTransportStreamStartupSnapshot: Equatable, Sendable {
@@ -153,6 +530,18 @@ final class MPEGTransportStreamMuxer {
     var supportedTrackCount: Int { tracksByIndex.count }
     var hasVideo: Bool { tracksByIndex.values.contains(where: \.isVideo) }
     var hasAudio: Bool { tracksByIndex.values.contains(where: \.isAudio) }
+    var primaryVideoStreamIndex: Int? {
+        tracksByIndex.values
+            .filter(\.isVideo)
+            .min { $0.pid < $1.pid }?
+            .info.index
+    }
+    var primaryAudioStreamIndex: Int? {
+        tracksByIndex.values
+            .filter(\.isAudio)
+            .min { $0.pid < $1.pid }?
+            .info.index
+    }
     var audioStreamTypes: [String] {
         tracksByIndex.values
             .filter(\.isAudio)
@@ -207,6 +596,19 @@ final class MPEGTransportStreamMuxer {
 
     func resetAfterDiscontinuity() {
         timestampContinuity.beginNewEpoch()
+        resetTransportState(flushesDecoders: true)
+    }
+
+    /// Resets transport state for media that will be consumed by a newly
+    /// created VLC input. A fresh decoder has no stale access units to flush;
+    /// injecting VLC's private discontinuity marker here makes its first
+    /// audio block discontinuous and suppresses the first video PCR.
+    func resetForFreshPipeline() {
+        timestampContinuity = MPEGTimestampContinuity()
+        resetTransportState(flushesDecoders: false)
+    }
+
+    private func resetTransportState(flushesDecoders: Bool) {
         continuity.removeAll()
         packetsSinceTables = Int.max
         pendingBootstrapIndexes = Set(
@@ -217,9 +619,9 @@ final class MPEGTransportStreamMuxer {
         pendingDiscontinuityPIDs = Set(tracksByIndex.values.map(\.pid))
         pendingDiscontinuityPIDs.insert(0)
         pendingDiscontinuityPIDs.insert(pmtPID)
-        // A seek/recovery really does cross media epochs, so flush each VLC
-        // elementary-stream decoder when its first new PES arrives.
-        pendingDecoderFlushPIDs = Set(tracksByIndex.values.map(\.pid))
+        pendingDecoderFlushPIDs = flushesDecoders
+            ? Set(tracksByIndex.values.map(\.pid))
+            : []
     }
 
     func mux(_ packet: HTSPMuxPacket) -> Data {
