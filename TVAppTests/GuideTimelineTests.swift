@@ -393,6 +393,54 @@ final class GuideTimelineTests: XCTestCase {
     }
 
     @MainActor
+    func testGuideModelDoesNotSurfaceURLSessionCancellationOverCachedGuide() async {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let configuration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://tvheadend.local:9981"),
+            username: "viewer",
+            password: "secret",
+            streamProfile: "pass",
+            guideCacheURL: URL(string: "http://guide.local:49382/guide.json"),
+            xmltvURL: nil
+        )
+        let snapshot = PersistedGuideSnapshot(
+            serverIdentifier: configuration.guideSnapshotIdentifier,
+            serverName: "Cached TVHeadend",
+            savedAt: now,
+            channels: [GuideChannel(
+                id: "channel-1",
+                number: 1,
+                name: "Cached channel",
+                monogram: "CC",
+                tint: .orange,
+                iconURL: nil,
+                programs: [GuideProgram(
+                    id: "current",
+                    channelID: "channel-1",
+                    title: "Cached current programme",
+                    subtitle: nil,
+                    overview: "The cached programme description.",
+                    start: now.addingTimeInterval(-300),
+                    end: now.addingTimeInterval(1_500)
+                )]
+            )]
+        )
+        let model = GuideViewModel(
+            now: now,
+            configuration: configuration,
+            cachedSnapshot: snapshot
+        ) { _, _, _ in
+            throw URLError(.cancelled)
+        }
+
+        await model.load(configuration: configuration, at: now, force: true)
+
+        XCTAssertTrue(model.hasUsableGuide)
+        XCTAssertEqual(model.channels.first?.programs.first?.overview, "The cached programme description.")
+        XCTAssertEqual(model.loadState, .loaded(serverName: "Cached TVHeadend", channelCount: 1))
+    }
+
+    @MainActor
     func testGuideModelSupersedesAnInFlightLoadForANewServer() async {
         let now = Date(timeIntervalSince1970: 10_000)
         let oldConfiguration = TVHeadendConfiguration(

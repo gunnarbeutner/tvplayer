@@ -214,12 +214,29 @@ final class GuideViewModel: ObservableObject {
                 channels: snapshot.channels
             )
             await GuideSnapshotStore.shared.save(persistedSnapshot)
-        } catch is CancellationError {
-            return
         } catch {
+            // URLSession reports cancellation as URLError.cancelled rather
+            // than Swift.CancellationError. Startup discovery can supersede
+            // the first refresh, so neither form should briefly replace a
+            // cached programme description with an error message.
+            guard !Task.isCancelled, !Self.isCancellation(error) else { return }
             guard isCurrentLoad(generation, snapshotIdentifier: snapshotIdentifier) else { return }
             loadState = .failed(error.localizedDescription)
         }
+    }
+
+    private static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
+            return true
+        }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? Error {
+            return isCancellation(underlying)
+        }
+        return false
     }
 
     private func isCurrentLoad(_ generation: Int, snapshotIdentifier: String) -> Bool {
