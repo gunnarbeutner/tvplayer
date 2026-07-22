@@ -30,6 +30,25 @@ enum AppTab: Hashable, CaseIterable {
     }
 }
 
+enum PlaybackExitCommandAction: Equatable {
+    case passThrough
+    case cancelLaunch
+    case dismissTransition
+    case delegateToPlayer
+}
+
+enum PlaybackExitCommandPolicy {
+    static func action(
+        isPlayerPresented: Bool,
+        hasLaunchPresentation: Bool,
+        hasPlayerHandler: Bool
+    ) -> PlaybackExitCommandAction {
+        guard isPlayerPresented else { return .passThrough }
+        if hasLaunchPresentation { return .cancelLaunch }
+        return hasPlayerHandler ? .delegateToPlayer : .dismissTransition
+    }
+}
+
 struct RootTabView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var selection: AppTab = .guide
@@ -281,6 +300,7 @@ struct RootTabView: View {
         }
         .onAppear {
 #if os(tvOS)
+            TVRemoteCommandCenter.exitHandler = handlePlaybackExitCommand
             TVRemoteCommandCenter.pageHandler = handlePageCommand
             TVRemoteCommandCenter.playPauseHandler = handlePlayPauseCommand
 #endif
@@ -288,6 +308,7 @@ struct RootTabView: View {
         }
         .onDisappear {
 #if os(tvOS)
+            TVRemoteCommandCenter.exitHandler = nil
             TVRemoteCommandCenter.pageHandler = nil
             TVRemoteCommandCenter.playPauseHandler = nil
 #endif
@@ -406,6 +427,35 @@ struct RootTabView: View {
     }
 
 #if os(tvOS)
+    @MainActor
+    private func handlePlaybackExitCommand() -> Bool {
+        let action = PlaybackExitCommandPolicy.action(
+            isPlayerPresented: playback.isPlayerPresented,
+            hasLaunchPresentation: playback.launchPresentation != nil,
+            hasPlayerHandler: TVRemoteCommandCenter.playerExitHandler != nil
+        )
+        switch action {
+        case .passThrough:
+            return false
+        case .cancelLaunch:
+            playback.leavePlayer()
+            return true
+        case .dismissTransition:
+            playback.leavePlayer(
+                retainingLivePlayback: supportsGuideLivePreviewOnDismissal
+            )
+            return true
+        case .delegateToPlayer:
+            guard let handler = TVRemoteCommandCenter.playerExitHandler else {
+                playback.leavePlayer(
+                    retainingLivePlayback: supportsGuideLivePreviewOnDismissal
+                )
+                return true
+            }
+            return handler()
+        }
+    }
+
     @MainActor
     private func handlePageCommand(_ direction: TVPageDirection) -> Bool {
         if playback.isPlayerPresented {

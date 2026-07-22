@@ -19,14 +19,18 @@ extension Notification.Name {
 
 @MainActor
 enum TVRemoteCommandCenter {
+    static var exitHandler: (() -> Bool)?
+    static var playerExitHandler: (() -> Bool)?
     static var pageHandler: ((TVPageDirection) -> Bool)?
     static var playPauseHandler: (() -> Bool)?
     static var seekHoldHandler: ((TVPlayerSeekDirection, Bool) -> Bool)?
 }
 
 /// Captures app-level remote commands before the focus engine turns them into
-/// geometry-dependent movement. Directional arrows are intercepted only while
-/// the player installs a seek-hold handler.
+/// geometry-dependent movement. Back is intercepted while playback is being
+/// presented so it cannot escape through a focus-tree transition and minimize
+/// the app. Directional arrows are intercepted only while the player installs
+/// a seek-hold handler.
 @objc(TVPlayerApplication)
 final class TVPlayerApplication: UIApplication {
     private var consumedTypes: Set<Int> = []
@@ -40,6 +44,20 @@ final class TVPlayerApplication: UIApplication {
 
         var shouldConsume = false
         for press in pressesEvent.allPresses {
+            if press.type == .menu {
+                let rawType = press.type.rawValue
+                if press.phase == .began,
+                   !consumedTypes.contains(rawType),
+                   TVRemoteCommandCenter.exitHandler?() == true {
+                    consumedTypes.insert(rawType)
+                }
+                if consumedTypes.contains(rawType) { shouldConsume = true }
+                if press.phase == .ended || press.phase == .cancelled {
+                    consumedTypes.remove(rawType)
+                }
+                continue
+            }
+
             if let direction = seekDirection(for: press) {
                 let rawType = press.type.rawValue
                 if press.phase == .began,

@@ -176,6 +176,52 @@ final class PlatformAdaptationTests: XCTestCase {
         XCTAssertEqual(feedback?.accessibilityAnnouncement, "Already live")
     }
 
+    func testPlaybackExitPassesThroughOutsidePlayer() {
+        XCTAssertEqual(
+            PlaybackExitCommandPolicy.action(
+                isPlayerPresented: false,
+                hasLaunchPresentation: false,
+                hasPlayerHandler: false
+            ),
+            .passThrough
+        )
+    }
+
+    func testPlaybackExitCancelsLaunchBeforeOrAbovePlayerFocus() {
+        for hasPlayerHandler in [false, true] {
+            XCTAssertEqual(
+                PlaybackExitCommandPolicy.action(
+                    isPlayerPresented: true,
+                    hasLaunchPresentation: true,
+                    hasPlayerHandler: hasPlayerHandler
+                ),
+                .cancelLaunch
+            )
+        }
+    }
+
+    func testPlaybackExitDismissesPresentationTransitionWithoutPlayerHandler() {
+        XCTAssertEqual(
+            PlaybackExitCommandPolicy.action(
+                isPlayerPresented: true,
+                hasLaunchPresentation: false,
+                hasPlayerHandler: false
+            ),
+            .dismissTransition
+        )
+    }
+
+    func testPlaybackExitDelegatesAfterPlayerHandlerIsInstalled() {
+        XCTAssertEqual(
+            PlaybackExitCommandPolicy.action(
+                isPlayerPresented: true,
+                hasLaunchPresentation: false,
+                hasPlayerHandler: true
+            ),
+            .delegateToPlayer
+        )
+    }
+
     func testLiveTimelinePositionNeverEscapesAvailableWindow() {
         let liveEdge = Date(timeIntervalSinceReferenceDate: 20_000)
         let bufferStart = liveEdge.addingTimeInterval(-120)

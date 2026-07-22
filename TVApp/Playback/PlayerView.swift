@@ -487,6 +487,7 @@ struct PlaybackView: View {
         }
 #if os(tvOS)
         .onAppear {
+            TVRemoteCommandCenter.playerExitHandler = handlePlayerExitCommand
             TVRemoteCommandCenter.seekHoldHandler = handleRemoteSeekPress
         }
 #endif
@@ -495,6 +496,7 @@ struct PlaybackView: View {
             timelineSeekFeedbackTask?.cancel()
             timelineSeekRepeatTask?.cancel()
 #if os(tvOS)
+            TVRemoteCommandCenter.playerExitHandler = nil
             TVRemoteCommandCenter.seekHoldHandler = nil
 #endif
             // Back intentionally collapses live playback into the guide
@@ -537,17 +539,7 @@ struct PlaybackView: View {
                 showTimeline()
             }
         }
-        .platformExitCommand {
-            if timelineSeekTargetDate != nil {
-                cancelTimelineSeek()
-            } else if chromeMode == .panel {
-                showTimeline()
-            } else if chromeMode == .timeline {
-                hideChrome()
-            } else {
-                dismissPlayer()
-            }
-        }
+        .platformExitCommand { _ = handlePlayerExitCommand() }
 #if os(macOS)
         .onKeyPress(phases: [.down, .repeat]) { keyPress in
             guard chromeMode != .panel else { return .ignored }
@@ -679,6 +671,20 @@ struct PlaybackView: View {
         playback.leavePlayer(
             retainingLivePlayback: retainsLivePlaybackOnDismiss && !presentation.isRecording
         )
+    }
+
+    @discardableResult
+    private func handlePlayerExitCommand() -> Bool {
+        if timelineSeekTargetDate != nil {
+            cancelTimelineSeek()
+        } else if chromeMode == .panel {
+            showTimeline()
+        } else if chromeMode == .timeline {
+            hideChrome()
+        } else {
+            dismissPlayer()
+        }
+        return true
     }
 
     private func toggleTimelinePlayback() {
