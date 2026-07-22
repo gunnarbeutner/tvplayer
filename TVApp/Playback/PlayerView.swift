@@ -96,6 +96,7 @@ struct PlaybackView: View {
 
     let presentation: PlaybackPresentation
     var showsVideoSurface = true
+    var retainsLivePlaybackOnDismiss = false
 
     private var usesCompactLayout: Bool {
 #if os(iOS)
@@ -233,7 +234,7 @@ struct PlaybackView: View {
 #if !os(tvOS)
             if chromeMode != .hidden {
                 Button {
-                    playback.leavePlayer()
+                    dismissPlayer()
                 } label: {
                     Image(systemName: "xmark")
                         .font(.headline.bold())
@@ -407,7 +408,7 @@ struct PlaybackView: View {
             } else if chromeMode != .hidden {
                 hideChrome()
             } else {
-                playback.leavePlayer()
+                dismissPlayer()
             }
         }
 #if os(macOS)
@@ -513,6 +514,12 @@ struct PlaybackView: View {
         wakeSurfaceFocused = false
         withAnimation(.easeOut(duration: 0.18)) { chromeMode = .timeline }
         noteActivity()
+    }
+
+    private func dismissPlayer() {
+        playback.leavePlayer(
+            retainingLivePlayback: retainsLivePlaybackOnDismiss && !presentation.isRecording
+        )
     }
 
     private func toggleTimelinePlayback() {

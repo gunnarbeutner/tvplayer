@@ -127,7 +127,8 @@ struct RootTabView: View {
                 PlaybackView(
                     engine: playback.engine,
                     presentation: presentation,
-                    showsVideoSurface: false
+                    showsVideoSurface: false,
+                    retainsLivePlaybackOnDismiss: supportsGuideLivePreviewOnDismissal
                 )
                 .environmentObject(playback)
                 .environmentObject(settings)
@@ -324,7 +325,11 @@ struct RootTabView: View {
     private func handle(_ route: AppRoute) async {
         switch route {
         case .guide:
-            if playback.isPlayerPresented { playback.leavePlayer() }
+            if playback.isPlayerPresented {
+                playback.leavePlayer(
+                    retainingLivePlayback: platformSupportsGuideLivePreview
+                )
+            }
             selection = .guide
 #if os(tvOS)
             guideFocusRequest = UUID()
@@ -486,6 +491,18 @@ struct RootTabView: View {
         case .idle, .paused, .failed:
             return false
         }
+#endif
+    }
+
+    private var supportsGuideLivePreviewOnDismissal: Bool {
+        platformSupportsGuideLivePreview && selection == .guide
+    }
+
+    private var platformSupportsGuideLivePreview: Bool {
+#if os(iOS)
+        false
+#else
+        true
 #endif
     }
 

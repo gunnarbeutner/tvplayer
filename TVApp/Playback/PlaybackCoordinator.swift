@@ -316,7 +316,7 @@ final class PlaybackCoordinator: ObservableObject {
     }
 #endif
 
-    func leavePlayer() {
+    func leavePlayer(retainingLivePlayback: Bool = false) {
         cancelPlaybackStartIntent()
         cancelLivePlaybackPrefetch()
         if let launchPresentation {
@@ -327,11 +327,16 @@ final class PlaybackCoordinator: ObservableObject {
             finishLaunch(launchPresentation.id, dismissPlayer: true)
             return
         }
-        // Live television keeps running when it collapses into the guide's
-        // artwork area. Recorded media retains the previous pause-on-exit
-        // behavior because it has no corresponding live channel preview.
+        // Keep live television running only when the caller is about to expose
+        // the guide preview. Otherwise stopping the player must also stop its
+        // audio; leaving the live engine active behind Channels (or anywhere on
+        // iOS, which has no embedded preview) produces invisible playback.
         if presentation?.isRecording == true {
             engine.pause()
+        } else if !retainingLivePlayback {
+            engine.stop()
+            presentation = nil
+            isUserInitiatedPlayback = false
         }
         isPlayerPresented = false
     }
