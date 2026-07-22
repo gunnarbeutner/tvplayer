@@ -440,7 +440,7 @@ struct RootTabView: View {
             guideFocusRequest = UUID()
 #endif
 
-        case let .playChannel(channelID):
+        case let .playChannel(channelID, topShelfContext):
             var channel = guide.channels.first { $0.id == channelID }
             if channel == nil {
                 await guide.load(configuration: settings.configuration, force: true)
@@ -451,9 +451,16 @@ struct RootTabView: View {
                 selection = .guide
                 return
             }
+            let currentProgram = channel.programs.first { $0.isAiring(at: guide.now) }
+            let program = topShelfContext.flatMap { context in
+                channel.programs.first {
+                    $0.id == context.programID && $0.isAiring(at: guide.now)
+                }
+            } ?? currentProgram
+            hydrateTopShelfArtwork(for: program, context: topShelfContext)
             playback.start(
                 channel: channel,
-                program: channel.programs.first { $0.isAiring(at: guide.now) },
+                program: program,
                 configuration: settings.configuration
             )
 
@@ -476,6 +483,28 @@ struct RootTabView: View {
                 configuration: settings.configuration
             )
         }
+    }
+
+    private func hydrateTopShelfArtwork(
+        for program: GuideProgram?,
+        context: TopShelfLaunchContext?
+    ) {
+        guard let program,
+              let context,
+              program.id == context.programID,
+              let filename = context.artworkFilename,
+              let cachedURL = TopShelfSnapshotStore.cachedArtworkURL(for: filename),
+              let artworkURL = program.metadata.imageURL.flatMap(URL.init(string:)),
+              let data = try? Data(contentsOf: cachedURL)
+        else { return }
+
+        // Top Shelf has already persisted this image. Decode it before
+        // presenting playback so the loading view can render it immediately.
+        ChannelLogoImageCache.shared.store(
+            data: data,
+            for: artworkURL,
+            kind: .programmeArtwork
+        )
     }
 
 #if os(tvOS)

@@ -11,6 +11,18 @@ final class AppRouteTests: XCTestCase {
         XCTAssertEqual(AppRoute(url: route.url), route)
     }
 
+    func testTopShelfChannelRouteRoundTripsLaunchContext() {
+        let route = AppRoute.playChannel(
+            "channel id",
+            topShelf: TopShelfLaunchContext(
+                programID: "programme/id",
+                artworkFilename: "top-shelf-artwork-abcd.jpg"
+            )
+        )
+
+        XCTAssertEqual(AppRoute(url: route.url), route)
+    }
+
     func testRecordingRoutePercentEncodesItsIdentifier() {
         let route = AppRoute.playRecording("recording id ä")
         XCTAssertEqual(AppRoute(url: route.url), route)

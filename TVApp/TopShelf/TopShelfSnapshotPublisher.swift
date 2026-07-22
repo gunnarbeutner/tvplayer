@@ -119,7 +119,13 @@ actor TopShelfSnapshotPublisher {
                 TopShelfSnapshot.Item(
                     id: "channel:\(channel.id)",
                     title: "\(channel.name): \(program.title)",
-                    routeURL: AppRoute.playChannel(channel.id).url.absoluteString,
+                    routeURL: AppRoute.playChannel(
+                        channel.id,
+                        topShelf: TopShelfLaunchContext(
+                            programID: program.id,
+                            artworkFilename: filename
+                        )
+                    ).url.absoluteString,
                     artworkFilename: filename,
                     expirationDate: program.end,
                     playbackProgress: nil

@@ -58,6 +58,16 @@ enum TopShelfSnapshotStore {
         return cacheDirectory
     }
 
+    static func cachedArtworkURL(
+        for filename: String,
+        fileManager: FileManager = .default
+    ) -> URL? {
+        guard filename.hasPrefix("top-shelf-artwork-"),
+              filename == URL(fileURLWithPath: filename).lastPathComponent
+        else { return nil }
+        return cacheDirectoryURL(fileManager: fileManager)?.appending(path: filename)
+    }
+
     static func load(fileManager: FileManager = .default) -> TopShelfSnapshot? {
         guard let url = cacheDirectoryURL(fileManager: fileManager)?
             .appending(path: snapshotFilename),

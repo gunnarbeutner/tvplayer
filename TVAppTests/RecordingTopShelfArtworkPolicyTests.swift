@@ -73,6 +73,13 @@ final class TopShelfSnapshotStoreTests: XCTestCase {
             "/shared/app-group/Library/Caches/top-shelf-v1.json"
         )
     }
+
+    func testCachedArtworkURLRejectsPathTraversal() {
+        XCTAssertNil(
+            TopShelfSnapshotStore.cachedArtworkURL(for: "../top-shelf-artwork-image.jpg")
+        )
+        XCTAssertNil(TopShelfSnapshotStore.cachedArtworkURL(for: "unrelated-image.jpg"))
+    }
 }
 
 final class TopShelfOnNowPolicyTests: XCTestCase {
