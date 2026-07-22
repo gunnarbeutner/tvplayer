@@ -129,8 +129,6 @@ struct PlaybackView: View {
     @State private var timelineSeekTargetsLiveEdge = false
     @State private var timelineSeekCommitTask: Task<Void, Never>?
     @State private var timelineSeekRepeatTask: Task<Void, Never>?
-    @State private var transientPlaybackStatus: String?
-    @State private var playbackStatusDismissTask: Task<Void, Never>?
     @State private var isUserPaused = false
     @State private var userPauseRequestPending = false
     @State private var userResumeRequestPending = false
@@ -207,16 +205,6 @@ struct PlaybackView: View {
             if chromeMode == .timeline {
                 VStack {
                     Spacer()
-                    if let transientPlaybackStatus {
-                        Text(transientPlaybackStatus)
-                            .font(.headline.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 18)
-                            .padding(.vertical, 9)
-                            .background(.black.opacity(0.68), in: Capsule())
-                            .transition(.opacity.combined(with: .scale(scale: 0.96)))
-                            .accessibilityHidden(true)
-                    }
                     if let recording = presentation.recording {
                         RecordingPlaybackTimeline(
                             recording: recording,
@@ -428,7 +416,6 @@ struct PlaybackView: View {
         .onDisappear {
             timelineSeekCommitTask?.cancel()
             timelineSeekRepeatTask?.cancel()
-            playbackStatusDismissTask?.cancel()
 #if os(tvOS)
             TVRemoteCommandCenter.seekHoldHandler = nil
 #endif
@@ -549,9 +536,9 @@ struct PlaybackView: View {
             }
 
             if announcesPause {
-                showPlaybackStatus("Paused")
+                announcePlaybackStatus("paused")
             } else if announcesResume {
-                showPlaybackStatus("Playing")
+                announcePlaybackStatus("playing")
             }
         }
     }
@@ -680,23 +667,8 @@ struct PlaybackView: View {
         chromeActivity = UUID()
     }
 
-    private func showPlaybackStatus(_ status: String) {
-        playbackStatusDismissTask?.cancel()
-        withAnimation(.easeOut(duration: 0.16)) {
-            transientPlaybackStatus = status
-        }
-        AccessibilityNotification.Announcement("Playback \(status.lowercased())").post()
-
-        playbackStatusDismissTask = Task { @MainActor in
-            do {
-                try await Task.sleep(for: .seconds(1.2))
-            } catch {
-                return
-            }
-            withAnimation(.easeIn(duration: 0.2)) {
-                transientPlaybackStatus = nil
-            }
-        }
+    private func announcePlaybackStatus(_ status: String) {
+        AccessibilityNotification.Announcement("Playback \(status)").post()
     }
 
     private func skipForward(by seconds: TimeInterval) {
