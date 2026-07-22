@@ -4,6 +4,7 @@ struct GuideProgramCard: View {
     let program: GuideProgram
     let now: Date
     let isFocused: Bool
+    let isPlaying: Bool
     let recordingState: TVRecordingState?
     let leadingContentInset: CGFloat
 
@@ -13,6 +14,7 @@ struct GuideProgramCard: View {
 
     private var background: Color {
         if isFocused { return AppTheme.focused }
+        if isPlaying { return AppTheme.playing }
         switch phase {
         case .past: return AppTheme.past
         case .current: return AppTheme.current

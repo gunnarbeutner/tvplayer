@@ -81,6 +81,16 @@ struct GuideView: View {
         model.channel(containing: presentedProgram)?.id
     }
 
+    private var playingProgramID: GuideProgram.ID? {
+        guard let presentation = playback.presentation,
+              presentation.recording == nil
+        else { return nil }
+        let playbackDate = playback.engine.livePlaybackDate()
+        return presentation.channel.programs.first {
+            $0.isAiring(at: playbackDate)
+        }?.id
+    }
+
     var body: some View {
         ZStack {
             AppTheme.background.ignoresSafeArea()
@@ -119,6 +129,7 @@ struct GuideView: View {
                     CompactGuideList(
                         channels: displayedChannels,
                         now: model.now,
+                        playingProgramID: playingProgramID,
                         focusedProgramID: $focusedProgramID,
                         isFavorite: channelPreferences.isFavorite,
                         recordingState: { recordings.scheduledRecording(for: $0)?.state },
@@ -144,6 +155,7 @@ struct GuideView: View {
                             guideRevision: model.guideRevision,
                             channelPreferencesRevision: channelPreferences.revision,
                             preferredProgramID: preferredFocusProgramID,
+                            playingProgramID: playingProgramID,
                             focusScope: guideFocusScope,
                             focusedProgramID: $focusedProgramID,
                             recenterRequest: recenterRequest,
@@ -421,6 +433,7 @@ struct GuideView: View {
 private struct CompactGuideList: View {
     let channels: [GuideChannel]
     let now: Date
+    let playingProgramID: GuideProgram.ID?
     @Binding var focusedProgramID: GuideProgram.ID?
     let isFavorite: (GuideChannel.ID) -> Bool
     let recordingState: (GuideProgram) -> TVRecordingState?
@@ -482,7 +495,12 @@ private struct CompactGuideList: View {
                                 }
                             }
                             .padding(14)
-                            .background(AppTheme.surface, in: RoundedRectangle(cornerRadius: 14))
+                            .background(
+                                program.id == playingProgramID
+                                    ? AppTheme.playing
+                                    : AppTheme.surface,
+                                in: RoundedRectangle(cornerRadius: 14)
+                            )
                         }
                     }
                 }

@@ -58,6 +58,8 @@ struct ChannelsView: View {
                                     currentProgram: currentProgram(for: channel),
                                     isFavorite: channelPreferences.isFavorite(channel.id),
                                     isFocused: focusedChannelID == channel.id,
+                                    isPlaying: playback.presentation?.recording == nil
+                                        && playback.presentation?.channel.id == channel.id,
                                     onWatch: {
                                         playback.start(
                                             channel: channel,
@@ -269,6 +271,7 @@ private struct ChannelCard: View {
     let currentProgram: GuideProgram?
     let isFavorite: Bool
     let isFocused: Bool
+    let isPlaying: Bool
     let onWatch: () -> Void
 
     var body: some View {
@@ -313,7 +316,10 @@ private struct ChannelCard: View {
         }
         .padding(24)
         .frame(height: cardHeight, alignment: .topLeading)
-        .background(isFocused ? AppTheme.focused : AppTheme.surface, in: RoundedRectangle(cornerRadius: 14))
+        .background(
+            isFocused ? AppTheme.focused : (isPlaying ? AppTheme.playing : AppTheme.surface),
+            in: RoundedRectangle(cornerRadius: 14)
+        )
         .overlay {
             RoundedRectangle(cornerRadius: 14)
                 .strokeBorder(isFocused ? AppTheme.focusBorder : Color.white.opacity(0.16), lineWidth: isFocused ? 4 : 1)

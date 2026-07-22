@@ -355,6 +355,7 @@ struct GuideGridView: View {
     let guideRevision: Int
     let channelPreferencesRevision: Int
     let preferredProgramID: GuideProgram.ID?
+    let playingProgramID: GuideProgram.ID?
     let focusScope: Namespace.ID
     @Binding var focusedProgramID: GuideProgram.ID?
     let recenterRequest: UUID
@@ -380,6 +381,7 @@ struct GuideGridView: View {
             guideRevision: guideRevision,
             channelPreferencesRevision: channelPreferencesRevision,
             preferredProgramID: preferredProgramID,
+            playingProgramID: playingProgramID,
             focusedProgramID: $focusedProgramID,
             recenterRequest: recenterRequest,
             focusRestoreRequest: focusRestoreRequest,
@@ -406,6 +408,7 @@ private struct GuideCollectionRepresentable: UIViewRepresentable {
     let guideRevision: Int
     let channelPreferencesRevision: Int
     let preferredProgramID: GuideProgram.ID?
+    let playingProgramID: GuideProgram.ID?
     @Binding var focusedProgramID: GuideProgram.ID?
     let recenterRequest: UUID
     let focusRestoreRequest: UUID
@@ -433,6 +436,7 @@ private struct GuideCollectionRepresentable: UIViewRepresentable {
             guideRevision: guideRevision,
             channelPreferencesRevision: channelPreferencesRevision,
             preferredProgramID: preferredProgramID,
+            playingProgramID: playingProgramID,
             focusedProgramID: focusedProgramID,
             recenterRequest: recenterRequest,
             focusRestoreRequest: focusRestoreRequest,
@@ -719,6 +723,7 @@ private final class GuideCollectionView: UICollectionView,
     private var appliedFocusRestoreRequest: UUID?
     private var requestedFocusedProgramID: GuideProgram.ID?
     private var preferredProgramID: GuideProgram.ID?
+    private var playingProgramID: GuideProgram.ID?
     private var pendingFocusProgramID: GuideProgram.ID?
     private var pendingChannelProgramID: GuideProgram.ID?
     private var focusedChannelID: GuideChannel.ID?
@@ -872,6 +877,7 @@ private final class GuideCollectionView: UICollectionView,
         guideRevision: Int,
         channelPreferencesRevision: Int,
         preferredProgramID: GuideProgram.ID?,
+        playingProgramID: GuideProgram.ID?,
         focusedProgramID: GuideProgram.ID?,
         recenterRequest: UUID,
         focusRestoreRequest: UUID,
@@ -888,6 +894,8 @@ private final class GuideCollectionView: UICollectionView,
         isEnabled: Bool
     ) {
         self.preferredProgramID = preferredProgramID
+        let playingProgramChanged = self.playingProgramID != playingProgramID
+        self.playingProgramID = playingProgramID
         let previousRequestedFocusedProgramID = requestedFocusedProgramID
         requestedFocusedProgramID = focusedProgramID
         currentConfiguration = configuration
@@ -902,6 +910,9 @@ private final class GuideCollectionView: UICollectionView,
         isGuideEnabled = isEnabled
 
         if previousRequestedFocusedProgramID != focusedProgramID {
+            reconfigureVisibleProgrammeCells()
+        }
+        if playingProgramChanged {
             reconfigureVisibleProgrammeCells()
         }
 
@@ -1501,6 +1512,7 @@ private final class GuideCollectionView: UICollectionView,
             item: item,
             now: currentNow,
             recordingState: recordingState(item.program),
+            isPlaying: item.id == playingProgramID,
             isHeaderSelection: item.id == selectionProgramID,
             showsPendingFocusAppearance: GuideFocusPresentation.showsPendingFocus(
                 programID: item.id,
@@ -1694,6 +1706,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
     private var item: GuideGridSnapshot.Item?
     private var now = Date()
     private var recordingState: TVRecordingState?
+    private var isPlaying = false
     private var isHeaderSelection = false
     private var showsPendingFocusAppearance = false
     private var leadingOcclusion: CGFloat = 0
@@ -1744,6 +1757,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
         titleLabel.text = nil
         timeLabel.text = nil
         recordingImageView.image = nil
+        isPlaying = false
         isHeaderSelection = false
         showsPendingFocusAppearance = false
         onFocused = {}
@@ -1757,6 +1771,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
         item: GuideGridSnapshot.Item,
         now: Date,
         recordingState: TVRecordingState?,
+        isPlaying: Bool,
         isHeaderSelection: Bool,
         showsPendingFocusAppearance: Bool,
         isFocusAllowed: Bool,
@@ -1769,6 +1784,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
         self.item = item
         self.now = now
         self.recordingState = recordingState
+        self.isPlaying = isPlaying
         self.isHeaderSelection = isHeaderSelection
         self.showsPendingFocusAppearance = showsPendingFocusAppearance
         self.isFocusAllowed = isFocusAllowed
@@ -1911,6 +1927,8 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
         let background: UIColor
         if presentsFocus {
             background = UIColor(AppTheme.focused)
+        } else if isPlaying {
+            background = UIColor(AppTheme.playing)
         } else {
             background = switch phase {
             case .past: UIColor(AppTheme.past)
@@ -2324,6 +2342,7 @@ struct GuideGridView: View {
     let guideRevision: Int
     let channelPreferencesRevision: Int
     let preferredProgramID: GuideProgram.ID?
+    let playingProgramID: GuideProgram.ID?
     let focusScope: Namespace.ID
     @Binding var focusedProgramID: GuideProgram.ID?
     let recenterRequest: UUID
@@ -2370,6 +2389,7 @@ struct GuideGridView: View {
                                             program: item.program,
                                             now: now,
                                             isFocused: focusedProgramID == item.id,
+                                            isPlaying: playingProgramID == item.id,
                                             recordingState: recordingState(item.program),
                                             leadingContentInset: 0
                                         )
