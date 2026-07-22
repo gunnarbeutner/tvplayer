@@ -17,6 +17,17 @@ struct TopShelfSnapshot: Codable, Sendable {
 }
 
 enum TopShelfSnapshotStore {
+    enum StoreError: LocalizedError {
+        case appGroupContainerUnavailable
+
+        var errorDescription: String? {
+            switch self {
+            case .appGroupContainerUnavailable:
+                "The Top Shelf App Group container is unavailable."
+            }
+        }
+    }
+
     static let appGroupIdentifier = "group.de.beutner.TVPlayer"
     static let snapshotFilename = "top-shelf-v1.json"
 
@@ -26,8 +37,29 @@ enum TopShelfSnapshotStore {
         )
     }
 
+    static func cacheDirectoryURL(fileManager: FileManager = .default) -> URL? {
+        containerURL(fileManager: fileManager).map(cacheDirectoryURL(for:))
+    }
+
+    static func cacheDirectoryURL(for containerURL: URL) -> URL {
+        containerURL
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Caches", isDirectory: true)
+    }
+
+    static func prepareCacheDirectory(fileManager: FileManager = .default) throws -> URL {
+        guard let cacheDirectory = cacheDirectoryURL(fileManager: fileManager) else {
+            throw StoreError.appGroupContainerUnavailable
+        }
+        try fileManager.createDirectory(
+            at: cacheDirectory,
+            withIntermediateDirectories: true
+        )
+        return cacheDirectory
+    }
+
     static func load(fileManager: FileManager = .default) -> TopShelfSnapshot? {
-        guard let url = containerURL(fileManager: fileManager)?
+        guard let url = cacheDirectoryURL(fileManager: fileManager)?
             .appending(path: snapshotFilename),
               let data = try? Data(contentsOf: url),
               let snapshot = try? JSONDecoder().decode(TopShelfSnapshot.self, from: data),
@@ -37,11 +69,10 @@ enum TopShelfSnapshotStore {
     }
 
     static func save(_ snapshot: TopShelfSnapshot, fileManager: FileManager = .default) throws {
-        guard let container = containerURL(fileManager: fileManager) else { return }
-        try fileManager.createDirectory(at: container, withIntermediateDirectories: true)
+        let cacheDirectory = try prepareCacheDirectory(fileManager: fileManager)
         let data = try JSONEncoder().encode(snapshot)
         try data.write(
-            to: container.appending(path: snapshotFilename),
+            to: cacheDirectory.appending(path: snapshotFilename),
             options: [.atomic]
         )
     }

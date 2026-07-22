@@ -35,7 +35,7 @@ final class TopShelfProvider: TVTopShelfContentProvider {
             item.playAction = action
         }
         if let filename = snapshot.artworkFilename,
-           let imageURL = TopShelfSnapshotStore.containerURL()?.appending(path: filename) {
+           let imageURL = TopShelfSnapshotStore.cacheDirectoryURL()?.appending(path: filename) {
             // Traits are lookup keys, not a set of alternatives. Register
             // both scale variants separately so either Home Screen request
             // resolves to an image.

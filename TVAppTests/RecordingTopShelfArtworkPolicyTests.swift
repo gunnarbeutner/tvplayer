@@ -61,6 +61,20 @@ final class RecordingTopShelfArtworkPolicyTests: XCTestCase {
     }
 }
 
+final class TopShelfSnapshotStoreTests: XCTestCase {
+    func testSharedFilesAreStoredInLibraryCaches() {
+        let container = URL(fileURLWithPath: "/shared/app-group", isDirectory: true)
+
+        let cacheDirectory = TopShelfSnapshotStore.cacheDirectoryURL(for: container)
+
+        XCTAssertEqual(cacheDirectory.path, "/shared/app-group/Library/Caches")
+        XCTAssertEqual(
+            cacheDirectory.appending(path: TopShelfSnapshotStore.snapshotFilename).path,
+            "/shared/app-group/Library/Caches/top-shelf-v1.json"
+        )
+    }
+}
+
 final class TopShelfOnNowPolicyTests: XCTestCase {
     func testSimulcastsAreDeduplicatedBeforeTheLimit() {
         let start = Date(timeIntervalSince1970: 10_000)

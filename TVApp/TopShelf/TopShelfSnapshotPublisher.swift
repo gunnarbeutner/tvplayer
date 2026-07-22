@@ -1,6 +1,7 @@
 #if os(tvOS)
 import CryptoKit
 import Foundation
+import OSLog
 import TVServices
 import UIKit
 
@@ -53,6 +54,11 @@ enum TopShelfOnNowPolicy {
 actor TopShelfSnapshotPublisher {
     static let shared = TopShelfSnapshotPublisher()
 
+    private let logger = Logger(
+        subsystem: "de.beutner.TVPlayer",
+        category: "TopShelf"
+    )
+
     private struct ThumbnailCandidate: Sendable {
         let recording: TVRecording
         let fallbackFilename: String
@@ -68,6 +74,15 @@ actor TopShelfSnapshotPublisher {
         configuration: TVHeadendConfiguration,
         now: Date
     ) async {
+        do {
+            _ = try TopShelfSnapshotStore.prepareCacheDirectory()
+        } catch {
+            logger.error(
+                "Could not prepare the Top Shelf cache: \(error.localizedDescription, privacy: .public)"
+            )
+            return
+        }
+
         let favoriteProgramCandidates = channels
             .filter { favoriteChannelIDs.contains($0.id) }
             .compactMap { channel -> TopShelfOnNowPolicy.Candidate? in
@@ -177,7 +192,9 @@ actor TopShelfSnapshotPublisher {
                 configuration: configuration
             )
         } catch {
-            // Top Shelf is opportunistic and must never block guide refreshes.
+            logger.error(
+                "Could not save the Top Shelf snapshot: \(error.localizedDescription, privacy: .public)"
+            )
         }
     }
 
@@ -267,7 +284,9 @@ actor TopShelfSnapshotPublisher {
             try TopShelfSnapshotStore.save(updated)
             TVTopShelfContentProvider.topShelfContentDidChange()
         } catch {
-            // The next regular publication can retry the cached frame.
+            logger.error(
+                "Could not update the Top Shelf snapshot: \(error.localizedDescription, privacy: .public)"
+            )
         }
     }
 
@@ -277,7 +296,7 @@ actor TopShelfSnapshotPublisher {
         client: TVHeadendClient
     ) async -> String? {
         guard let urlString, let url = URL(string: urlString),
-              let container = TopShelfSnapshotStore.containerURL()
+              let cacheDirectory = TopShelfSnapshotStore.cacheDirectoryURL()
         else { return nil }
 
         let digest = SHA256.hash(data: Data(identifier.utf8))
@@ -288,7 +307,7 @@ actor TopShelfSnapshotPublisher {
             ? pathExtension
             : "jpg"
         let filename = "top-shelf-artwork-\(digest).\(supportedExtension)"
-        let destination = container.appending(path: filename)
+        let destination = cacheDirectory.appending(path: filename)
         if FileManager.default.fileExists(atPath: destination.path) { return filename }
 
         do {
@@ -302,18 +321,20 @@ actor TopShelfSnapshotPublisher {
     }
 
     private func cachedRecordingFrameFilename(for recording: TVRecording) -> String? {
-        guard let container = TopShelfSnapshotStore.containerURL() else { return nil }
+        guard let cacheDirectory = TopShelfSnapshotStore.cacheDirectoryURL() else { return nil }
         let filename = recordingFrameFilename(for: recording)
         return FileManager.default.fileExists(
-            atPath: container.appending(path: filename).path
+            atPath: cacheDirectory.appending(path: filename).path
         ) ? filename : nil
     }
 
     private func storeRecordingFrame(_ data: Data, for recording: TVRecording) -> String? {
-        guard !data.isEmpty, let container = TopShelfSnapshotStore.containerURL() else { return nil }
+        guard !data.isEmpty,
+              let cacheDirectory = TopShelfSnapshotStore.cacheDirectoryURL()
+        else { return nil }
         let filename = recordingFrameFilename(for: recording)
         do {
-            try data.write(to: container.appending(path: filename), options: [.atomic])
+            try data.write(to: cacheDirectory.appending(path: filename), options: [.atomic])
             return filename
         } catch {
             return nil
@@ -337,7 +358,7 @@ actor TopShelfSnapshotPublisher {
         for recording: TVRecording,
         channel: GuideChannel?
     ) -> String? {
-        guard let container = TopShelfSnapshotStore.containerURL() else { return nil }
+        guard let cacheDirectory = TopShelfSnapshotStore.cacheDirectoryURL() else { return nil }
         let identifier = [
             "recording-fallback-v1",
             recording.id,
@@ -346,7 +367,7 @@ actor TopShelfSnapshotPublisher {
             recording.state.rawValue,
         ].joined(separator: "-")
         let filename = "top-shelf-artwork-\(digest(identifier)).jpg"
-        let destination = container.appending(path: filename)
+        let destination = cacheDirectory.appending(path: filename)
         if FileManager.default.fileExists(atPath: destination.path) { return filename }
 
         guard let data = recordingFallbackData(for: recording, channel: channel) else { return nil }
@@ -454,9 +475,9 @@ actor TopShelfSnapshotPublisher {
     }
 
     private func removeUnreferencedArtwork(keeping filenames: Set<String>) {
-        guard let container = TopShelfSnapshotStore.containerURL(),
+        guard let cacheDirectory = TopShelfSnapshotStore.cacheDirectoryURL(),
               let contents = try? FileManager.default.contentsOfDirectory(
-                at: container,
+                at: cacheDirectory,
                 includingPropertiesForKeys: nil
               )
         else { return }
