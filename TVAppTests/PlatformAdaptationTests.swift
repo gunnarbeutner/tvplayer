@@ -89,6 +89,10 @@ final class PlatformAdaptationTests: XCTestCase {
         )
     }
 
+    func testPlayerNavigationUsesSystemSkipInterval() {
+        XCTAssertEqual(PlayerNavigationPolicy.skipInterval, 10)
+    }
+
 #if os(macOS)
     func testMacOSPlayerPlaybackShortcuts() {
         XCTAssertEqual(

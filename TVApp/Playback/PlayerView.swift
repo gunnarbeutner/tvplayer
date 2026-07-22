@@ -22,6 +22,10 @@ enum TimelineSeekCommitPolicy {
     }
 }
 
+enum PlayerNavigationPolicy {
+    static let skipInterval: TimeInterval = 10
+}
+
 enum TimelineScrubbing {
     static func fraction(at x: CGFloat, width: CGFloat) -> Double {
         guard width > 0 else { return 0 }
@@ -170,6 +174,22 @@ struct PlaybackView: View {
                     .onTapGesture(perform: showTimeline)
                     .accessibilityLabel("Show playback timeline")
             }
+
+#if !os(tvOS)
+            if chromeMode != .hidden {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        if chromeMode == .panel {
+                            showTimeline()
+                        } else {
+                            hideChrome()
+                        }
+                    }
+                    .accessibilityHidden(true)
+            }
+#endif
 
             if chromeMode == .timeline {
                 VStack {
@@ -439,7 +459,9 @@ struct PlaybackView: View {
         .platformExitCommand {
             if timelineSeekTargetDate != nil {
                 cancelTimelineSeek()
-            } else if chromeMode != .hidden {
+            } else if chromeMode == .panel {
+                showTimeline()
+            } else if chromeMode == .timeline {
                 hideChrome()
             } else {
                 dismissPlayer()
@@ -447,6 +469,7 @@ struct PlaybackView: View {
         }
 #if os(macOS)
         .onKeyPress(phases: [.down, .repeat]) { keyPress in
+            guard chromeMode != .panel else { return .ignored }
             guard let command = MacOSPlayerKeyboardShortcuts.command(
                 for: keyPress.key,
                 modifiers: keyPress.modifiers
@@ -459,6 +482,14 @@ struct PlaybackView: View {
             perform(command)
             return .handled
         }
+        .onContinuousHover { phase in
+            guard case .active = phase else { return }
+            if chromeMode == .hidden {
+                showTimeline()
+            } else {
+                noteActivity()
+            }
+        }
         .onReceive(
             NotificationCenter.default.publisher(for: .vlcTimeshiftBenchmarkPlayerCommand)
         ) { notification in
@@ -466,6 +497,13 @@ struct PlaybackView: View {
                   let command = notification.object as? MacOSPlayerKeyboardCommand
             else { return }
             perform(command)
+        }
+#endif
+#if os(iOS)
+        .onKeyPress(.space) {
+            guard chromeMode != .panel else { return .ignored }
+            toggleTimelinePlayback()
+            return .handled
         }
 #endif
         .onChange(of: engine.state) { previousState, state in
@@ -746,7 +784,9 @@ struct PlaybackView: View {
         if wasHidden { showTimeline() }
         guard engine.isSeekable else { return true }
 
-        let interval: TimeInterval = direction == .backward ? -15 : 15
+        let interval = direction == .backward
+            ? -PlayerNavigationPolicy.skipInterval
+            : PlayerNavigationPolicy.skipInterval
         if !wasHidden, !stageTimelineSeek(by: interval) { return true }
 
         timelineSeekRepeatTask?.cancel()
@@ -905,8 +945,8 @@ private struct RecordingPlaybackTimeline: View {
                 canPause: true,
                 canSeek: canSeek,
                 usesCompactLayout: usesCompactLayout,
-                seekBackward: { seekBackward(15) },
-                seekForward: { seekForward(15) },
+                seekBackward: { seekBackward(PlayerNavigationPolicy.skipInterval) },
+                seekForward: { seekForward(PlayerNavigationPolicy.skipInterval) },
                 showsGoLive: false,
                 goLive: {},
                 togglePlayback: togglePlayback,
@@ -918,7 +958,7 @@ private struct RecordingPlaybackTimeline: View {
         .focusable()
         .focused($isFocused)
         .focusEffectDisabled()
-        .onTapGesture(perform: togglePlayback)
+        .playerTimelineTapGesture(perform: togglePlayback)
         .platformMoveCommand { direction in
             if direction == .down {
                 showPanel()
@@ -926,8 +966,8 @@ private struct RecordingPlaybackTimeline: View {
             }
             guard canSeek else { return }
             switch direction {
-            case .left: seekBackward(15)
-            case .right: seekForward(15)
+            case .left: seekBackward(PlayerNavigationPolicy.skipInterval)
+            case .right: seekForward(PlayerNavigationPolicy.skipInterval)
             default: break
             }
         }
@@ -995,7 +1035,9 @@ private struct RecordingTimelineBar: View {
         .accessibilityLabel("Playback position")
         .accessibilityValue(playbackTimeLabel(recordingStart.addingTimeInterval(elapsedSeconds)))
         .accessibilityAdjustableAction { direction in
-            let delta: TimeInterval = direction == .increment ? 15 : -15
+            let delta = direction == .increment
+                ? PlayerNavigationPolicy.skipInterval
+                : -PlayerNavigationPolicy.skipInterval
             seek(min(max(0, elapsedSeconds + delta), availableDuration))
         }
     }
@@ -1182,8 +1224,8 @@ private struct ProgrammePlaybackTimeline: View {
                 canPause: canPause,
                 canSeek: canSeek,
                 usesCompactLayout: usesCompactLayout,
-                seekBackward: { seekBackward(15) },
-                seekForward: { seekForward(15) },
+                seekBackward: { seekBackward(PlayerNavigationPolicy.skipInterval) },
+                seekForward: { seekForward(PlayerNavigationPolicy.skipInterval) },
                 showsGoLive: canSeek
                     && liveDate.timeIntervalSince(playbackDate)
                         > NativeTimeshiftActionPlan.liveEdgeTolerance,
@@ -1197,7 +1239,7 @@ private struct ProgrammePlaybackTimeline: View {
         .focusable()
         .focused($isFocused)
         .focusEffectDisabled()
-        .onTapGesture {
+        .playerTimelineTapGesture {
             if canPause { togglePlayback() }
         }
         .platformMoveCommand { direction in
@@ -1207,14 +1249,14 @@ private struct ProgrammePlaybackTimeline: View {
             }
             guard canSeek else { return }
             switch direction {
-            case .left: seekBackward(15)
-            case .right: seekForward(15)
+            case .left: seekBackward(PlayerNavigationPolicy.skipInterval)
+            case .right: seekForward(PlayerNavigationPolicy.skipInterval)
             default: break
             }
         }
         .accessibilityHint(
             canSeek
-                ? "Timeshift is available from \(bufferStartedAt.map(clock) ?? "the start of playback"). Swipe left or right to move 15 seconds"
+                ? "Timeshift is available from \(bufferStartedAt.map(clock) ?? "the start of playback"). Swipe left or right to move 10 seconds"
                 : "Live playback without timeshift"
         )
     }
@@ -1249,7 +1291,7 @@ private struct PlaybackTransportControls: View {
     var body: some View {
         HStack(spacing: usesCompactLayout ? 12 : 18) {
             Button(action: seekBackward) {
-                Label("Back 15 Seconds", systemImage: "gobackward.15")
+                Label("Back 10 Seconds", systemImage: "gobackward.10")
                     .labelStyle(.iconOnly)
                     .frame(width: usesCompactLayout ? 36 : nil, height: usesCompactLayout ? 36 : nil)
             }
@@ -1262,12 +1304,9 @@ private struct PlaybackTransportControls: View {
             }
             .disabled(!canPause)
             .buttonStyle(.borderedProminent)
-#if !os(macOS)
-            .keyboardShortcut(.space, modifiers: [])
-#endif
 
             Button(action: seekForward) {
-                Label("Forward 15 Seconds", systemImage: "goforward.15")
+                Label("Forward 10 Seconds", systemImage: "goforward.10")
                     .labelStyle(.iconOnly)
                     .frame(width: usesCompactLayout ? 36 : nil, height: usesCompactLayout ? 36 : nil)
             }
@@ -1358,7 +1397,9 @@ private struct TimelineBar: View {
         .accessibilityValue(playbackTimeLabel(playbackDate))
         .accessibilityAdjustableAction { direction in
             guard canSeek else { return }
-            let delta: TimeInterval = direction == .increment ? 15 : -15
+            let delta = direction == .increment
+                ? PlayerNavigationPolicy.skipInterval
+                : -PlayerNavigationPolicy.skipInterval
             commitSeek(
                 min(max(playbackDate.addingTimeInterval(delta), availableStart), availableEnd)
             )
@@ -1911,48 +1952,47 @@ private struct PlayerChoiceButton: View {
     @FocusState private var isFocused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack {
-                Text(title)
-                    .font(.headline)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 12)
-                if selected { Image(systemName: "checkmark.circle.fill") }
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    Text(title)
+                        .font(.headline)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 12)
+                    if selected { Image(systemName: "checkmark.circle.fill") }
+                }
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .lineLimit(1)
+                }
             }
-            if let subtitle {
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.7))
-                    .lineLimit(1)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 18)
+            .frame(height: height)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                isFocused
+                    ? AppTheme.focused
+                    : Color.white.opacity(selected ? 0.16 : 0.08),
+                in: RoundedRectangle(cornerRadius: 10)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(
+                        isFocused
+                            ? AppTheme.focusBorder
+                            : (selected ? AppTheme.accent.opacity(0.85) : Color.white.opacity(0.08)),
+                        lineWidth: isFocused ? 3 : (selected ? 2 : 1)
+                    )
             }
+            .contentShape(RoundedRectangle(cornerRadius: 10))
         }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 18)
-        .frame(height: height)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            isFocused
-                ? AppTheme.focused
-                : Color.white.opacity(selected ? 0.16 : 0.08),
-            in: RoundedRectangle(cornerRadius: 10)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(
-                    isFocused
-                        ? AppTheme.focusBorder
-                        : (selected ? AppTheme.accent.opacity(0.85) : Color.white.opacity(0.08)),
-                    lineWidth: isFocused ? 3 : (selected ? 2 : 1)
-                )
-        }
-        .contentShape(RoundedRectangle(cornerRadius: 10))
-        .focusable()
+        .buttonStyle(.plain)
         .focused($isFocused)
         .focusEffectDisabled()
-        .onTapGesture(perform: action)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { action() }
     }
 }
 
@@ -1963,25 +2003,35 @@ private struct PlayerStepButton: View {
     @FocusState private var isFocused: Bool
 
     var body: some View {
-        Image(systemName: systemImage)
-            .font(.headline.bold())
-            .foregroundStyle(.white)
-            .frame(width: 48, height: 38)
-            .background(
-                isFocused ? AppTheme.focused : Color.white.opacity(0.1),
-                in: RoundedRectangle(cornerRadius: 9)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 9)
-                    .strokeBorder(isFocused ? AppTheme.focusBorder : Color.clear, lineWidth: 2)
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 9))
-            .focusable()
-            .focused($isFocused)
-            .focusEffectDisabled()
-            .onTapGesture(perform: action)
-            .accessibilityAddTraits(.isButton)
-            .accessibilityAction { action() }
-            .accessibilityLabel(systemImage == "minus" ? "Decrease delay" : "Increase delay")
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.headline.bold())
+                .foregroundStyle(.white)
+                .frame(width: 48, height: 38)
+                .background(
+                    isFocused ? AppTheme.focused : Color.white.opacity(0.1),
+                    in: RoundedRectangle(cornerRadius: 9)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9)
+                        .strokeBorder(isFocused ? AppTheme.focusBorder : Color.clear, lineWidth: 2)
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 9))
+        }
+        .buttonStyle(.plain)
+        .focused($isFocused)
+        .focusEffectDisabled()
+        .accessibilityLabel(systemImage == "minus" ? "Decrease delay" : "Increase delay")
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func playerTimelineTapGesture(perform action: @escaping () -> Void) -> some View {
+#if os(tvOS)
+        onTapGesture(perform: action)
+#else
+        self
+#endif
     }
 }
