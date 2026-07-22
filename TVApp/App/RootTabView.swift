@@ -249,18 +249,20 @@ struct RootTabView: View {
             await handle(route)
             if pendingRoute == route { pendingRoute = nil }
         }
-#if os(tvOS)
         .onAppear {
+#if os(tvOS)
             TVRemoteCommandCenter.pageHandler = handlePageCommand
             TVRemoteCommandCenter.playPauseHandler = handlePlayPauseCommand
+#endif
             NowPlayingCoordinator.shared.connect(to: playback)
         }
         .onDisappear {
+#if os(tvOS)
             TVRemoteCommandCenter.pageHandler = nil
             TVRemoteCommandCenter.playPauseHandler = nil
+#endif
             NowPlayingCoordinator.shared.disconnect()
         }
-#endif
         .onChange(of: selection) { _, tab in
             guard tab == .recordings else { return }
             Task { await recordings.load(configuration: settings.configuration, force: true) }

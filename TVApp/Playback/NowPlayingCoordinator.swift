@@ -1,20 +1,26 @@
-#if os(tvOS)
-import AVFAudio
+#if os(tvOS) || os(iOS) || os(macOS)
 import Combine
 import MediaPlayer
+#if os(tvOS) || os(iOS)
+import AVFAudio
 import UIKit
+private typealias NowPlayingImage = UIImage
+#else
+import AppKit
+private typealias NowPlayingImage = NSImage
+#endif
 
 // MediaPlayer invokes an artwork request handler on its own callout queue.
 // Keep that callback free of MainActor isolation even though the coordinator
 // itself is main-actor bound.
 private final class NowPlayingArtworkProvider: @unchecked Sendable {
-    private let image: UIImage
+    private let image: NowPlayingImage
 
-    init(image: UIImage) {
+    init(image: NowPlayingImage) {
         self.image = image
     }
 
-    func image(for _: CGSize) -> UIImage {
+    func image(for _: CGSize) -> NowPlayingImage {
         image
     }
 }
@@ -37,8 +43,10 @@ final class NowPlayingCoordinator {
         disconnect()
         self.playback = playback
 
+#if os(tvOS) || os(iOS)
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         try? AVAudioSession.sharedInstance().setActive(true)
+#endif
 
         playback.objectWillChange
             .merge(with: playback.engine.objectWillChange)
@@ -67,18 +75,33 @@ final class NowPlayingCoordinator {
 
     private func installCommands() {
         let center = MPRemoteCommandCenter.shared()
-        center.skipForwardCommand.preferredIntervals = [15]
+        center.skipForwardCommand.preferredIntervals = [
+            NSNumber(value: PlayerNavigationPolicy.skipInterval)
+        ]
         add(center.skipForwardCommand) { [weak self] event in
             guard let engine = self?.playback?.engine, engine.isSeekable else { return .commandFailed }
-            let interval = (event as? MPSkipIntervalCommandEvent)?.interval ?? 15
+            let interval = (event as? MPSkipIntervalCommandEvent)?.interval
+                ?? PlayerNavigationPolicy.skipInterval
             _ = engine.skipForward(by: interval)
             return .success
         }
-        center.skipBackwardCommand.preferredIntervals = [15]
+        center.skipBackwardCommand.preferredIntervals = [
+            NSNumber(value: PlayerNavigationPolicy.skipInterval)
+        ]
         add(center.skipBackwardCommand) { [weak self] event in
             guard let engine = self?.playback?.engine, engine.isSeekable else { return .commandFailed }
-            let interval = (event as? MPSkipIntervalCommandEvent)?.interval ?? 15
+            let interval = (event as? MPSkipIntervalCommandEvent)?.interval
+                ?? PlayerNavigationPolicy.skipInterval
             engine.skipBackward(by: interval)
+            return .success
+        }
+        add(center.changePlaybackPositionCommand) { [weak self] event in
+            guard let playback = self?.playback,
+                  playback.presentation?.isRecording == true,
+                  playback.engine.isSeekable,
+                  let event = event as? MPChangePlaybackPositionCommandEvent
+            else { return .commandFailed }
+            playback.engine.seek(to: event.positionTime)
             return .success
         }
 
@@ -87,7 +110,11 @@ final class NowPlayingCoordinator {
     }
 
     private func ownsTransportCommands(_ playback: PlaybackCoordinator) -> Bool {
+#if os(tvOS)
         playback.isPlayerPresented || playback.pictureInPicture.isActive
+#else
+        playback.isPlayerPresented
+#endif
     }
 
     private func installTransportCommandsIfNeeded() {
@@ -127,9 +154,13 @@ final class NowPlayingCoordinator {
     }
 
     private func handleContextualPlayPauseCommand() -> MPRemoteCommandHandlerStatus {
+#if os(tvOS)
         TVRemoteCommandCenter.playPauseHandler?() == true
             ? .success
             : .noActionableNowPlayingItem
+#else
+        .noActionableNowPlayingItem
+#endif
     }
 
     private func removeTransportCommands() {
@@ -146,6 +177,7 @@ final class NowPlayingCoordinator {
             center.togglePlayPauseCommand.isEnabled = false
             center.skipForwardCommand.isEnabled = false
             center.skipBackwardCommand.isEnabled = false
+            center.changePlaybackPositionCommand.isEnabled = false
             return
         }
 
@@ -156,6 +188,7 @@ final class NowPlayingCoordinator {
             center.togglePlayPauseCommand.isEnabled = true
             center.skipForwardCommand.isEnabled = false
             center.skipBackwardCommand.isEnabled = false
+            center.changePlaybackPositionCommand.isEnabled = false
             return
         }
 
@@ -165,6 +198,8 @@ final class NowPlayingCoordinator {
         center.togglePlayPauseCommand.isEnabled = true
         center.skipForwardCommand.isEnabled = playback.engine.isSeekable
         center.skipBackwardCommand.isEnabled = playback.engine.isSeekable
+        center.changePlaybackPositionCommand.isEnabled = playback.engine.isSeekable
+            && playback.presentation?.isRecording == true
     }
 
     private func add(
@@ -259,7 +294,7 @@ final class NowPlayingCoordinator {
         artworkTask = Task { [weak self] in
             guard let (data, _) = try? await URLSession.shared.data(from: url),
                   !Task.isCancelled,
-                  let image = UIImage(data: data)
+                  let image = NowPlayingImage(data: data)
             else { return }
             await MainActor.run {
                 guard let self, self.artworkURL == url else { return }

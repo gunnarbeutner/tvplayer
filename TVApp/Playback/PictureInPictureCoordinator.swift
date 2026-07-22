@@ -8,9 +8,7 @@ final class PictureInPictureCoordinator: NSObject,
     @preconcurrency AVPictureInPictureControllerDelegate,
     @preconcurrency AVPictureInPictureSampleBufferPlaybackDelegate
 {
-    // Keep the implementation wired in while PiP is temporarily unavailable.
-    // Flip this flag to restore the control and controller setup.
-    private static let isFeatureEnabled = false
+    private static let isFeatureEnabled = true
 
     private weak var playback: PlaybackCoordinator?
     private let engine: VLCPlaybackEngine
