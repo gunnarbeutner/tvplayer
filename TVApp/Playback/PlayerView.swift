@@ -1218,26 +1218,12 @@ private struct ProgrammePlaybackTimeline: View {
 
                 Group {
                     if usesCompactLayout {
-                        HStack(spacing: 10) {
-                            Text("\(clock(program.start))–\(clock(program.end))")
-                            Spacer(minLength: 8)
-                            if canSeek, bufferStartedAt != nil {
-                                Label("Timeshift", systemImage: "clock.arrow.circlepath")
-                                    .foregroundStyle(AppTheme.accent)
-                            }
-                        }
+                        Text("\(clock(program.start))–\(clock(program.end))")
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
                         HStack {
                             Text("\(clock(program.start))–\(clock(program.end))")
                             Spacer()
-                            if canSeek, let bufferStartedAt {
-                                Label(
-                                    "Timeshift from \(clock(bufferStartedAt))",
-                                    systemImage: "clock.arrow.circlepath"
-                                )
-                                .foregroundStyle(AppTheme.accent)
-                                Spacer()
-                            }
                             if let next { Text("Next · \(clock(next.start))") }
                         }
                     }
