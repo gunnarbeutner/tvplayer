@@ -89,6 +89,7 @@ actor TopShelfSnapshotPublisher {
                 return $0.start > $1.start
             }
             .prefix(12)
+        let artworkClient = TVHeadendClient(configuration: configuration)
 
         var referencedArtwork = Set<String>()
         var onNowItems: [TopShelfSnapshot.Item] = []
@@ -96,7 +97,7 @@ actor TopShelfSnapshotPublisher {
             let filename = await cacheArtwork(
                 urlString: program.metadata.imageURL,
                 identifier: "channel-\(channel.id)-\(program.id)",
-                configuration: configuration
+                client: artworkClient
             )
             if let filename { referencedArtwork.insert(filename) }
             onNowItems.append(
@@ -124,7 +125,7 @@ actor TopShelfSnapshotPublisher {
             let guideArtworkFilename = await cacheArtwork(
                 urlString: matchingProgram?.metadata.imageURL,
                 identifier: "recording-\(recording.id)",
-                configuration: configuration
+                client: artworkClient
             )
             let channel = channels.first {
                 $0.id == recording.channelID || $0.name == recording.channelName
@@ -273,7 +274,7 @@ actor TopShelfSnapshotPublisher {
     private func cacheArtwork(
         urlString: String?,
         identifier: String,
-        configuration: TVHeadendConfiguration
+        client: TVHeadendClient
     ) async -> String? {
         guard let urlString, let url = URL(string: urlString),
               let container = TopShelfSnapshotStore.containerURL()
@@ -290,21 +291,9 @@ actor TopShelfSnapshotPublisher {
         let destination = container.appending(path: filename)
         if FileManager.default.fileExists(atPath: destination.path) { return filename }
 
-        var request = URLRequest(url: url)
-        if let baseURL = configuration.baseURL,
-           url.scheme?.lowercased() == baseURL.scheme?.lowercased(),
-           url.host?.lowercased() == baseURL.host?.lowercased(),
-           configuration.usesAuthentication {
-            let credentials = Data("\(configuration.username):\(configuration.password)".utf8)
-                .base64EncodedString()
-            request.setValue("Basic \(credentials)", forHTTPHeaderField: "Authorization")
-        }
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let response = response as? HTTPURLResponse,
-                  (200..<300).contains(response.statusCode),
-                  !data.isEmpty
-            else { return nil }
+            let data = try await client.fetchChannelIcon(at: url)
+            guard !data.isEmpty else { return nil }
             try data.write(to: destination, options: [.atomic])
             return filename
         } catch {
