@@ -58,6 +58,31 @@ struct SettingsView: View {
 
                     Divider()
 
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text("PLAYBACK")
+                            .font(.caption.bold())
+                            .tracking(2.2)
+                            .foregroundStyle(AppTheme.accent)
+
+                        SettingsField(
+                            title: "Commercial detection",
+                            hint: commercialDetectionHint
+                        ) {
+                            Picker(
+                                "Commercial detection",
+                                selection: $playback.commercialDetectionMode
+                            ) {
+                                ForEach(CommercialDetectionMode.allCases) { mode in
+                                    Text(mode.title).tag(mode)
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
+                        }
+                    }
+
+                    Divider()
+
                     Text(settings.isAddingServer ? "Add server" : "Edit server")
                         .font(.title2.bold())
 
@@ -207,6 +232,17 @@ struct SettingsView: View {
                     focusedControl = .serverURL
                 }
             }
+        }
+    }
+
+    private var commercialDetectionHint: String {
+        switch playback.commercialDetectionMode {
+        case .automatic:
+            "Uses a second live stream on normal networks and pauses on constrained, cellular, or metered connections."
+        case .always:
+            "Always analyzes a second live stream, including on cellular or metered connections."
+        case .off:
+            "Does not analyze live video for commercial markers."
         }
     }
 

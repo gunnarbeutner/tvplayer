@@ -5,6 +5,39 @@ import XCTest
 final class CommercialDetectionTests: XCTestCase {
     private let start = Date(timeIntervalSinceReferenceDate: 100_000)
 
+    func testAutomaticPolicyAvoidsExpensiveAndConstrainedNetworks() {
+        XCTAssertTrue(CommercialDetectionPolicy.isAllowed(
+            mode: .automatic,
+            network: network()
+        ))
+        XCTAssertFalse(CommercialDetectionPolicy.isAllowed(
+            mode: .automatic,
+            network: network(isExpensive: true)
+        ))
+        XCTAssertFalse(CommercialDetectionPolicy.isAllowed(
+            mode: .automatic,
+            network: network(isConstrained: true)
+        ))
+    }
+
+    func testAlwaysPolicyStillRequiresAConnectedNetwork() {
+        XCTAssertTrue(CommercialDetectionPolicy.isAllowed(
+            mode: .always,
+            network: network(isExpensive: true, isConstrained: true)
+        ))
+        XCTAssertFalse(CommercialDetectionPolicy.isAllowed(
+            mode: .always,
+            network: network(isConnected: false)
+        ))
+    }
+
+    func testOffPolicyNeverStartsAnalysis() {
+        XCTAssertFalse(CommercialDetectionPolicy.isAllowed(
+            mode: .off,
+            network: network()
+        ))
+    }
+
     func testCommercialIsPublishedOnlyAfterConfirmationAndBackdated() {
         var detector = learnedDetector()
 
@@ -259,6 +292,18 @@ final class CommercialDetectionTests: XCTestCase {
 
     private func date(_ seconds: Int) -> Date {
         start.addingTimeInterval(TimeInterval(seconds))
+    }
+
+    private func network(
+        isConnected: Bool = true,
+        isExpensive: Bool = false,
+        isConstrained: Bool = false
+    ) -> CommercialDetectionNetworkConditions {
+        CommercialDetectionNetworkConditions(
+            isConnected: isConnected,
+            isExpensive: isExpensive,
+            isConstrained: isConstrained
+        )
     }
 
     private func frame(

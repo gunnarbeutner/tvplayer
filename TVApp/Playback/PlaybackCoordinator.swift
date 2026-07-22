@@ -98,6 +98,7 @@ final class PlaybackCoordinator: ObservableObject {
     }
 
     private static let livePrefetchLifetime: TimeInterval = 8
+    private static let commercialDetectionModeKey = "commercialDetectionMode"
     private let logger = Logger(subsystem: "de.beutner.TVPlayer", category: "PlaybackCoordinator")
     @Published var presentation: PlaybackPresentation? {
         didSet { synchronizeCommercialAnalysis() }
@@ -110,6 +111,14 @@ final class PlaybackCoordinator: ObservableObject {
     @Published private(set) var focusReturnRevision = 0
     @Published private(set) var isUserInitiatedPlayback = false
     @Published private(set) var commercialBreaks: [CommercialBreak] = []
+    @Published var commercialDetectionMode: CommercialDetectionMode {
+        didSet {
+            defaults.set(commercialDetectionMode.rawValue, forKey: Self.commercialDetectionModeKey)
+            synchronizeCommercialAnalysis(forceRestart: true)
+        }
+    }
+    @Published private(set) var commercialDetectionNetworkConditions =
+        CommercialDetectionNetworkConditions.unknown
     let engine: VLCPlaybackEngine
     let commercialAnalyzer: CommercialLiveAnalyzer
 #if os(tvOS)
@@ -127,6 +136,8 @@ final class PlaybackCoordinator: ObservableObject {
     private var playbackClient: TVHeadendClient?
     private var playbackClientConfiguration: TVHeadendConfiguration?
     private var commercialAnalysisStartTask: Task<Void, Never>?
+    private let defaults: UserDefaults
+    private let commercialNetworkMonitor: CommercialDetectionNetworkMonitor
     private var liveChannelOrder: [GuideChannel] = []
     private var liveChannelOrderConfiguration: TVHeadendConfiguration?
     private var predictsForwardChannel = true
@@ -140,9 +151,17 @@ final class PlaybackCoordinator: ObservableObject {
     private var foregroundResumeTask: Task<Void, Never>?
 #endif
 
-    init() {
+    init(
+        defaults: UserDefaults = .standard,
+        commercialNetworkMonitor: CommercialDetectionNetworkMonitor =
+            CommercialDetectionNetworkMonitor()
+    ) {
         let engine = VLCPlaybackEngine()
         let commercialAnalyzer = CommercialLiveAnalyzer()
+        self.defaults = defaults
+        self.commercialNetworkMonitor = commercialNetworkMonitor
+        commercialDetectionMode = defaults.string(forKey: Self.commercialDetectionModeKey)
+            .flatMap(CommercialDetectionMode.init(rawValue:)) ?? .automatic
         self.engine = engine
         self.commercialAnalyzer = commercialAnalyzer
 #if os(tvOS)
@@ -151,6 +170,15 @@ final class PlaybackCoordinator: ObservableObject {
 #endif
         commercialAnalyzer.breaksChanged = { [weak self] breaks in
             self?.commercialBreaks = breaks
+        }
+        commercialNetworkMonitor.start { [weak self] conditions in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.commercialDetectionNetworkConditions != conditions
+                else { return }
+                self.commercialDetectionNetworkConditions = conditions
+                self.synchronizeCommercialAnalysis(forceRestart: true)
+            }
         }
     }
 
@@ -735,6 +763,16 @@ final class PlaybackCoordinator: ObservableObject {
         else {
             commercialAnalyzer.stop(resetMarkers: true)
             commercialBreaks = []
+            return
+        }
+        let changesChannel = commercialAnalyzer.channelID != nil
+            && commercialAnalyzer.channelID != presentation.channel.id
+        guard CommercialDetectionPolicy.isAllowed(
+            mode: commercialDetectionMode,
+            network: commercialDetectionNetworkConditions
+        ) else {
+            commercialAnalyzer.stop(resetMarkers: changesChannel)
+            if changesChannel { commercialBreaks = [] }
             return
         }
         if !forceRestart, commercialAnalyzer.channelID == presentation.channel.id { return }

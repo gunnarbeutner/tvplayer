@@ -2,8 +2,80 @@ import Combine
 import CoreGraphics
 import Foundation
 import ImageIO
+import Network
 import OSLog
 @preconcurrency import VLCKit
+
+enum CommercialDetectionMode: String, CaseIterable, Identifiable, Sendable {
+    case automatic
+    case always
+    case off
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .automatic: "Automatic"
+        case .always: "Always"
+        case .off: "Off"
+        }
+    }
+}
+
+struct CommercialDetectionNetworkConditions: Equatable, Sendable {
+    var isConnected: Bool
+    var isExpensive: Bool
+    var isConstrained: Bool
+
+    static let unknown = CommercialDetectionNetworkConditions(
+        isConnected: false,
+        isExpensive: false,
+        isConstrained: false
+    )
+}
+
+enum CommercialDetectionPolicy {
+    static func isAllowed(
+        mode: CommercialDetectionMode,
+        network: CommercialDetectionNetworkConditions
+    ) -> Bool {
+        guard network.isConnected else { return false }
+        switch mode {
+        case .automatic:
+            return !network.isExpensive && !network.isConstrained
+        case .always:
+            return true
+        case .off:
+            return false
+        }
+    }
+}
+
+final class CommercialDetectionNetworkMonitor: @unchecked Sendable {
+    private let monitor: NWPathMonitor
+    private let queue = DispatchQueue(label: "de.beutner.TVPlayer.CommercialNetwork")
+
+    init(monitor: NWPathMonitor = NWPathMonitor()) {
+        self.monitor = monitor
+    }
+
+    func start(
+        update: @escaping @Sendable (CommercialDetectionNetworkConditions) -> Void
+    ) {
+        monitor.pathUpdateHandler = { path in
+            update(CommercialDetectionNetworkConditions(
+                isConnected: path.status == .satisfied,
+                isExpensive: path.isExpensive,
+                isConstrained: path.isConstrained
+            ))
+        }
+        monitor.start(queue: queue)
+    }
+
+    deinit {
+        monitor.cancel()
+    }
+}
 
 struct CommercialBreak: Identifiable, Equatable, Sendable {
     let id: UUID
