@@ -9,14 +9,17 @@ final class TopShelfProvider: TVTopShelfContentProvider {
             return
         }
 
+        let now = Date()
+        let onNow = snapshot.availableOnNowItems(at: now)
         var sections: [TVTopShelfItemCollection<TVTopShelfSectionedItem>] = []
-        if !snapshot.onNow.isEmpty {
-            let section = TVTopShelfItemCollection(items: snapshot.onNow.map(makeItem))
+        if !onNow.isEmpty {
+            let section = TVTopShelfItemCollection(items: onNow.map(makeItem))
             section.title = "On Now"
             sections.append(section)
         }
-        if !snapshot.recordings.isEmpty {
-            let section = TVTopShelfItemCollection(items: snapshot.recordings.map(makeItem))
+        let recordings = snapshot.recordings.filter { $0.isAvailable(at: now) }
+        if !recordings.isEmpty {
+            let section = TVTopShelfItemCollection(items: recordings.map(makeItem))
             section.title = "Recordings"
             sections.append(section)
         }
@@ -27,7 +30,7 @@ final class TopShelfProvider: TVTopShelfContentProvider {
         let item = TVTopShelfSectionedItem(identifier: snapshot.id)
         item.title = snapshot.title
         item.imageShape = .hdtv
-        item.expirationDate = snapshot.expirationDate
+        item.expirationDate = snapshot.topShelfExpirationDate
         item.playbackProgress = snapshot.playbackProgress ?? 0
         if let route = URL(string: snapshot.routeURL) {
             let action = TVTopShelfAction(url: route)

@@ -80,6 +80,107 @@ final class TopShelfSnapshotStoreTests: XCTestCase {
         )
         XCTAssertNil(TopShelfSnapshotStore.cachedArtworkURL(for: "unrelated-image.jpg"))
     }
+
+    func testAvailableOnNowItemsExcludeExpiredAndFuturePrograms() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let snapshot = TopShelfSnapshot(
+            version: 1,
+            generatedAt: now,
+            onNow: [
+                item(id: "expired", start: now.addingTimeInterval(-120), end: now),
+                item(
+                    id: "current",
+                    start: now.addingTimeInterval(-60),
+                    end: now.addingTimeInterval(180)
+                ),
+                item(
+                    id: "future",
+                    start: now.addingTimeInterval(60),
+                    end: now.addingTimeInterval(120)
+                ),
+            ],
+            recordings: []
+        )
+
+        XCTAssertEqual(snapshot.availableOnNowItems(at: now).map(\.id), ["current"])
+    }
+
+    func testOnNowItemRetiresBeforeItsProgrammeActuallyExpires() {
+        let now = Date(timeIntervalSince1970: 15_000)
+        let item = item(
+            id: "ending",
+            start: now.addingTimeInterval(-1_800),
+            end: now.addingTimeInterval(60)
+        )
+        let snapshot = TopShelfSnapshot(
+            version: 1,
+            generatedAt: now,
+            onNow: [item],
+            recordings: []
+        )
+
+        XCTAssertTrue(item.isAvailable(at: now))
+        XCTAssertFalse(item.isPresentableOnTopShelf(at: now))
+        XCTAssertTrue(snapshot.availableOnNowItems(at: now).isEmpty)
+    }
+
+    func testLegacySnapshotItemsDecodeWithoutSchedulingFields() throws {
+        let data = Data(#"""
+        {
+          "id": "legacy",
+          "title": "Legacy item",
+          "routeURL": "tvplayer://channel/legacy",
+          "artworkFilename": null,
+          "expirationDate": null,
+          "playbackProgress": null
+        }
+        """#.utf8)
+
+        let item = try JSONDecoder().decode(TopShelfSnapshot.Item.self, from: data)
+
+        XCTAssertNil(item.availabilityDate)
+        XCTAssertNil(item.contentIdentifier)
+        XCTAssertTrue(item.isAvailable(at: Date()))
+    }
+
+    func testAvailableOnNowItemsDeduplicateChannelsAndSimulcasts() {
+        let now = Date(timeIntervalSince1970: 20_000)
+        let end = now.addingTimeInterval(60)
+        let snapshot = TopShelfSnapshot(
+            version: 1,
+            generatedAt: now,
+            onNow: [
+                item(id: "first", start: now, end: end, contentIdentifier: "episode:one"),
+                item(id: "second", start: now, end: end, contentIdentifier: "episode:one"),
+                item(id: "first", start: now, end: end, contentIdentifier: "episode:two"),
+                item(id: "third", start: now, end: end, contentIdentifier: "episode:three"),
+            ],
+            recordings: []
+        )
+
+        XCTAssertEqual(
+            snapshot.availableOnNowItems(at: now).map(\.id),
+            ["first", "third"]
+        )
+    }
+
+    private func item(
+        id: String,
+        start: Date,
+        end: Date,
+        contentIdentifier: String? = nil
+    ) -> TopShelfSnapshot.Item {
+        TopShelfSnapshot.Item(
+            id: id,
+            title: id,
+            routeURL: "tvplayer://channel/\(id)",
+            artworkFilename: nil,
+            availabilityDate: start,
+            expirationDate: end,
+            playbackProgress: nil,
+            contentIdentifier: contentIdentifier
+        )
+    }
 }
 
 final class TopShelfOnNowPolicyTests: XCTestCase {

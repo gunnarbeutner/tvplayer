@@ -44,6 +44,15 @@ enum TopShelfOnNowPolicy {
         )
     }
 
+    static func contentIdentifier(for program: GuideProgram) -> String {
+        switch identity(for: program) {
+        case let .episode(identifier):
+            return "episode:\(identifier)"
+        case let .schedule(title, subtitle, start, end):
+            return "schedule:\(title)|\(subtitle)|\(start.timeIntervalSince1970)|\(end.timeIntervalSince1970)"
+        }
+    }
+
     private static func normalized(_ value: String) -> String {
         value.split(whereSeparator: \Character.isWhitespace)
             .joined(separator: " ")
@@ -83,18 +92,18 @@ actor TopShelfSnapshotPublisher {
             return
         }
 
+        // Keep a small rolling schedule in the shared snapshot. The Top Shelf
+        // extension can then select the programme airing when tvOS next asks
+        // for content, even if the main app has been suspended in the meantime.
         let favoriteProgramCandidates = channels
             .filter { favoriteChannelIDs.contains($0.id) }
-            .compactMap { channel -> TopShelfOnNowPolicy.Candidate? in
-                guard let program = channel.programs.first(where: { $0.isAiring(at: now) }) else {
-                    return nil
-                }
-                return (channel: channel, program: program)
+            .flatMap { channel in
+                channel.programs
+                    .lazy
+                    .filter { $0.end > now }
+                    .prefix(3)
+                    .map { (channel: channel, program: $0) }
             }
-        let favoritePrograms = TopShelfOnNowPolicy.uniquePrograms(
-            from: favoriteProgramCandidates,
-            limit: 12
-        )
 
         let playableRecordings = recordings
             .filter(\.isPlayable)
@@ -108,7 +117,7 @@ actor TopShelfSnapshotPublisher {
 
         var referencedArtwork = Set<String>()
         var onNowItems: [TopShelfSnapshot.Item] = []
-        for (channel, program) in favoritePrograms {
+        for (channel, program) in favoriteProgramCandidates {
             let filename = await cacheArtwork(
                 urlString: program.metadata.imageURL,
                 identifier: "channel-\(channel.id)-\(program.id)",
@@ -127,8 +136,10 @@ actor TopShelfSnapshotPublisher {
                         )
                     ).url.absoluteString,
                     artworkFilename: filename,
+                    availabilityDate: program.start,
                     expirationDate: program.end,
-                    playbackProgress: nil
+                    playbackProgress: nil,
+                    contentIdentifier: TopShelfOnNowPolicy.contentIdentifier(for: program)
                 )
             )
         }
