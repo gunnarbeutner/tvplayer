@@ -190,6 +190,41 @@ final class ServerSettingsStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testConnectionResultIsDiscardedWhenTheSameProfileDraftChanges() async throws {
+        let requestStarted = expectation(description: "Connection test started")
+        var continuation: CheckedContinuation<TVHeadendServerInfo, Never>?
+        let serverInfo = try JSONDecoder().decode(
+            TVHeadendServerInfo.self,
+            from: Data(#"{"name":"TVHeadend","capabilities":[]}"#.utf8)
+        )
+        let store = ServerSettingsStore(
+            defaults: defaults,
+            keychain: keychain,
+            sharedConfiguration: nil,
+            environment: [:],
+            startsDiscovery: false,
+            automaticallyTestsConnections: false,
+            serverInfoLoader: { _ in
+                requestStarted.fulfill()
+                return await withCheckedContinuation { continuation = $0 }
+            }
+        )
+        store.baseURLText = "http://old.test:9981"
+        try store.save()
+        let profileID = store.editingProfileID
+
+        let test = Task { await store.testConnection() }
+        await fulfillment(of: [requestStarted], timeout: 1)
+        store.baseURLText = "http://new.test:9981"
+        continuation?.resume(returning: serverInfo)
+        await test.value
+
+        XCTAssertEqual(store.editingProfileID, profileID)
+        XCTAssertEqual(store.connectionStatus, .notTested)
+        XCTAssertEqual(store.timeshiftStatus, .notTested)
+    }
+
+    @MainActor
     private func makeStore() -> ServerSettingsStore {
         ServerSettingsStore(
             defaults: defaults,

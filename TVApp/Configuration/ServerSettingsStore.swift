@@ -16,6 +16,9 @@ enum TVHeadendTimeshiftStatus: Equatable {
 
 @MainActor
 final class ServerSettingsStore: ObservableObject {
+    typealias ServerInfoLoader = @MainActor (TVHeadendConfiguration) async throws -> TVHeadendServerInfo
+    typealias TimeshiftProbe = @MainActor (TVHeadendConfiguration) async throws -> Void
+
     private struct StoredPayload: Codable {
         var version = 1
         var profiles: [TVHeadendServerProfile]
@@ -57,11 +60,14 @@ final class ServerSettingsStore: ObservableObject {
     private let keychain: any PasswordStoring
     private let sharedConfiguration: SharedTVHeadendConfigurationStore?
     private let automaticallyTestsConnections: Bool
+    private let serverInfoLoader: ServerInfoLoader
+    private let timeshiftProbe: TimeshiftProbe
     private var passwords: [String: String] = [:]
     private var discovery: TVHeadendDiscovery?
     private var latestDiscoveryByProfileID: [String: DiscoveredTVHeadendService] = [:]
     private var profileIDByServiceIdentity: [String: String] = [:]
     private var isLoadingDraft = false
+    private var connectionTestGeneration = 0
 
     init(
         defaults: UserDefaults = .standard,
@@ -69,12 +75,20 @@ final class ServerSettingsStore: ObservableObject {
         sharedConfiguration: SharedTVHeadendConfigurationStore? = SharedTVHeadendConfigurationStore(),
         environment: [String: String] = ProcessInfo.processInfo.environment,
         startsDiscovery: Bool = true,
-        automaticallyTestsConnections: Bool = true
+        automaticallyTestsConnections: Bool = true,
+        serverInfoLoader: @escaping ServerInfoLoader = {
+            try await TVHeadendClient(configuration: $0).serverInfo()
+        },
+        timeshiftProbe: @escaping TimeshiftProbe = {
+            try await HTSPConnection.probe(configuration: $0)
+        }
     ) {
         self.defaults = defaults
         self.keychain = keychain
         self.sharedConfiguration = sharedConfiguration
         self.automaticallyTestsConnections = automaticallyTestsConnections
+        self.serverInfoLoader = serverInfoLoader
+        self.timeshiftProbe = timeshiftProbe
 
         if let data = defaults.data(forKey: Self.storageKey),
            let payload = try? JSONDecoder().decode(StoredPayload.self, from: data),
@@ -297,14 +311,22 @@ final class ServerSettingsStore: ObservableObject {
     }
 
     func testConnection() async {
+        connectionTestGeneration &+= 1
+        let testGeneration = connectionTestGeneration
         let testedProfileID = editingProfileID
+        var testedConfiguration: TVHeadendConfiguration?
         connectionStatus = .checking
         timeshiftStatus = .checking
         do {
             let configuration = try validatedDraft()
+            testedConfiguration = configuration
             guard configuration.isComplete else { throw TVProviderError.incompleteConfiguration }
-            let info = try await TVHeadendClient(configuration: configuration).serverInfo()
-            guard editingProfileID == testedProfileID else { return }
+            let info = try await serverInfoLoader(configuration)
+            guard isCurrentConnectionTest(
+                testGeneration,
+                profileID: testedProfileID,
+                configuration: configuration
+            ) else { return }
             let version = [info.name, info.version].compactMap { $0 }.joined(separator: " ")
             connectionStatus = .connected(version)
             guard info.capabilities.contains("timeshift") else {
@@ -312,20 +334,42 @@ final class ServerSettingsStore: ObservableObject {
                 return
             }
             do {
-                try await HTSPConnection.probe(configuration: configuration)
-                guard editingProfileID == testedProfileID else { return }
+                try await timeshiftProbe(configuration)
+                guard isCurrentConnectionTest(
+                    testGeneration,
+                    profileID: testedProfileID,
+                    configuration: configuration
+                ) else { return }
                 timeshiftStatus = .ready
             } catch is CancellationError {
+                guard isCurrentConnectionTest(
+                    testGeneration,
+                    profileID: testedProfileID,
+                    configuration: configuration
+                ) else { return }
                 timeshiftStatus = .notTested
             } catch {
-                guard editingProfileID == testedProfileID else { return }
+                guard isCurrentConnectionTest(
+                    testGeneration,
+                    profileID: testedProfileID,
+                    configuration: configuration
+                ) else { return }
                 timeshiftStatus = .unavailable(error.localizedDescription)
             }
         } catch is CancellationError {
+            guard isCurrentConnectionTest(
+                testGeneration,
+                profileID: testedProfileID,
+                configuration: testedConfiguration
+            ) else { return }
             connectionStatus = .notTested
             timeshiftStatus = .notTested
         } catch {
-            guard editingProfileID == testedProfileID else { return }
+            guard isCurrentConnectionTest(
+                testGeneration,
+                profileID: testedProfileID,
+                configuration: testedConfiguration
+            ) else { return }
             connectionStatus = .failed(error.localizedDescription)
             timeshiftStatus = .unavailable("Server connection failed")
         }
@@ -471,8 +515,21 @@ final class ServerSettingsStore: ObservableObject {
     }
 
     private func invalidateConnectionStatus() {
+        connectionTestGeneration &+= 1
         connectionStatus = .notTested
         timeshiftStatus = .notTested
+    }
+
+    private func isCurrentConnectionTest(
+        _ generation: Int,
+        profileID: String?,
+        configuration: TVHeadendConfiguration?
+    ) -> Bool {
+        guard generation == connectionTestGeneration,
+              editingProfileID == profileID
+        else { return false }
+        guard let configuration else { return true }
+        return (try? validatedDraft()) == configuration
     }
 
     private func scheduleConnectionTest() {
