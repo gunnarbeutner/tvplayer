@@ -362,8 +362,12 @@ final class CachedAddressProxy: @unchecked Sendable {
                       sendAll(Data(buffer[0..<count]), to: destination)
                 else { return }
             }
+            // A peer can close immediately after writing, producing POLLIN
+            // and POLLHUP together. Drain the readable bytes before treating
+            // the hangup as terminal or large HTTP responses are truncated.
             if descriptors.contains(where: {
-                $0.revents & Int16(POLLERR | POLLHUP | POLLNVAL) != 0
+                $0.revents & Int16(POLLIN) == 0
+                    && $0.revents & Int16(POLLERR | POLLHUP | POLLNVAL) != 0
             }) { return }
         }
     }

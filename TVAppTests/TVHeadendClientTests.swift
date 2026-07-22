@@ -158,6 +158,36 @@ final class TVHeadendClientTests: XCTestCase {
         ))
     }
 
+    func testCachedAddressProxyDrainsResponseBeforeHandlingHangup() throws {
+        let responseBody = Data(repeating: 0x41, count: 256 * 1_024)
+        let origin = try ProxyTestOriginServer(responseBody: responseBody)
+        let logicalHost = "cached-address-\(UUID().uuidString).local"
+        let configuration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://\(logicalHost):\(origin.port)")!,
+            username: "",
+            password: "",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil,
+            resolvedAddresses: ["127.0.0.1"]
+        )
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        let proxy = CachedAddressProxy.shared
+        proxy.configure(sessionConfiguration, for: configuration)
+        let proxyPort = try XCTUnwrap(proxy.port)
+
+        let response = try Self.sendRawProxyRequestData(
+            proxyPort: proxyPort,
+            request: "GET http://\(logicalHost):\(origin.port)/guide HTTP/1.1\r\n"
+                + "Host: \(logicalHost):\(origin.port)\r\n"
+                + "Connection: close\r\n\r\n"
+        )
+        let separator = Data("\r\n\r\n".utf8)
+        let headerRange = try XCTUnwrap(response.range(of: separator))
+
+        XCTAssertEqual(Data(response[headerRange.upperBound...]), responseBody)
+    }
+
     func testCachedAddressProxyKeepsAcceptingAfterRecoverableErrors() {
         XCTAssertFalse(CachedAddressProxy.isFatalAcceptError(EINTR))
         XCTAssertFalse(CachedAddressProxy.isFatalAcceptError(ECONNABORTED))
@@ -230,6 +260,11 @@ final class TVHeadendClientTests: XCTestCase {
     }
 
     private static func sendRawProxyRequest(proxyPort: Int, request: String) throws -> String {
+        let response = try sendRawProxyRequestData(proxyPort: proxyPort, request: request)
+        return String(decoding: response, as: UTF8.self)
+    }
+
+    private static func sendRawProxyRequestData(proxyPort: Int, request: String) throws -> Data {
         let descriptor = try connectToLoopback(port: proxyPort)
         defer { Darwin.close(descriptor) }
         var timeout = timeval(tv_sec: 3, tv_usec: 0)
@@ -254,7 +289,7 @@ final class TVHeadendClientTests: XCTestCase {
                 break
             }
         }
-        return String(decoding: response, as: UTF8.self)
+        return response
     }
 }
 
@@ -270,15 +305,17 @@ private enum ProxyTestError: Error {
 private final class ProxyTestOriginServer: @unchecked Sendable {
     private let descriptor: Int32
     private let lock = NSLock()
+    private let responseBody: Data
     private var request: String?
     let port: Int
 
     var receivedRequest: String? { lock.withLock { request } }
 
-    init() throws {
+    init(responseBody: Data = Data("OK".utf8)) throws {
         let descriptor = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
         guard descriptor >= 0 else { throw ProxyTestError.socketCreationFailed }
         self.descriptor = descriptor
+        self.responseBody = responseBody
         var noSignal: Int32 = 1
         setsockopt(
             descriptor,
@@ -344,10 +381,13 @@ private final class ProxyTestOriginServer: @unchecked Sendable {
         lock.withLock {
             request = String(decoding: data, as: UTF8.self)
         }
-        _ = sendAll(
-            Data("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK".utf8),
-            to: client
+        var response = Data(
+            "HTTP/1.1 200 OK\r\nContent-Length: \(responseBody.count)\r\n"
+                .appending("Connection: close\r\n\r\n")
+                .utf8
         )
+        response.append(responseBody)
+        _ = sendAll(response, to: client)
     }
 }
 
