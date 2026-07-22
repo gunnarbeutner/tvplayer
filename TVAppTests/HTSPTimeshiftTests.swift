@@ -1,3 +1,5 @@
+import Darwin
+import Dispatch
 import Foundation
 import XCTest
 @testable import TVApp
@@ -258,6 +260,137 @@ final class HTSPTimeshiftTests: XCTestCase {
         XCTAssertFalse(firstPacketHasVLCDiscontinuity(pid: 0x0100, in: resumedVideo))
         XCTAssertFalse(firstPacketHasVLCDiscontinuity(pid: 0x0101, in: resumedAudio))
         XCTAssertTrue(firstPacketHasPCR(pid: 0x0100, in: resumedVideo))
+    }
+
+    func testTransportMuxerMaintainsPCRCadenceDuringSparseVideoAudioBurst() throws {
+        let muxer = try MPEGTransportStreamMuxer(
+            streams: [
+                HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil),
+                HTSPStreamInfo(
+                    index: 2,
+                    type: "MPEG2AUDIO",
+                    language: "deu",
+                    metadata: nil
+                ),
+            ]
+        )
+        let videoAnchor: Int64 = 1_000_000
+        var transport = muxer.mux(
+            HTSPMuxPacket(
+                streamIndex: 1,
+                frameType: 0x49,
+                presentationTime: videoAnchor,
+                decodeTime: videoAnchor,
+                payload: Data(repeating: 0x65, count: 80_000)
+            )
+        )
+
+        // Reproduce the regional-channel startup shape seen in the macOS
+        // benchmark: one deliverable H.264 I-frame followed by 1.45 seconds
+        // of MPEG audio while the next I-frame remains in the alignment tail.
+        for index in 0..<61 {
+            let presentationTime = videoAnchor - 12_000 + Int64(index) * 24_000
+            transport.append(
+                muxer.mux(
+                    HTSPMuxPacket(
+                        streamIndex: 2,
+                        frameType: 0,
+                        presentationTime: presentationTime,
+                        decodeTime: nil,
+                        durationMicroseconds: 24_000,
+                        payload: Data([0xff, 0xfd, 0x84, 0x00])
+                    )
+                )
+            )
+        }
+        // Audio and video callbacks are not globally timestamp ordered. A
+        // slightly older video DTS after an audio burst must not make PCR
+        // regress when that video PES is packetized.
+        transport.append(
+            muxer.mux(
+                HTSPMuxPacket(
+                    streamIndex: 1,
+                    frameType: 0x50,
+                    presentationTime: 2_360_000,
+                    decodeTime: 2_360_000,
+                    payload: Data([0x41])
+                )
+            )
+        )
+
+        let samples = pcrSamples(in: transport)
+        XCTAssertGreaterThan(samples.count, 30)
+        XCTAssertTrue(samples.allSatisfy { $0.pid == 0x0100 })
+        XCTAssertTrue(samples.contains { $0.isAdaptationOnly })
+        for pair in zip(samples, samples.dropFirst()) {
+            XCTAssertGreaterThanOrEqual(pair.1.microseconds, pair.0.microseconds)
+            XCTAssertLessThanOrEqual(
+                pair.1.microseconds - pair.0.microseconds,
+                40_001,
+                "Sparse video must not leave VLC with a long PCR gap."
+            )
+        }
+    }
+
+    func testPCROnlyPacketsRepeatPreviousPayloadContinuityCounter() throws {
+        let muxer = try MPEGTransportStreamMuxer(
+            streams: [
+                HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil),
+                HTSPStreamInfo(
+                    index: 2,
+                    type: "MPEG2AUDIO",
+                    language: "deu",
+                    metadata: nil
+                ),
+            ]
+        )
+        let video: (Int64, UInt8) -> HTSPMuxPacket = { time, byte in
+            HTSPMuxPacket(
+                streamIndex: 1,
+                frameType: 0x49,
+                presentationTime: time,
+                decodeTime: time,
+                payload: Data([byte])
+            )
+        }
+        var transport = muxer.mux(video(1_000_000, 0x65))
+        transport.append(
+            muxer.mux(
+                HTSPMuxPacket(
+                    streamIndex: 2,
+                    frameType: 0,
+                    presentationTime: 1_080_000,
+                    decodeTime: nil,
+                    durationMicroseconds: 24_000,
+                    payload: Data([0xff, 0xfd, 0x84, 0x00])
+                )
+            )
+        )
+        transport.append(muxer.mux(video(1_120_000, 0x41)))
+
+        let pcrPIDPackets = stride(from: 0, to: transport.count, by: 188).compactMap {
+            offset -> (adaptationControl: UInt8, continuity: UInt8)? in
+            guard offset + 188 <= transport.count, transport[offset] == 0x47 else {
+                return nil
+            }
+            let pid = UInt16(transport[offset + 1] & 0x1f) << 8
+                | UInt16(transport[offset + 2])
+            guard pid == 0x0100 else { return nil }
+            return (
+                adaptationControl: (transport[offset + 3] >> 4) & 0x03,
+                continuity: transport[offset + 3] & 0x0f
+            )
+        }
+        let payloadContinuity = pcrPIDPackets.compactMap {
+            $0.adaptationControl & 0x01 != 0 ? $0.continuity : nil
+        }
+        let pcrOnlyContinuity = pcrPIDPackets.compactMap {
+            $0.adaptationControl == 0x02 ? $0.continuity : nil
+        }
+
+        XCTAssertEqual(payloadContinuity, [0, 1])
+        XCTAssertFalse(pcrOnlyContinuity.isEmpty)
+        XCTAssertTrue(pcrOnlyContinuity.allSatisfy { $0 == 0 })
     }
 
     func testPostSeekInterleaverPinsVideoKeyframeAheadOfEarlierAudio() {
@@ -541,6 +674,42 @@ final class HTSPTimeshiftTests: XCTestCase {
         XCTAssertFalse(stager.isActive)
     }
 
+    func testInitialTuneDefaultWaitAcceptsFiveSecondVideoGOP() {
+        var stager = HTSPInitialTunePacketStager()
+        stager.begin(
+            hasVideo: true,
+            primaryVideoStreamIndex: 1,
+            primaryAudioStreamIndex: 2,
+            maximumPayloadBytes: .max
+        )
+        let started = Date(timeIntervalSinceReferenceDate: 225)
+        guard case .waiting = stager.append(
+            taggedPacket(stream: 1, frameType: 0x50, pts: 0, dts: 0, tag: 1),
+            isVideo: true,
+            isAudio: false,
+            at: started
+        ) else { return XCTFail("A leading P-frame should wait for the next GOP.") }
+        guard case .waiting = stager.append(
+            taggedPacket(stream: 2, pts: 3_500_000, dts: nil, tag: 2),
+            isVideo: false,
+            isAudio: true,
+            at: started.addingTimeInterval(3.5)
+        ) else { return XCTFail("The default must not fail at the old three-second bound.") }
+        guard case .waiting = stager.append(
+            taggedPacket(
+                stream: 1,
+                frameType: 0x49,
+                pts: 5_000_000,
+                dts: 5_000_000,
+                tag: 3
+            ),
+            isVideo: true,
+            isAudio: false,
+            at: started.addingTimeInterval(5)
+        ) else { return XCTFail("A normal five-second GOP must produce a usable keyframe.") }
+        XCTAssertTrue(stager.isActive)
+    }
+
     func testInitialTuneKeyframeWinsAtPreKeyframeDeadline() {
         var stager = HTSPInitialTunePacketStager()
         stager.begin(
@@ -582,18 +751,45 @@ final class HTSPTimeshiftTests: XCTestCase {
             isAudio: false,
             at: started
         )
-        let result = stager.append(
+        let rejectedAudio = stager.append(
             taggedPacket(stream: 2, pts: 300_000, dts: nil, duration: 20_000, tag: 2),
             isVideo: false,
             isAudio: true,
             at: started.addingTimeInterval(1)
         )
-        guard case let .overflow(batch, trailingPacket, containsPrimaryAudio, _) = result else {
-            return XCTFail("Rejected packets must not bypass the elapsed-time bound.")
+        guard case .waiting = rejectedAudio else {
+            return XCTFail("A rejected old AU must not publish a video-only fallback.")
         }
-        XCTAssertEqual(batch.interleavedPackets.map { $0.payload[0] }, [1])
+        XCTAssertTrue(stager.isActive)
+        XCTAssertEqual(stager.payloadByteCount, 1)
+
+        guard case .waiting = stager.append(
+            taggedPacket(
+                stream: 1,
+                frameType: 0x50,
+                pts: 1_100_000,
+                dts: 1_100_000,
+                tag: 3
+            ),
+            isVideo: true,
+            isAudio: false,
+            at: started.addingTimeInterval(1.1)
+        ) else { return XCTFail("Excess video should be dropped while primary audio is missing.") }
+        XCTAssertEqual(stager.payloadByteCount, 1)
+
+        let result = stager.append(
+            taggedPacket(stream: 2, pts: 1_000_000, dts: nil, duration: 20_000, tag: 4),
+            isVideo: false,
+            isAudio: true,
+            at: started.addingTimeInterval(1.2)
+        )
+        guard case let .overflow(batch, trailingPacket, containsPrimaryAudio, _) = result else {
+            return XCTFail("The first accepted primary-audio AU should release the fallback.")
+        }
+        XCTAssertEqual(batch.interleavedPackets.map { $0.payload[0] }, [1, 4])
         XCTAssertNil(trailingPacket)
-        XCTAssertFalse(containsPrimaryAudio)
+        XCTAssertTrue(containsPrimaryAudio)
+        XCTAssertFalse(stager.isActive)
     }
 
     func testInitialTuneCompletionWinsAtDeadline() throws {
@@ -646,12 +842,28 @@ final class HTSPTimeshiftTests: XCTestCase {
             isAudio: false
         )
         _ = stager.append(
-            taggedPacket(stream: 1, frameType: 0x50, pts: 2_700_000, dts: 1_500_000, tag: 2),
+            // The first I-frame defines the pinned startup epoch; a later I
+            // is expendable when the batch still lacks primary audio.
+            taggedPacket(stream: 1, frameType: 0x49, pts: 2_700_000, dts: 1_500_000, tag: 2),
             isVideo: true,
             isAudio: false
         )
+        guard case .waiting = stager.append(
+            taggedPacket(
+                stream: 1,
+                frameType: 0x50,
+                pts: 2_800_000,
+                dts: 1_600_000,
+                tag: 3
+            ),
+            isVideo: true,
+            isAudio: false
+        ) else { return XCTFail("Video-first saturation must wait for primary audio.") }
+        XCTAssertTrue(stager.isActive)
+        XCTAssertEqual(stager.payloadByteCount, 2)
+
         let result = stager.append(
-            taggedPacket(stream: 2, pts: 1_480_000, dts: nil, duration: 20_000, tag: 3),
+            taggedPacket(stream: 2, pts: 1_480_000, dts: nil, duration: 20_000, tag: 4),
             isVideo: false,
             isAudio: true
         )
@@ -660,7 +872,8 @@ final class HTSPTimeshiftTests: XCTestCase {
         }
         XCTAssertNil(trailingPacket)
         XCTAssertTrue(containsPrimaryAudio)
-        XCTAssertEqual(batch.interleavedPackets.map { $0.payload[0] }, [1, 3, 2])
+        XCTAssertEqual(batch.payloadByteCount, 2)
+        XCTAssertEqual(batch.interleavedPackets.map { $0.payload[0] }, [1, 4])
     }
 
     func testPostSeekTailInterleaverReleasesOnlyCommonAudioVideoHorizon() {
@@ -981,6 +1194,263 @@ final class HTSPTimeshiftTests: XCTestCase {
             try HTSPConnection.validate(response: ["error": .string("seek unavailable")])
         )
         XCTAssertNoThrow(try HTSPConnection.validate(response: ["seq": .int(7)]))
+    }
+
+    func testRawMessageObserverReceivesExactFrameForUnboundedRead() throws {
+        let (connection, peerDescriptor) = try makeSocketPairConnection()
+        defer {
+            connection.close()
+            Darwin.close(peerDescriptor)
+        }
+        let frames = LockedRawHTSPFrames()
+        connection.setRawMessageObserver { frames.append($0) }
+        let frame = try HTSPMessageCodec.encode([
+            "method": .string("queueStatus"),
+            "packets": .int(42),
+        ])
+
+        XCTAssertTrue(Self.writeAll(frame, to: peerDescriptor))
+        let message = try connection.readMessage()
+
+        XCTAssertEqual(message["method"], .string("queueStatus"))
+        XCTAssertEqual(frames.values, [frame])
+    }
+
+    func testRawMessageObserverRunsBeforeMalformedPayloadIsRejected() throws {
+        let (connection, peerDescriptor) = try makeSocketPairConnection()
+        defer {
+            connection.close()
+            Darwin.close(peerDescriptor)
+        }
+        let frames = LockedRawHTSPFrames()
+        connection.setRawMessageObserver { frames.append($0) }
+        let malformedFrame = Data([0, 0, 0, 1, 0xff])
+
+        XCTAssertTrue(Self.writeAll(malformedFrame, to: peerDescriptor))
+        XCTAssertThrowsError(try connection.readMessage()) { error in
+            guard case HTSPCodecError.malformedMessage = error else {
+                return XCTFail("Expected malformedMessage, got \(error).")
+            }
+        }
+        XCTAssertEqual(frames.values, [malformedFrame])
+    }
+
+    func testRawMessageObserverReceivesExactDeadlineBoundResponse() throws {
+        let (connection, peerDescriptor) = try makeSocketPairConnection()
+        defer {
+            connection.close()
+            Darwin.close(peerDescriptor)
+        }
+        let frames = LockedRawHTSPFrames()
+        connection.setRawMessageObserver { frames.append($0) }
+        let responseFrame = try HTSPMessageCodec.encode([
+            "seq": .int(1),
+            "result": .string("ok"),
+        ])
+
+        XCTAssertTrue(Self.writeAll(responseFrame, to: peerDescriptor))
+        let response = try connection.request(method: "observerTest")
+
+        XCTAssertEqual(response["result"], .string("ok"))
+        XCTAssertEqual(frames.values, [responseFrame])
+    }
+
+    func testRawMessageObserverDoesNotPublishPartialTimedOutFrame() throws {
+        let (connection, peerDescriptor) = try makeSocketPairConnection()
+        defer {
+            connection.close()
+            Darwin.close(peerDescriptor)
+        }
+        let frames = LockedRawHTSPFrames()
+        connection.setRawMessageObserver { frames.append($0) }
+
+        XCTAssertTrue(Self.writeAll(Data([0, 0, 0, 8, 1]), to: peerDescriptor))
+        var error: Error?
+        XCTAssertThrowsError(try connection.request(method: "observerTest")) {
+            error = $0
+        }
+
+        assertReadTimedOut(error)
+        XCTAssertTrue(frames.values.isEmpty)
+    }
+
+    func testSynchronousRequestDeadlineInterruptsPartialDribblingMessage() throws {
+        let (connection, peerDescriptor) = try makeSocketPairConnection()
+        defer {
+            connection.close()
+            Darwin.close(peerDescriptor)
+        }
+
+        // Declare a payload larger than the bytes the peer will dribble. Each
+        // byte arrives well inside a conventional per-read socket timeout.
+        XCTAssertTrue(Self.writeAll(Data([0, 0, 0, 64, 1]), to: peerDescriptor))
+        let writer = Self.startDribbling(
+            Data([0]),
+            to: peerDescriptor,
+            count: 50,
+            intervalMicroseconds: 20_000
+        )
+
+        let started = DispatchTime.now().uptimeNanoseconds
+        var error: Error?
+        XCTAssertThrowsError(try connection.request(method: "deadlineTest")) {
+            error = $0
+        }
+        let elapsed = Self.elapsedSeconds(since: started)
+        connection.close()
+        writer.wait()
+
+        assertReadTimedOut(error)
+        XCTAssertLessThan(elapsed, 0.6, "Partial frame bytes must not restart the deadline.")
+    }
+
+    func testSynchronousRequestDeadlineIgnoresUnsolicitedMessages() throws {
+        let (connection, peerDescriptor) = try makeSocketPairConnection()
+        defer {
+            connection.close()
+            Darwin.close(peerDescriptor)
+        }
+
+        let unsolicited = try HTSPMessageCodec.encode(["seq": .int(999)])
+        XCTAssertTrue(Self.writeAll(unsolicited, to: peerDescriptor))
+        let writer = Self.startDribbling(
+            unsolicited,
+            to: peerDescriptor,
+            count: 50,
+            intervalMicroseconds: 20_000
+        )
+
+        let started = DispatchTime.now().uptimeNanoseconds
+        var error: Error?
+        XCTAssertThrowsError(try connection.request(method: "deadlineTest")) {
+            error = $0
+        }
+        let elapsed = Self.elapsedSeconds(since: started)
+        connection.close()
+        writer.wait()
+
+        assertReadTimedOut(error)
+        XCTAssertLessThan(elapsed, 0.6, "Skipped messages must share one response deadline.")
+    }
+
+    func testSubscriptionStartSharesSubscribeResponseDeadline() throws {
+        let (connection, peerDescriptor) = try makeSocketPairConnection()
+        defer {
+            connection.close()
+            Darwin.close(peerDescriptor)
+        }
+
+        let response = try HTSPMessageCodec.encode([
+            "seq": .int(1),
+            "timeshiftPeriod": .int(60),
+        ])
+        let unsolicited = try HTSPMessageCodec.encode([
+            "method": .string("queueStatus"),
+        ])
+        XCTAssertTrue(Self.writeAll(response + unsolicited, to: peerDescriptor))
+        let writer = Self.startDribbling(
+            unsolicited,
+            to: peerDescriptor,
+            count: 50,
+            intervalMicroseconds: 20_000
+        )
+
+        let started = DispatchTime.now().uptimeNanoseconds
+        var error: Error?
+        XCTAssertThrowsError(
+            try connection.subscribe(channelID: 42, profile: "pass", weight: 100)
+        ) {
+            error = $0
+        }
+        let elapsed = Self.elapsedSeconds(since: started)
+        connection.close()
+        writer.wait()
+
+        assertReadTimedOut(error)
+        XCTAssertLessThan(
+            elapsed,
+            0.6,
+            "The subscribe response and subscriptionStart wait must share one deadline."
+        )
+    }
+
+    private func makeSocketPairConnection() throws -> (HTSPConnection, Int32) {
+        var descriptors = [Int32](repeating: -1, count: 2)
+        guard Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0 else {
+            throw HTSPError.connectionFailed(String(cString: strerror(errno)))
+        }
+        var noSignal: Int32 = 1
+        _ = setsockopt(
+            descriptors[1],
+            SOL_SOCKET,
+            SO_NOSIGPIPE,
+            &noSignal,
+            socklen_t(MemoryLayout.size(ofValue: noSignal))
+        )
+        return (
+            HTSPConnection(
+                fileDescriptor: descriptors[0],
+                synchronousReadTimeout: .milliseconds(120)
+            ),
+            descriptors[1]
+        )
+    }
+
+    private func assertReadTimedOut(
+        _ error: Error?,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard let error = error as? HTSPError, case .readTimedOut = error else {
+            return XCTFail("Expected HTSPError.readTimedOut, got \(String(describing: error)).", file: file, line: line)
+        }
+    }
+
+    private static func startDribbling(
+        _ data: Data,
+        to descriptor: Int32,
+        count: Int,
+        intervalMicroseconds: useconds_t
+    ) -> DispatchGroup {
+        let group = DispatchGroup()
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer {
+                Darwin.shutdown(descriptor, SHUT_WR)
+                group.leave()
+            }
+            for _ in 0..<count {
+                usleep(intervalMicroseconds)
+                guard writeAll(data, to: descriptor) else { return }
+            }
+        }
+        return group
+    }
+
+    private static func writeAll(_ data: Data, to descriptor: Int32) -> Bool {
+        data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return true }
+            var offset = 0
+            while offset < data.count {
+                let result = Darwin.write(
+                    descriptor,
+                    baseAddress.advanced(by: offset),
+                    data.count - offset
+                )
+                if result < 0 {
+                    if errno == EINTR { continue }
+                    return false
+                }
+                guard result > 0 else { return false }
+                offset += result
+            }
+            return true
+        }
+    }
+
+    private static func elapsedSeconds(since started: UInt64) -> TimeInterval {
+        let now = DispatchTime.now().uptimeNanoseconds
+        return TimeInterval(now >= started ? now - started : 0) / 1_000_000_000
     }
 
     func testDiscoveryUsesAdvertisedHTSPPortAndDefaultsTo9982() throws {
@@ -1639,6 +2109,31 @@ final class HTSPTimeshiftTests: XCTestCase {
         }
         return false
     }
+
+    private func pcrSamples(
+        in data: Data
+    ) -> [(pid: UInt16, microseconds: Int64, isAdaptationOnly: Bool)] {
+        stride(from: 0, to: data.count, by: 188).compactMap { offset in
+            guard offset + 188 <= data.count, data[offset] == 0x47 else { return nil }
+            let adaptationControl = (data[offset + 3] >> 4) & 0x03
+            guard adaptationControl == 0x02 || adaptationControl == 0x03,
+                  data[offset + 4] >= 7,
+                  data[offset + 5] & 0x10 != 0
+            else { return nil }
+            let pid = UInt16(data[offset + 1] & 0x1f) << 8
+                | UInt16(data[offset + 2])
+            let base = UInt64(data[offset + 6]) << 25
+                | UInt64(data[offset + 7]) << 17
+                | UInt64(data[offset + 8]) << 9
+                | UInt64(data[offset + 9]) << 1
+                | UInt64(data[offset + 10] >> 7)
+            return (
+                pid: pid,
+                microseconds: Int64(base * 1_000 / 90),
+                isAdaptationOnly: adaptationControl == 0x02
+            )
+        }
+    }
 }
 
 private enum ScriptedHTSPRead: Sendable {
@@ -1788,6 +2283,19 @@ private final class LockedLifecycleEvents: @unchecked Sendable {
 
     func append(_ event: HTSPStreamLifecycleEvent) {
         lock.withLock { events.append(event) }
+    }
+}
+
+private final class LockedRawHTSPFrames: @unchecked Sendable {
+    private let lock = NSLock()
+    private var frames: [Data] = []
+
+    var values: [Data] {
+        lock.withLock { frames }
+    }
+
+    func append(_ frame: Data) {
+        lock.withLock { frames.append(frame) }
     }
 }
 

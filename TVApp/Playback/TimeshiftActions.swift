@@ -218,6 +218,7 @@ struct PostSeekPlaybackOutputGate {
     private var minimumPrerollDurationMilliseconds: Int64 = 0
     private var minimumSustainedOutputMilliseconds: Int64 = 0
     private var minimumDisplayedPictureAdvance = 0
+    private var requiresFreshVideoAtReveal = false
     private var requiresAudioOutput = false
     private var outputAfterDiscontinuity: PlaybackOutputCounters?
     private var firstFreshOutputAt: Date?
@@ -276,6 +277,16 @@ struct PostSeekPlaybackOutputGate {
             resetSustainedOutputState()
         }
         minimumDisplayedPictureAdvance = requiredCount
+    }
+
+    /// Requires a newly displayed picture on the observation which opens the
+    /// gate without treating video as the cadence clock. Initial live tuning
+    /// can use advancing audio to prove that VLC's presentation clock is
+    /// running, while this final check still prevents a frozen startup picture
+    /// from dismissing the launch surface. Post-seek gates retain their stricter
+    /// picture-cadence behavior unless they opt into this explicitly.
+    mutating func requireFreshVideoAtReveal() {
+        requiresFreshVideoAtReveal = true
     }
 
     mutating func requireAudioOutput() {
@@ -456,15 +467,27 @@ struct PostSeekPlaybackOutputGate {
               !requiresAudioOutput
                 || output.playedAudioBuffers > freshnessBaseline.playedAudioBuffers
         else { return false }
-        let hasFreshOutput = minimumDisplayedPictureAdvance > 0
-            ? videoAdvancedNow
+        let hasFreshOutput: Bool
+        if minimumDisplayedPictureAdvance > 0 {
+            hasFreshOutput = videoAdvancedNow
                 && output.displayedPictures - freshnessBaseline.displayedPictures
                     >= minimumDisplayedPictureAdvance
-            : (requiresAudioOutput
-                ? audioAdvancedNow
-                    && output.playedAudioBuffers > freshnessBaseline.playedAudioBuffers
-                : output.hasAdvanced(since: freshnessBaseline))
-        guard hasFreshOutput else { return false }
+        } else if requiresFreshVideoAtReveal {
+            // Sustained, recently advancing audio already proved the clock.
+            // Do not require its statistics counter to happen to change in the
+            // exact same poll as the sparse video picture used for reveal.
+            hasFreshOutput = videoAdvancedNow
+                && output.displayedPictures > freshnessBaseline.displayedPictures
+        } else if requiresAudioOutput {
+            hasFreshOutput = audioAdvancedNow
+                && output.playedAudioBuffers > freshnessBaseline.playedAudioBuffers
+        } else {
+            hasFreshOutput = output.hasAdvanced(since: freshnessBaseline)
+        }
+        let hasFreshVideoAtReveal = !requiresFreshVideoAtReveal
+            || (videoAdvancedNow
+                && output.displayedPictures > freshnessBaseline.displayedPictures)
+        guard hasFreshOutput, hasFreshVideoAtReveal else { return false }
 
         reset()
         return true
@@ -487,7 +510,10 @@ struct PostSeekPlaybackOutputGate {
                     minimumSustainedOutputMilliseconds
                 ),
                 displayedPictureAdvance: pictures,
-                requiredDisplayedPictureAdvance: minimumDisplayedPictureAdvance
+                requiredDisplayedPictureAdvance: max(
+                    minimumDisplayedPictureAdvance,
+                    requiresFreshVideoAtReveal ? 1 : 0
+                )
             )
         }
 
@@ -542,12 +568,16 @@ struct PostSeekPlaybackOutputGate {
                 Self.elapsedMilliseconds(from: $0, to: date)
                     < Self.sustainedOutputGapToleranceMilliseconds
             } == true
-        let requiredOutputAdvancedNow = minimumDisplayedPictureAdvance > 0
+        let requiredPictureAdvance = max(
+            minimumDisplayedPictureAdvance,
+            requiresFreshVideoAtReveal ? 1 : 0
+        )
+        let requiredOutputAdvancedNow = requiredPictureAdvance > 0
             ? videoAdvancedNow
             : (requiresAudioOutput
                 ? audioAdvancedNow
-                : output.hasAdvanced(since: previousObservedOutput ?? outputAfterDiscontinuity))
-        guard pictureAdvance >= minimumDisplayedPictureAdvance,
+                    : output.hasAdvanced(since: previousObservedOutput ?? outputAfterDiscontinuity))
+        guard pictureAdvance >= requiredPictureAdvance,
               requiredOutputAdvancedNow,
               audioRecentlyAdvanced else {
             return result(
@@ -591,6 +621,7 @@ struct PostSeekPlaybackOutputGate {
         minimumPrerollDurationMilliseconds = 0
         minimumSustainedOutputMilliseconds = 0
         minimumDisplayedPictureAdvance = 0
+        requiresFreshVideoAtReveal = false
         requiresAudioOutput = false
         outputAfterDiscontinuity = nil
         firstFreshOutputAt = nil
@@ -619,14 +650,24 @@ struct PostSeekPlaybackOutputGate {
 enum PlaybackHealthAction: Equatable {
     case none
     case rebuildPlayer
+    case rebuildPlayerForStartupAudioStall
 }
 
 struct PlaybackOutputHealthMonitor {
     static let stalledOutputThreshold: TimeInterval = 10
+    // VLC statistics normally report audio-output progress at least every
+    // half-second. During startup, allow three times that interval before
+    // treating a short decoded burst followed by silence as a dead audio
+    // output. Once cadence has held for three seconds, the normal watchdog is
+    // deliberately more forgiving of transient steady-state interruptions.
+    static let startupAudioStallThreshold: TimeInterval = 1.5
+    static let startupAudioStabilityDuration: TimeInterval = 3
 
     private var previousOutput: PlaybackOutputCounters?
     private var lastProgressDate: Date?
     private var lastAudioProgressDate: Date?
+    private var startupAudioProgressStartedAt: Date?
+    private var hasStableStartupAudio = false
     private var wasExpectingAudio = false
     private var hasRequestedRecovery = false
     private var hasRequestedAudioRecovery = false
@@ -670,26 +711,47 @@ struct PlaybackOutputHealthMonitor {
                 if output.playedAudioBuffers == 0 {
                     lastAudioProgressDate = date
                 }
+                startupAudioProgressStartedAt = nil
+                hasStableStartupAudio = false
                 hasRequestedAudioRecovery = false
-            } else if audioAdvanced {
+            }
+
+            if audioAdvanced {
                 lastAudioProgressDate = date
                 hasRequestedAudioRecovery = false
+                if let startupAudioProgressStartedAt,
+                   date.timeIntervalSince(startupAudioProgressStartedAt)
+                    >= Self.startupAudioStabilityDuration {
+                    hasStableStartupAudio = true
+                } else if startupAudioProgressStartedAt == nil {
+                    startupAudioProgressStartedAt = date
+                }
             } else if audioCounterReset {
                 // VLC statistics can restart when its pipeline is rebuilt.
                 // Keep expecting audio, but give the new counter a full grace
                 // period before declaring it stalled.
                 lastAudioProgressDate = date
+                startupAudioProgressStartedAt = nil
+                hasStableStartupAudio = false
                 hasRequestedAudioRecovery = false
             }
 
+            let audioStallThreshold = startupAudioProgressStartedAt != nil
+                && !hasStableStartupAudio
+                ? Self.startupAudioStallThreshold
+                : Self.stalledOutputThreshold
             if !hasRequestedAudioRecovery,
                date.timeIntervalSince(lastAudioProgressDate ?? date)
-                >= Self.stalledOutputThreshold {
+                >= audioStallThreshold {
                 hasRequestedAudioRecovery = true
-                action = .rebuildPlayer
+                action = hasStableStartupAudio || startupAudioProgressStartedAt == nil
+                    ? .rebuildPlayer
+                    : .rebuildPlayerForStartupAudioStall
             }
         } else {
             lastAudioProgressDate = date
+            startupAudioProgressStartedAt = nil
+            hasStableStartupAudio = false
             hasRequestedAudioRecovery = false
         }
         wasExpectingAudio = expectsAudio
@@ -704,6 +766,8 @@ struct PlaybackOutputHealthMonitor {
         previousOutput = output
         lastProgressDate = date
         lastAudioProgressDate = date
+        startupAudioProgressStartedAt = nil
+        hasStableStartupAudio = false
         wasExpectingAudio = false
         hasRequestedRecovery = false
         hasRequestedAudioRecovery = false
@@ -713,6 +777,8 @@ struct PlaybackOutputHealthMonitor {
         previousOutput = nil
         lastProgressDate = nil
         lastAudioProgressDate = nil
+        startupAudioProgressStartedAt = nil
+        hasStableStartupAudio = false
         wasExpectingAudio = false
         hasRequestedRecovery = false
         hasRequestedAudioRecovery = false

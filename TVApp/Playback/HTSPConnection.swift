@@ -1,5 +1,6 @@
 import CryptoKit
 import Darwin
+import Dispatch
 import Foundation
 
 indirect enum HTSPValue: Equatable, Sendable {
@@ -255,6 +256,7 @@ struct HTSPStreamInfo: Equatable, Sendable {
 protocol HTSPConnectionTransport: AnyObject, Sendable {
     var capabilities: Set<String> { get }
 
+    func setRawMessageObserver(_ observer: (@Sendable (Data) -> Void)?)
     func handshake(username: String, password: String) throws
     func subscribe(
         channelID: UInt32,
@@ -270,6 +272,10 @@ protocol HTSPConnectionTransport: AnyObject, Sendable {
     ) throws
     func readMessage() throws -> [String: HTSPValue]
     func close()
+}
+
+extension HTSPConnectionTransport {
+    func setRawMessageObserver(_ observer: (@Sendable (Data) -> Void)?) {}
 }
 
 typealias HTSPConnectionFactory = @Sendable () throws -> any HTSPConnectionTransport
@@ -365,16 +371,24 @@ actor HTSPConnectionPrewarmer {
 
 final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
     static let protocolVersion: Int64 = 44
+    static let localServerResponseTimeout: Duration = .seconds(5)
 
     private let fileDescriptor: Int32
+    private let synchronousReadTimeoutNanoseconds: UInt64
     private let writeLock = NSLock()
     private let sequenceLock = NSLock()
+    private let rawMessageObserverLock = NSLock()
     private var nextSequence: Int64 = 1
+    private var rawMessageObserver: (@Sendable (Data) -> Void)?
     private(set) var capabilities: Set<String> = []
     private(set) var negotiatedVersion: Int64 = 0
 
-    private init(fileDescriptor: Int32) {
+    init(
+        fileDescriptor: Int32,
+        synchronousReadTimeout: Duration = localServerResponseTimeout
+    ) {
         self.fileDescriptor = fileDescriptor
+        synchronousReadTimeoutNanoseconds = Self.nanoseconds(for: synchronousReadTimeout)
     }
 
     deinit {
@@ -439,6 +453,12 @@ final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
         }
     }
 
+    func setRawMessageObserver(_ observer: (@Sendable (Data) -> Void)?) {
+        rawMessageObserverLock.withLock {
+            rawMessageObserver = observer
+        }
+    }
+
     static func authenticationFields(
         username: String,
         password: String,
@@ -476,20 +496,22 @@ final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
         profile: String,
         weight: UInt32
     ) throws -> (Int64, [HTSPStreamInfo]) {
+        let deadline = makeSynchronousReadDeadline()
         let response = try request(
             method: "subscribe",
             fields: Self.subscriptionFields(
                 channelID: channelID,
                 profile: profile,
                 weight: weight
-            )
+            ),
+            until: deadline
         )
         guard let period = response["timeshiftPeriod"]?.intValue, period > 0 else {
             throw HTSPError.timeshiftUnavailable
         }
 
         while true {
-            let message = try readMessage()
+            let message = try readMessage(until: deadline)
             if let error = message["error"]?.stringValue { throw HTSPError.server(error) }
             if message["method"]?.stringValue == "subscriptionStop" {
                 throw HTSPError.server(
@@ -519,11 +541,23 @@ final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
     }
 
     func request(method: String, fields: [String: HTSPValue] = [:]) throws -> [String: HTSPValue] {
+        try request(
+            method: method,
+            fields: fields,
+            until: makeSynchronousReadDeadline()
+        )
+    }
+
+    private func request(
+        method: String,
+        fields: [String: HTSPValue],
+        until deadline: UInt64
+    ) throws -> [String: HTSPValue] {
         let sequence = reserveSequence()
         try sendRequest(method: method, sequence: sequence, fields: fields)
 
         while true {
-            let response = try readMessage()
+            let response = try readMessage(until: deadline)
             guard response["seq"]?.intValue == sequence else { continue }
             try Self.validate(response: response)
             return response
@@ -587,30 +621,60 @@ final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
     }
 
     func readMessage() throws -> [String: HTSPValue] {
-        let header = try readExactly(4)
+        try readMessage(until: nil)
+    }
+
+    private func readMessage(until deadline: UInt64?) throws -> [String: HTSPValue] {
+        let header = try readExactly(4, until: deadline)
         let length = Int(HTSPMessageCodec.readBigEndianUInt32(header, at: 0))
         guard length <= 64 * 1_024 * 1_024 else { throw HTSPCodecError.fieldTooLarge }
-        return try HTSPMessageCodec.decodePayload(readExactly(length))
+        let payload = try readExactly(length, until: deadline)
+        let observer = rawMessageObserverLock.withLock { rawMessageObserver }
+        if let observer {
+            var frame = Data(capacity: header.count + payload.count)
+            frame.append(header)
+            frame.append(payload)
+            observer(frame)
+        }
+        return try HTSPMessageCodec.decodePayload(payload)
     }
 
     func close() {
         Darwin.shutdown(fileDescriptor, SHUT_RDWR)
     }
 
-    private func readExactly(_ count: Int) throws -> Data {
+    private func readExactly(_ count: Int, until deadline: UInt64?) throws -> Data {
         guard count > 0 else { return Data() }
         var data = Data(count: count)
         var offset = 0
         try data.withUnsafeMutableBytes { rawBuffer in
             guard let baseAddress = rawBuffer.baseAddress else { return }
             while offset < count {
-                let result = Darwin.read(
-                    fileDescriptor,
-                    baseAddress.advanced(by: offset),
-                    count - offset
-                )
+                if let deadline { try waitUntilReadable(deadline: deadline) }
+                let result: Int
+                if deadline != nil {
+                    // poll() establishes readiness and MSG_DONTWAIT ensures a
+                    // concurrent close/read cannot put us back into an
+                    // unbounded blocking syscall before we re-check the
+                    // absolute deadline.
+                    result = Darwin.recv(
+                        fileDescriptor,
+                        baseAddress.advanced(by: offset),
+                        count - offset,
+                        MSG_DONTWAIT
+                    )
+                } else {
+                    result = Darwin.read(
+                        fileDescriptor,
+                        baseAddress.advanced(by: offset),
+                        count - offset
+                    )
+                }
                 if result < 0 {
                     if errno == EINTR { continue }
+                    if deadline != nil, errno == EAGAIN || errno == EWOULDBLOCK {
+                        continue
+                    }
                     if offset == 0, errno == EAGAIN || errno == EWOULDBLOCK {
                         throw HTSPError.readTimedOut
                     }
@@ -621,6 +685,42 @@ final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
             }
         }
         return data
+    }
+
+    private func makeSynchronousReadDeadline() -> UInt64 {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let addition = now.addingReportingOverflow(synchronousReadTimeoutNanoseconds)
+        return addition.overflow ? UInt64.max : addition.partialValue
+    }
+
+    private func waitUntilReadable(deadline: UInt64) throws {
+        while true {
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now < deadline else { throw HTSPError.readTimedOut }
+            let remainingNanoseconds = deadline - now
+            let wholeMilliseconds = remainingNanoseconds / 1_000_000
+            let roundedMilliseconds = wholeMilliseconds
+                + (remainingNanoseconds.isMultiple(of: 1_000_000) ? 0 : 1)
+            let timeout = Int32(min(roundedMilliseconds, UInt64(Int32.max)))
+            var descriptor = pollfd(fd: fileDescriptor, events: Int16(POLLIN), revents: 0)
+            let result = Darwin.poll(&descriptor, 1, timeout)
+            if result > 0 { return }
+            if result == 0 { throw HTSPError.readTimedOut }
+            if errno == EINTR { continue }
+            throw HTSPError.connectionFailed(String(cString: strerror(errno)))
+        }
+    }
+
+    private static func nanoseconds(for duration: Duration) -> UInt64 {
+        guard duration > .zero else { return 0 }
+        let components = duration.components
+        guard components.seconds >= 0, components.attoseconds >= 0 else { return 0 }
+        let seconds = UInt64(components.seconds)
+        let nanoseconds = UInt64(components.attoseconds / 1_000_000_000)
+        let secondsProduct = seconds.multipliedReportingOverflow(by: 1_000_000_000)
+        guard !secondsProduct.overflow else { return UInt64.max }
+        let sum = secondsProduct.partialValue.addingReportingOverflow(nanoseconds)
+        return sum.overflow ? UInt64.max : sum.partialValue
     }
 
     private static func connectSocket(host: String, port: Int) throws -> Int32 {

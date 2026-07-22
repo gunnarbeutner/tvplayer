@@ -786,7 +786,6 @@ final class PlaybackCoordinator: ObservableObject {
         intentID: UUID
     ) async throws {
         engineStartIntentID = intentID
-        engine.stop()
         do {
             try await engine.prepare(request)
             try Task.checkCancellation()

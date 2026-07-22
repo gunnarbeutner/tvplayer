@@ -651,7 +651,9 @@ struct PlaybackView: View {
     }
 
     private func requestVideoReattachment() {
+#if !os(macOS)
         videoAttachmentRevision &+= 1
+#endif
     }
 
     private func refreshGrowingRecording() async {

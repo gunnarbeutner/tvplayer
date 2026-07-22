@@ -31,6 +31,17 @@ enum PlaybackRecoveryReason: Equatable {
     }
 }
 
+private enum VLCPlaybackPreparationError: LocalizedError {
+    case stopTimedOut
+
+    var errorDescription: String? {
+        switch self {
+        case .stopTimedOut:
+            "VLC did not finish stopping its previous input within five seconds."
+        }
+    }
+}
+
 struct VLCAudioOutputDiagnostics: Equatable {
     var coreAudioUnderruns = 0
     var lateClockCorrections = 0
@@ -268,6 +279,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     @Published private(set) var nativeTimeshiftRecoveryCount = 0
     @Published private(set) var lastNativePipelineDiagnostic: String?
     private(set) var lastNativeCandidateMetrics: NativeLiveCandidateMetrics?
+    private(set) var lastVLCStopMilliseconds = 0
     private(set) var playbackOutputSnapshot = PlaybackOutputCounters(
         displayedPictures: 0,
         playedAudioBuffers: 0
@@ -283,8 +295,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 
     private var nativeInputStream: HTSPLiveInputStream?
     // VLCKit's custom-stream bridge does not retain the InputStream passed to
-    // VLCMedia(stream:), and closes it asynchronously. Keep each disposable
-    // reader alive for the engine lifetime to make that callback safe.
+    // VLCMedia(stream:), and closes it asynchronously. Keep disposable readers
+    // alive until VLC confirms the corresponding pipeline has stopped.
     private var retainedNativeVLCReaders: [InputStream] = []
     private let timeshiftAudioLogger: VLCTimeshiftAudioLogger?
     private var nativeTimeshiftActions: NativeTimeshiftActionController?
@@ -402,7 +414,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         setState(.preparing)
         logger.info("Preparing stream from \(request.url.host ?? "unknown host", privacy: .public)")
 
-        mediaPlayer.stop()
+        try await stopMediaPlayerForReplacement()
+        retainedNativeVLCReaders.removeAll(keepingCapacity: true)
         nativeInputStream?.close()
         nativeInputStream = nil
         nativeTimeshiftActions = nil
@@ -592,7 +605,13 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         recoveryReason = nil
         recoveryAttempt = 0
         mediaPlayer.stop()
+#if !os(macOS)
+        // On macOS, VLC 4 tears its OpenGL vout down asynchronously. Keep the
+        // persistent drawable attached so a following tune does not race that
+        // teardown with a nil -> view rebind. The surface detaches itself when
+        // it actually leaves the view hierarchy.
         mediaPlayer.drawable = nil
+#endif
 #if os(tvOS)
         sampleBufferFallbackTask?.cancel()
         sampleBufferFallbackTask = nil
@@ -945,7 +964,16 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                 currentGeneration: currentStagingGeneration
             ))
             if expectsVideo, !requiresVideoOutput {
-                outputGate.requireDisplayedPictures(12)
+                if expectsAudio {
+                    // Sparse and slideshow-style services may legitimately
+                    // display fewer than twelve pictures during the startup
+                    // window. Let advancing audio prove clock continuity, but
+                    // only reveal on an observation which also displays a new
+                    // video picture so a frozen first frame stays concealed.
+                    outputGate.requireFreshVideoAtReveal()
+                } else {
+                    outputGate.requireDisplayedPictures(12)
+                }
                 requiresVideoOutput = true
             }
             if expectsAudio, !requiresAudioOutput {
@@ -1114,6 +1142,26 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         mediaPlayer.videoFitMode = .smaller
     }
 
+    private func stopMediaPlayerForReplacement() async throws {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        defer {
+            lastVLCStopMilliseconds = Int(
+                ((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000).rounded()
+            )
+        }
+        mediaPlayer.stop()
+        // VLC 4's stop operation is asynchronous. Replacing its media or
+        // closing the custom input before Stopped lets the old demux/vout race
+        // the new pipeline (and can abort macOS's OpenGL renderer).
+        for _ in 0..<500 where mediaPlayer.state != .stopped {
+            try Task.checkCancellation()
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard mediaPlayer.state == .stopped else {
+            throw VLCPlaybackPreparationError.stopTimedOut
+        }
+    }
+
     private func rememberNavigationPlaybackIntent() {
         guard nativeInputStream?.isNavigatingTimeshift != true else {
             timeshiftNavigationDebugState = "ignored new intent while already navigating"
@@ -1185,17 +1233,26 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             && !health.isRecovering
             && !health.isNavigating
             && pipelineRecoveryTask == nil
-        guard outputHealthMonitor.observe(
+        let healthAction = outputHealthMonitor.observe(
             output: playbackOutputCounters,
             at: date,
             expectsOutput: expectsOutput,
             hasFreshInput: hasFreshInput,
             expectsAudio: health.expectsAudio
-        ) == .rebuildPlayer else { return }
-
-        scheduleNativePipelineRecovery(
-            detail: "HTSP packets are arriving but VLC output has not advanced for 10 seconds."
         )
+
+        switch healthAction {
+        case .none:
+            return
+        case .rebuildPlayer:
+            scheduleNativePipelineRecovery(
+                detail: "HTSP packets are arriving but VLC output has not advanced for 10 seconds."
+            )
+        case .rebuildPlayerForStartupAudioStall:
+            scheduleNativePipelineRecovery(
+                detail: "VLC audio output started, then stopped advancing for 1.5 seconds while HTSP packets and video continued."
+            )
+        }
     }
 
     private func scheduleNativePipelineRecovery(detail: String) {
@@ -1483,6 +1540,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             logger.error("\(detail, privacy: .public)")
             return false
         }
+        retainedNativeVLCReaders.removeAll(keepingCapacity: true)
 #if DEBUG
         let stoppedAt = ProcessInfo.processInfo.systemUptime
 #endif
@@ -2107,7 +2165,6 @@ private final class VLCVideoContainerView: UIView {
 
     func attachIfVisible(force: Bool = false) {
         guard window != nil, let mediaPlayer else { return }
-        configureVideoSizing(mediaPlayer)
         if !force, let current = mediaPlayer.drawable as? UIView, current === self { return }
 
         // An explicit attachment revision is reserved for recovery/test
@@ -2315,7 +2372,6 @@ private final class VLCVideoContainerView: NSView {
 
     private func attachIfVisible(force: Bool = false) {
         guard window != nil, let mediaPlayer else { return }
-        configureVideoSizing(mediaPlayer)
         if !force, let current = mediaPlayer.drawable as? NSView, current === self { return }
         mediaPlayer.drawable = nil
         mediaPlayer.drawable = self

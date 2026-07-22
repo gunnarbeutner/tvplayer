@@ -196,6 +196,22 @@ final class VLCTuningBenchmarkModel: ObservableObject {
         let nextWarmedRequest: WarmedRequest?
     }
 
+    private struct FailureCaptureAnnouncement: Encodable {
+        let attempt: Int?
+        let channelID: UInt32?
+        let path: String
+    }
+
+    private struct TuningAttemptBeginAnnouncement: Encodable {
+        let attempt: Int
+        let channelID: UInt32
+        let channelName: String
+        let mode: String
+        let direction: String
+        let unixTimeSeconds: TimeInterval
+        let monotonicSeconds: TimeInterval
+    }
+
     private struct TuningAttemptSample: Encodable {
         let attempt: Int
         let mode: String
@@ -218,6 +234,7 @@ final class VLCTuningBenchmarkModel: ObservableObject {
         var candidatePromotionMilliseconds: Int?
         var candidateReadyAgeMilliseconds: Int?
         var candidatePayloadBytes: Int?
+        var vlcStopMilliseconds: Int?
         var prepareMilliseconds: Int?
         var playToHTSPVideoMilliseconds: Int?
         var playToHTSPAudioMilliseconds: Int?
@@ -230,15 +247,20 @@ final class VLCTuningBenchmarkModel: ObservableObject {
         var dwellMaximumAudioGapMilliseconds: Int?
         var displayedPictures = 0
         var playedAudioBuffers = 0
+        var decodedVideo = 0
+        var decodedAudio = 0
         var videoPackets: Int64 = 0
         var audioPackets: Int64 = 0
         var lostPictures = 0
         var lostAudioBuffers = 0
+        var dwellLostPictures = 0
+        var dwellLostAudioBuffers = 0
         var recoveryCount = 0
         var audioExpected = false
         var audioDiagnosticsAdvanced = false
         var success = false
         var suspiciousReasons: [String] = []
+        var qualityWarnings: [String] = []
         var failureDetail: String?
     }
 
@@ -334,6 +356,17 @@ final class VLCTuningBenchmarkModel: ObservableObject {
     }
 
     private func run(settings: DiscoveredTVHeadendSettings) async throws {
+        if failureCaptureEnabled,
+           let sessionDirectory = try HTSPTuningFailureCaptureRegistry.shared.startSession() {
+            emitStructured(
+                "VLC_TUNING_CAPTURE_SESSION",
+                FailureCaptureAnnouncement(
+                    attempt: nil,
+                    channelID: nil,
+                    path: sessionDirectory.path
+                )
+            )
+        }
         let configuration = TVHeadendConfiguration(
             serverProfileID: settings.discoveryID,
             baseURL: settings.baseURL,
@@ -368,12 +401,37 @@ final class VLCTuningBenchmarkModel: ObservableObject {
 
         let orderedChannels = channelsInBenchmarkOrder(channels)
         var warmedRequest: WarmedRequest?
+        var firstAttemptBeganBeforePrewarm = false
         let firstAttemptMode = mode(forAttempt: 1)
         if firstAttemptMode.warmsRequest, let first = orderedChannels.first {
+            let attemptStartedAt = Date()
+            try HTSPTuningFailureCaptureRegistry.shared.beginAttempt(
+                attempt: 1,
+                channelID: first.id,
+                channelName: first.name,
+                mode: firstAttemptMode.rawValue,
+                direction: tuningDirection.rawValue,
+                startedAt: attemptStartedAt
+            )
+            try HTSPTuningFailureCaptureRegistry.shared.updateActiveAttemptPhase("prewarm")
+            emitStructured(
+                "VLC_TUNING_ATTEMPT_BEGIN",
+                TuningAttemptBeginAnnouncement(
+                    attempt: 1,
+                    channelID: first.id,
+                    channelName: first.name,
+                    mode: firstAttemptMode.rawValue,
+                    direction: tuningDirection.rawValue,
+                    unixTimeSeconds: attemptStartedAt.timeIntervalSince1970,
+                    monotonicSeconds: monotonicNow
+                )
+            )
+            firstAttemptBeganBeforePrewarm = true
             warmedRequest = await warmRequest(
                 for: first,
                 using: client,
-                stageTransport: firstAttemptMode.stagesTransport
+                stageTransport: firstAttemptMode.stagesTransport,
+                captureAttempt: 1
             )
             if firstAttemptMode.stagesTransport,
                let stagedAt = warmedRequest?.candidateStagedAt {
@@ -397,6 +455,29 @@ final class VLCTuningBenchmarkModel: ObservableObject {
                 ? orderedChannels[attempt % orderedChannels.count]
                 : nil
             let nextMode = hasNextAttempt ? mode(forAttempt: attempt + 1) : nil
+            if attempt != 1 || !firstAttemptBeganBeforePrewarm {
+                let attemptStartedAt = Date()
+                try HTSPTuningFailureCaptureRegistry.shared.beginAttempt(
+                    attempt: attempt,
+                    channelID: channel.id,
+                    channelName: channel.name,
+                    mode: attemptMode.rawValue,
+                    direction: tuningDirection.rawValue,
+                    startedAt: attemptStartedAt
+                )
+                emitStructured(
+                    "VLC_TUNING_ATTEMPT_BEGIN",
+                    TuningAttemptBeginAnnouncement(
+                        attempt: attempt,
+                        channelID: channel.id,
+                        channelName: channel.name,
+                        mode: attemptMode.rawValue,
+                        direction: tuningDirection.rawValue,
+                        unixTimeSeconds: attemptStartedAt.timeIntervalSince1970,
+                        monotonicSeconds: monotonicNow
+                    )
+                )
+            }
             let outcome = try await tune(
                 channel,
                 attempt: attempt,
@@ -407,6 +488,12 @@ final class VLCTuningBenchmarkModel: ObservableObject {
                 nextWarmMode: nextMode
             )
             samples.append(outcome.sample)
+            try HTSPTuningFailureCaptureRegistry.shared.completeAttempt(
+                attempt: attempt,
+                success: outcome.sample.success
+            )
+            // The runner disarms its watchdog when it observes this line. Keep
+            // it armed until the durable attempt metadata is fully completed.
             emitStructured("VLC_TUNING_SAMPLE", outcome.sample)
             warmedRequest = outcome.nextWarmedRequest
             completedAttempts = attempt
@@ -460,6 +547,7 @@ final class VLCTuningBenchmarkModel: ObservableObject {
     ) async throws -> TuneOutcome {
         channelName = channel.name
         phase = "Attempt \(attempt) of \(totalAttempts): \(channel.name)"
+        try? HTSPTuningFailureCaptureRegistry.shared.updateActiveAttemptPhase("request")
         let commandStartedAt = monotonicNow
         if !mode.stagesTransport {
             await HTSPLiveCandidatePool.shared.cancel()
@@ -519,10 +607,14 @@ final class VLCTuningBenchmarkModel: ObservableObject {
             result.suspiciousReasons = ["request-failed"]
             failureCount += 1
             append(.failure, "#\(attempt) \(channel.name) could not resolve its playback request", error.localizedDescription)
+            finishFailureCapture(
+                for: result,
+                diagnosticSummary: error.localizedDescription
+            )
             return TuneOutcome(sample: result, nextWarmedRequest: nil)
         }
 
-        engine.stop()
+        try? HTSPTuningFailureCaptureRegistry.shared.updateActiveAttemptPhase("prepare")
         let prepareStartedAt = monotonicNow
         do {
             try await engine.prepare(request)
@@ -536,9 +628,14 @@ final class VLCTuningBenchmarkModel: ObservableObject {
             result.suspiciousReasons = ["prepare-failed"]
             failureCount += 1
             append(.failure, "#\(attempt) \(channel.name) could not tune", error.localizedDescription)
+            finishFailureCapture(
+                for: result,
+                diagnosticSummary: error.localizedDescription
+            )
             return TuneOutcome(sample: result, nextWarmedRequest: nil)
         }
         result.prepareMilliseconds = elapsedMilliseconds(from: prepareStartedAt, to: monotonicNow)
+        result.vlcStopMilliseconds = engine.lastVLCStopMilliseconds
         if let candidate = engine.lastNativeCandidateMetrics {
             result.candidateHit = true
             result.candidateAligned = candidate.usedAlignedWindow
@@ -557,6 +654,9 @@ final class VLCTuningBenchmarkModel: ObservableObject {
         engine.refreshPlaybackInformation()
         let prePlayOutput = counters
         let recoveryCountAtPlay = engine.nativeTimeshiftRecoveryCount
+        try? HTSPTuningFailureCaptureRegistry.shared.updateActiveAttemptPhase(
+            "playback-start"
+        )
         let playStartedAt = monotonicNow
         engine.play()
         let productionReadinessProbe = ProductionReadinessProbe()
@@ -576,7 +676,6 @@ final class VLCTuningBenchmarkModel: ObservableObject {
         }
         defer { productionReadinessTask.cancel() }
 
-        videoAttachmentRevision &+= 1
         if standbyPreconnectEnabled,
            case let .live(.nativeTimeshift(htsp)) = request.kind {
             Task {
@@ -650,6 +749,7 @@ final class VLCTuningBenchmarkModel: ObservableObject {
                     expectsAudio: expectsAudio,
                     audioDiagnostics: engine.vlcAudioOutputDiagnostics
                 )
+                try? HTSPTuningFailureCaptureRegistry.shared.updateActiveAttemptPhase("dwell")
                 phase = "Attempt \(attempt) of \(totalAttempts): playing \(channel.name) for \(dwellSeconds) seconds"
             }
             if var continuity = dwellContinuity {
@@ -670,7 +770,8 @@ final class VLCTuningBenchmarkModel: ObservableObject {
                     return await self.warmRequest(
                         for: nextWarmChannel,
                         using: client,
-                        stageTransport: nextWarmMode.stagesTransport
+                        stageTransport: nextWarmMode.stagesTransport,
+                        captureAttempt: attempt + 1
                     )
                 }
             }
@@ -739,10 +840,14 @@ final class VLCTuningBenchmarkModel: ObservableObject {
         }
         result.displayedPictures = output.displayedPictures
         result.playedAudioBuffers = output.playedAudioBuffers
+        result.decodedVideo = output.decodedVideo
+        result.decodedAudio = output.decodedAudio
         result.videoPackets = health?.videoPacketCount ?? 0
         result.audioPackets = health?.audioPacketCount ?? 0
         result.lostPictures = max(0, output.lostPictures - prePlayOutput.lostPictures)
         result.lostAudioBuffers = max(0, output.lostAudioBuffers - prePlayOutput.lostAudioBuffers)
+        result.dwellLostPictures = dwellContinuity?.lostPictureDelta ?? 0
+        result.dwellLostAudioBuffers = dwellContinuity?.lostAudioBufferDelta ?? 0
         result.recoveryCount = max(0, engine.nativeTimeshiftRecoveryCount - recoveryCountAtPlay)
         result.audioExpected = expectsAudio
         result.audioDiagnosticsAdvanced = dwellContinuity?.audioDiagnosticsAdvanced == true
@@ -762,8 +867,16 @@ final class VLCTuningBenchmarkModel: ObservableObject {
         }
         if result.recoveryCount > 0 { reasons.append("pipeline-recovered") }
         if startupCadence.longestConfirmedStall != nil { reasons.append("startup-video-stall") }
-        if result.lostPictures > 0 { reasons.append("lost-video-output") }
-        if result.lostAudioBuffers > 0 { reasons.append("lost-audio-output") }
+        // VLC's loss counters are useful quality diagnostics, but an isolated
+        // increment does not establish a visible or audible interruption. The
+        // cadence and output probes below classify corroborated continuity
+        // failures; retain uncorroborated losses as structured warnings.
+        var qualityWarnings: [String] = []
+        if result.dwellLostPictures > 0 { qualityWarnings.append("lost-video-output") }
+        if result.dwellLostAudioBuffers > 0 { qualityWarnings.append("lost-audio-output") }
+        if let audioGap = result.dwellMaximumAudioGapMilliseconds, audioGap >= 500 {
+            qualityWarnings.append("audio-output-statistic-gap")
+        }
         if engine.mediaPlayer.rate > 1.01 { reasons.append("accelerated-playback") }
         if let dwellContinuity {
             if dwellContinuity.videoStalled { reasons.append("dwell-video-stall") }
@@ -783,12 +896,14 @@ final class VLCTuningBenchmarkModel: ObservableObject {
             }
         }
         result.suspiciousReasons = Array(Set(reasons)).sorted()
+        result.qualityWarnings = qualityWarnings
         result.success = result.suspiciousReasons.isEmpty
         if !result.success { failureCount += 1 }
 
         let codecs = health?.audioStreamTypes.joined(separator: ",").nilIfEmpty ?? "none"
         var detail = "mode=\(result.mode) requestSource=\(result.requestSource) "
             + "request=\(formattedMilliseconds(result.requestMilliseconds)) "
+            + "vlcStop=\(formattedMilliseconds(result.vlcStopMilliseconds)) "
             + "prepare=\(formattedMilliseconds(result.prepareMilliseconds)) "
             + "candidate=\(result.candidateHit ? "hit" : (result.candidateExpected ? "miss" : "none")) "
             + "aligned=\(result.candidateAligned.map { String($0) } ?? "n/a") "
@@ -802,8 +917,10 @@ final class VLCTuningBenchmarkModel: ObservableObject {
             + "ready=\(formattedMilliseconds(result.playToReadyMilliseconds)) "
             + "dwell=\(result.dwellObservedMilliseconds)ms "
             + "codec=\(codecs) packets=\(result.videoPackets)v/\(result.audioPackets)a "
+            + "decoded=\(result.decodedVideo)v/\(result.decodedAudio)a "
             + "output=\(result.displayedPictures)v/\(result.playedAudioBuffers)a "
-            + "reasons=\(result.suspiciousReasons.joined(separator: ",").nilIfEmpty ?? "none")"
+            + "reasons=\(result.suspiciousReasons.joined(separator: ",").nilIfEmpty ?? "none") "
+            + "warnings=\(result.qualityWarnings.joined(separator: ",").nilIfEmpty ?? "none")"
         if let startup = health?.transportStartup {
             detail += " | tsStartup={\(startup.summary)}"
         }
@@ -819,6 +936,7 @@ final class VLCTuningBenchmarkModel: ObservableObject {
             "#\(attempt) \(channel.name): \(result.success ? "ready and continuous" : "suspect")",
             detail
         )
+        finishFailureCapture(for: result, diagnosticSummary: detail)
 
         if !result.success {
             nextWarmTask?.cancel()
@@ -832,7 +950,8 @@ final class VLCTuningBenchmarkModel: ObservableObject {
     private func warmRequest(
         for channel: Channel,
         using client: TVHeadendClient,
-        stageTransport: Bool
+        stageTransport: Bool,
+        captureAttempt: Int
     ) async -> WarmedRequest? {
         let startedAt = monotonicNow
         do {
@@ -849,6 +968,10 @@ final class VLCTuningBenchmarkModel: ObservableObject {
             var candidateStagedAt: TimeInterval?
             if stageTransport {
                 if let descriptor = HTSPLiveCandidateDescriptor(request) {
+                    HTSPTuningFailureCaptureRegistry.shared.associateCandidateRecorder(
+                        channelID: descriptor.channelID,
+                        withAttempt: captureAttempt
+                    )
                     await HTSPLiveCandidatePool.shared.stage(descriptor)
                     guard !Task.isCancelled else {
                         await HTSPLiveCandidatePool.shared.cancel()
@@ -979,6 +1102,8 @@ final class VLCTuningBenchmarkModel: ObservableObject {
         private var lastAudioAdvanceAt: TimeInterval
         private var latestTimestamp: TimeInterval
         private let initialAudioDiagnostics: VLCAudioOutputDiagnostics
+        private let initialLostPictures: Int
+        private let initialLostAudioBuffers: Int
 
         private(set) var expectsAudio: Bool
         private(set) var maximumVideoGap: TimeInterval = 0
@@ -1001,7 +1126,17 @@ final class VLCTuningBenchmarkModel: ObservableObject {
             lastAudioAdvanceAt = sample.timestamp
             latestTimestamp = sample.timestamp
             initialAudioDiagnostics = audioDiagnostics
+            initialLostPictures = sample.output.lostPictures
+            initialLostAudioBuffers = sample.output.lostAudioBuffers
             self.expectsAudio = expectsAudio
+        }
+
+        var lostPictureDelta: Int {
+            max(0, previousOutput.lostPictures - initialLostPictures)
+        }
+
+        var lostAudioBufferDelta: Int {
+            max(0, previousOutput.lostAudioBuffers - initialLostAudioBuffers)
         }
 
         mutating func observe(
@@ -1039,7 +1174,13 @@ final class VLCTuningBenchmarkModel: ObservableObject {
                 } else {
                     let gap = sample.timestamp - lastAudioAdvanceAt
                     maximumAudioGap = max(maximumAudioGap, gap)
-                    if gap >= 0.5 { audioStalled = true }
+                    // VLC publishes playedAudioBuffers in batches, and healthy
+                    // output routinely appears flat for roughly 0.5-0.8 s
+                    // without a CoreAudio underrun or audible interruption.
+                    // The production startup watchdog uses 1.5 s to identify
+                    // a stream that really stopped; use the same boundary here
+                    // while retaining shorter gaps as quality warnings.
+                    if gap >= 1.5 { audioStalled = true }
                 }
             }
             if audioDiagnostics.hasAdvanced(since: initialAudioDiagnostics) {
@@ -1275,6 +1416,19 @@ final class VLCTuningBenchmarkModel: ObservableObject {
         !ProcessInfo.processInfo.arguments.contains("--tuning-disable-standby-preconnect")
     }
 
+    private var failureCaptureEnabled: Bool {
+        ProcessInfo.processInfo.arguments.contains("--tuning-capture-failures")
+    }
+
+    private var tuningProtocolNonce: String? {
+        for argument in ProcessInfo.processInfo.arguments
+            where argument.hasPrefix("--tuning-protocol-nonce=") {
+            let nonce = String(argument.dropFirst("--tuning-protocol-nonce=".count))
+            return nonce.isEmpty ? nil : nonce
+        }
+        return nil
+    }
+
     private var monotonicNow: TimeInterval {
         ProcessInfo.processInfo.systemUptime
     }
@@ -1378,8 +1532,59 @@ final class VLCTuningBenchmarkModel: ObservableObject {
         guard let data = try? encoder.encode(value),
               let json = String(data: data, encoding: .utf8)
         else { return }
-        print("\(prefix) \(json)")
+        if let tuningProtocolNonce {
+            print("\(prefix) \(tuningProtocolNonce) \(json)")
+        } else {
+            print("\(prefix) \(json)")
+        }
         fflush(stdout)
+    }
+
+    private func finishFailureCapture(
+        for sample: TuningAttemptSample,
+        diagnosticSummary: String
+    ) {
+        guard failureCaptureEnabled else { return }
+        guard !sample.success else {
+            HTSPTuningFailureCaptureRegistry.shared.discardFinishedAttempt(
+                attempt: sample.attempt
+            )
+            return
+        }
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        do {
+            let benchmarkSample = try encoder.encode(sample)
+            let temporaryRoot = FileManager.default.temporaryDirectory.appending(
+                path: "TVApp-VLC-Tuning-Failure-Captures",
+                directoryHint: .isDirectory
+            )
+            if let output = try HTSPTuningFailureCaptureRegistry.shared.persistSuspectAttempt(
+                attempt: sample.attempt,
+                channelID: sample.channelID,
+                channelName: sample.channelName,
+                suspiciousReasons: sample.suspiciousReasons,
+                diagnosticSummary: diagnosticSummary,
+                benchmarkSample: benchmarkSample,
+                destinationRoot: temporaryRoot
+            ) {
+                emitStructured(
+                    "VLC_TUNING_CAPTURE",
+                    FailureCaptureAnnouncement(
+                        attempt: sample.attempt,
+                        channelID: sample.channelID,
+                        path: output.path
+                    )
+                )
+            }
+        } catch {
+            append(
+                .warning,
+                "Could not persist tuning failure capture",
+                error.localizedDescription
+            )
+        }
     }
 
     private func append(_ kind: VLCTuningEvent.Kind, _ title: String, _ detail: String? = nil) {
@@ -1396,10 +1601,13 @@ final class VLCTuningBenchmarkModel: ObservableObject {
 
     private func finish() {
         canRerun = true
-        print(
-            "VLC_TUNING_RESULT attempts=\(completedAttempts) suspicious=\(failureCount) "
-                + "mode=\(tuningMode.rawValue) direction=\(tuningDirection.rawValue)"
-        )
+        let result = "attempts=\(completedAttempts) suspicious=\(failureCount) "
+            + "mode=\(tuningMode.rawValue) direction=\(tuningDirection.rawValue)"
+        if let tuningProtocolNonce {
+            print("VLC_TUNING_RESULT \(tuningProtocolNonce) \(result)")
+        } else {
+            print("VLC_TUNING_RESULT \(result)")
+        }
         fflush(stdout)
         guard ProcessInfo.processInfo.arguments.contains("--exit-after-benchmark") else { return }
         Task {

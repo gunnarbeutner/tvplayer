@@ -1,3 +1,4 @@
+import Dispatch
 import Foundation
 import OSLog
 
@@ -199,6 +200,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         qos: .userInitiated
     )
     private let logger = Logger(subsystem: "de.beutner.TVPlayer", category: "HTSP")
+    private let tuningFailureCapture: HTSPTuningFailureCaptureRecorder?
     private var muxer: MPEGTransportStreamMuxer
     private var buffer = Data()
     private var readOffset = 0
@@ -208,6 +210,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     private var deliveryRole: DeliveryRole
     private var rollingTuneBuffer = HTSPRollingTunePacketBuffer()
     private var vlcReaderGeneration = 0
+    private var transportReadSequence = 0
     private var receiverThread: Thread?
     private var currentLiveDelay: TimeInterval = 0
     private var currentWindow: TimeInterval = 0
@@ -266,7 +269,8 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         streams: [HTSPStreamInfo],
         acceptedTimeshiftPeriod: TimeInterval,
         tuningPolicy: NativeTimeshiftTuningPolicy,
-        startsAsCandidate: Bool
+        startsAsCandidate: Bool,
+        tuningFailureCapture: HTSPTuningFailureCaptureRecorder?
     ) throws {
         self.configuration = configuration
         self.channelID = channelID
@@ -279,6 +283,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         self.tuningPolicy = tuningPolicy
         initialTuneHorizonDuration = Int64(tuningPolicy.initialHorizonMilliseconds) * 1_000
         postSeekReserveDuration = Int64(tuningPolicy.postSeekReserveMilliseconds) * 1_000
+        self.tuningFailureCapture = tuningFailureCapture
         super.init(data: Data())
         if startsAsCandidate {
             beginRollingTuneBuffering()
@@ -346,53 +351,99 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         } else {
             preconnected = nil
         }
-        let connected = try await Task.detached(priority: .userInitiated) {
-            if let preconnected {
-#if DEBUG
-                print("HTSP_PRECONNECT using authenticated idle connection")
-                fflush(stdout)
-#endif
-                do {
-                    let subscription = try preconnected.subscribe(
-                        channelID: channelID,
-                        profile: profile,
-                        weight: subscriptionWeight
-                    )
-                    return (preconnected, subscription)
-                } catch {
-                    // An idle socket may be closed by the server before Play.
-                    // Fall through to the normal fresh connection path.
-#if DEBUG
-                    print("HTSP_PRECONNECT idle connection failed; opening a fresh connection")
-                    fflush(stdout)
-#endif
-                    preconnected.close()
-                }
-            }
-            let connection = try connectionFactory()
-            try connection.handshake(username: configuration.username, password: configuration.password)
-            guard connection.capabilities.contains("timeshift") else {
-                throw HTSPError.timeshiftUnavailable
-            }
-            let subscription = try connection.subscribe(
-                channelID: channelID,
-                profile: profile,
-                weight: subscriptionWeight
-            )
-            return (connection, subscription)
-        }.value
-        let stream = try HTSPLiveInputStream(
-            configuration: configuration,
+        let tuningFailureCapture = HTSPTuningFailureCaptureRegistry.shared.makeRecorder(
             channelID: channelID,
             profile: profile,
-            connection: connected.0,
-            connectionFactory: connectionFactory,
-            streams: connected.1.1,
-            acceptedTimeshiftPeriod: TimeInterval(connected.1.0),
-            tuningPolicy: tuningPolicy,
+            acceptedTimeshiftPeriodSeconds: 0,
+            streams: [],
             startsAsCandidate: startsAsCandidate
         )
-        return stream
+        var subscribedConnection: (any HTSPConnectionTransport)?
+        do {
+            let connected = try await Task.detached(priority: .userInitiated) {
+                if let preconnected {
+#if DEBUG
+                    print("HTSP_PRECONNECT using authenticated idle connection")
+                    fflush(stdout)
+#endif
+                    do {
+                        installRawMessageObserver(
+                            on: preconnected,
+                            recorder: tuningFailureCapture
+                        )
+                        let subscription = try preconnected.subscribe(
+                            channelID: channelID,
+                            profile: profile,
+                            weight: subscriptionWeight
+                        )
+                        return (preconnected, subscription)
+                    } catch {
+                        // An idle socket may be closed by the server before Play.
+                        // Fall through to the normal fresh connection path.
+#if DEBUG
+                        print("HTSP_PRECONNECT idle connection failed; opening a fresh connection")
+                        fflush(stdout)
+#endif
+                        preconnected.setRawMessageObserver(nil)
+                        preconnected.close()
+                    }
+                }
+                let connection = try connectionFactory()
+                installRawMessageObserver(
+                    on: connection,
+                    recorder: tuningFailureCapture
+                )
+                try connection.handshake(
+                    username: configuration.username,
+                    password: configuration.password
+                )
+                guard connection.capabilities.contains("timeshift") else {
+                    throw HTSPError.timeshiftUnavailable
+                }
+                let subscription = try connection.subscribe(
+                    channelID: channelID,
+                    profile: profile,
+                    weight: subscriptionWeight
+                )
+                return (connection, subscription)
+            }.value
+            subscribedConnection = connected.0
+            tuningFailureCapture?.updateSubscriptionMetadata(
+                acceptedTimeshiftPeriodSeconds: TimeInterval(connected.1.0),
+                streams: connected.1.1
+            )
+            let stream = try HTSPLiveInputStream(
+                configuration: configuration,
+                channelID: channelID,
+                profile: profile,
+                connection: connected.0,
+                connectionFactory: connectionFactory,
+                streams: connected.1.1,
+                acceptedTimeshiftPeriod: TimeInterval(connected.1.0),
+                tuningPolicy: tuningPolicy,
+                startsAsCandidate: startsAsCandidate,
+                tuningFailureCapture: tuningFailureCapture
+            )
+            return stream
+        } catch {
+            subscribedConnection?.setRawMessageObserver(nil)
+            subscribedConnection?.close()
+            tuningFailureCapture?.markClosed()
+            throw error
+        }
+    }
+
+    private static func installRawMessageObserver(
+        on connection: any HTSPConnectionTransport,
+        recorder: HTSPTuningFailureCaptureRecorder?
+    ) {
+        guard let recorder else {
+            connection.setRawMessageObserver(nil)
+            return
+        }
+        connection.setRawMessageObserver { [weak recorder] exactFrame in
+            recorder?.recordRawHTSPMessage(exactFrame)
+        }
     }
 
     override var streamStatus: Stream.Status {
@@ -530,7 +581,10 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         receiverThread?.cancel()
         receiverThread = nil
         deliveryGate.cancelAllNavigation()
-        currentConnection().connection.close()
+        let activeConnection = currentConnection().connection
+        activeConnection.setRawMessageObserver(nil)
+        activeConnection.close()
+        tuningFailureCapture?.markClosed()
     }
 
     func play() {
@@ -632,30 +686,49 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
     override func read(_ output: UnsafeMutablePointer<UInt8>, maxLength length: Int) -> Int {
         guard length > 0 else { return 0 }
+        let capturesTransportReads = tuningFailureCapture != nil
+        var waitDurationNanoseconds: UInt64 = 0
         condition.lock()
         while !stopped, currentError == nil, readOffset >= buffer.count {
+            let waitStartedAt = capturesTransportReads
+                ? DispatchTime.now().uptimeNanoseconds
+                : 0
             condition.wait()
+            if capturesTransportReads {
+                waitDurationNanoseconds = Self.accumulatingNanoseconds(
+                    waitDurationNanoseconds,
+                    since: waitStartedAt
+                )
+            }
         }
+        let returnedByteCount: Int
         if stopped {
-            condition.unlock()
-            return 0
-        }
-        if currentError != nil {
+            returnedByteCount = 0
+        } else if currentError != nil {
             currentStatus = .error
-            condition.unlock()
-            return -1
+            returnedByteCount = -1
+        } else {
+            let count = min(length, buffer.count - readOffset)
+            buffer.copyBytes(to: output, from: readOffset..<(readOffset + count))
+            readOffset += count
+            if readOffset >= 1 * 1_024 * 1_024 {
+                buffer.removeSubrange(0..<readOffset)
+                readOffset = 0
+            }
+            returnedByteCount = count
+            condition.broadcast()
         }
-
-        let count = min(length, buffer.count - readOffset)
-        buffer.copyBytes(to: output, from: readOffset..<(readOffset + count))
-        readOffset += count
-        if readOffset >= 1 * 1_024 * 1_024 {
-            buffer.removeSubrange(0..<readOffset)
-            readOffset = 0
+        if capturesTransportReads {
+            captureTransportReadLocked(
+                output,
+                readerGeneration: 0,
+                requestedByteCount: length,
+                returnedByteCount: returnedByteCount,
+                waitDurationNanoseconds: waitDurationNanoseconds
+            )
         }
-        condition.broadcast()
         condition.unlock()
-        return count
+        return returnedByteCount
     }
 
     fileprivate func readForVLC(
@@ -664,32 +737,97 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         generation: Int
     ) -> Int {
         guard length > 0 else { return 0 }
+        let capturesTransportReads = tuningFailureCapture != nil
+        var waitDurationNanoseconds: UInt64 = 0
         condition.lock()
         while !stopped,
               currentError == nil,
               generation == vlcReaderGeneration,
               readOffset >= buffer.count {
+            let waitStartedAt = capturesTransportReads
+                ? DispatchTime.now().uptimeNanoseconds
+                : 0
             condition.wait()
+            if capturesTransportReads {
+                waitDurationNanoseconds = Self.accumulatingNanoseconds(
+                    waitDurationNanoseconds,
+                    since: waitStartedAt
+                )
+            }
         }
-        guard !stopped, generation == vlcReaderGeneration else {
-            condition.unlock()
-            return 0
+        let returnedByteCount: Int
+        if stopped || generation != vlcReaderGeneration {
+            returnedByteCount = 0
+        } else if currentError != nil {
+            returnedByteCount = -1
+        } else {
+            let count = min(length, buffer.count - readOffset)
+            buffer.copyBytes(to: output, from: readOffset..<(readOffset + count))
+            readOffset += count
+            if readOffset >= 1 * 1_024 * 1_024 {
+                buffer.removeSubrange(0..<readOffset)
+                readOffset = 0
+            }
+            returnedByteCount = count
+            condition.broadcast()
         }
-        if currentError != nil {
-            condition.unlock()
-            return -1
+        if capturesTransportReads {
+            captureTransportReadLocked(
+                output,
+                readerGeneration: generation,
+                requestedByteCount: length,
+                returnedByteCount: returnedByteCount,
+                waitDurationNanoseconds: waitDurationNanoseconds
+            )
         }
-
-        let count = min(length, buffer.count - readOffset)
-        buffer.copyBytes(to: output, from: readOffset..<(readOffset + count))
-        readOffset += count
-        if readOffset >= 1 * 1_024 * 1_024 {
-            buffer.removeSubrange(0..<readOffset)
-            readOffset = 0
-        }
-        condition.broadcast()
         condition.unlock()
-        return count
+        return returnedByteCount
+    }
+
+    /// Must be called with `condition` held. The source condition serializes
+    /// both sequence assignment and capture admission, so sealing cannot split
+    /// "copied to VLC" from "recorded" and bounds retain true read order.
+    ///
+    /// Lock ordering is deliberately condition -> capture-recorder. Recorder
+    /// code never acquires this source condition (nor calls the source), so the
+    /// nesting cannot form an inverse edge or deadlock.
+    private func captureTransportReadLocked(
+        _ output: UnsafeMutablePointer<UInt8>,
+        readerGeneration: Int,
+        requestedByteCount: Int,
+        returnedByteCount: Int,
+        waitDurationNanoseconds: UInt64
+    ) {
+        guard let tuningFailureCapture else { return }
+        let sequence = transportReadSequence
+        if transportReadSequence < Int.max {
+            transportReadSequence += 1
+        }
+        let waitMicroseconds = waitDurationNanoseconds / 1_000
+        tuningFailureCapture.recordTransportRead(
+            UnsafeRawBufferPointer(
+                start: output,
+                count: max(0, returnedByteCount)
+            ),
+            sequence: sequence,
+            readerGeneration: readerGeneration,
+            requestedByteCount: requestedByteCount,
+            returnedByteCount: returnedByteCount,
+            waitDurationMicroseconds: waitMicroseconds > UInt64(Int.max)
+                ? Int.max
+                : Int(waitMicroseconds),
+            completedAt: Date()
+        )
+    }
+
+    private static func accumulatingNanoseconds(
+        _ accumulated: UInt64,
+        since startedAt: UInt64
+    ) -> UInt64 {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let duration = now >= startedAt ? now - startedAt : 0
+        let addition = accumulated.addingReportingOverflow(duration)
+        return addition.overflow ? UInt64.max : addition.partialValue
     }
 
     fileprivate func closeVLCReader(generation: Int) {
@@ -767,6 +905,12 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 )
             }
             let receiptDate = Date()
+            tuningFailureCapture?.record(
+                packet,
+                isVideo: trackKind.isVideo,
+                isAudio: trackKind.isAudio,
+                receivedAt: receiptDate
+            )
             condition.withLock {
                 lastMuxPacketAt = receiptDate
                 if trackKind.isVideo {
@@ -899,6 +1043,10 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
         case "subscriptionStart":
             let streams = HTSPStreamInfo.decodeList(message["streams"])
+            tuningFailureCapture?.recordStreamDeclaration(
+                streams,
+                connectionGeneration: connectionGeneration
+            )
             let replacement = try MPEGTransportStreamMuxer(streams: streams)
             if replaceMuxerAndRestartCandidateIfNeeded(replacement) { return }
             clearDeliveryQueue()
@@ -1416,6 +1564,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             throw HTSPLiveCandidateError.unavailable
         }
 
+        tuningFailureCapture?.markForeground()
         deliveryRole = .activatingCandidate
         let claim = rollingTuneBuffer.claim()
         cancelPostSeekPacketStagingLocked()
@@ -2016,7 +2165,9 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         guard isCandidate else { return false }
         condition.withLock { rollingTuneBuffer.cancel() }
         failStream(error)
-        currentConnection().connection.close()
+        let activeConnection = currentConnection().connection
+        activeConnection.setRawMessageObserver(nil)
+        activeConnection.close()
         logger.info(
             "Discarded staged HTSP channel: \(error.localizedDescription, privacy: .public)"
         )
@@ -2030,7 +2181,9 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         }
 
         beginRecovery()
-        currentConnection().connection.close()
+        let failedConnection = currentConnection().connection
+        failedConnection.setRawMessageObserver(nil)
+        failedConnection.close()
         var attempt = 1
         var reason = initialError.localizedDescription
 
@@ -2039,8 +2192,14 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             let delay = HTSPRecoveryPolicy.delay(beforeAttempt: attempt)
             guard waitForRetryDelay(delay) else { return false }
 
+            var attemptedReplacement: (any HTSPConnectionTransport)?
             do {
                 let replacement = try connectionFactory()
+                attemptedReplacement = replacement
+                Self.installRawMessageObserver(
+                    on: replacement,
+                    recorder: tuningFailureCapture
+                )
                 try replacement.handshake(
                     username: configuration.username,
                     password: configuration.password
@@ -2055,13 +2214,20 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 )
                 let replacementMuxer = try MPEGTransportStreamMuxer(streams: subscription.1)
                 guard !condition.withLock({ stopped }) else {
+                    replacement.setRawMessageObserver(nil)
                     replacement.close()
                     return false
                 }
-                installReplacementConnection(replacement, muxer: replacementMuxer)
+                installReplacementConnection(
+                    replacement,
+                    muxer: replacementMuxer,
+                    streams: subscription.1
+                )
                 logger.info("Rebuilt TVHeadend subscription at the live edge")
                 return true
             } catch {
+                attemptedReplacement?.setRawMessageObserver(nil)
+                attemptedReplacement?.close()
                 if HTSPRecoveryPolicy.isTerminal(error) {
                     failStream(error)
                     return false
@@ -2123,17 +2289,23 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
     private func installReplacementConnection(
         _ replacement: any HTSPConnectionTransport,
-        muxer replacementMuxer: MPEGTransportStreamMuxer
+        muxer replacementMuxer: MPEGTransportStreamMuxer,
+        streams: [HTSPStreamInfo]
     ) {
         let replacementTracks = (
             hasVideo: replacementMuxer.hasVideo,
             primaryVideoStreamIndex: replacementMuxer.primaryVideoStreamIndex,
             primaryAudioStreamIndex: replacementMuxer.primaryAudioStreamIndex
         )
-        connectionLock.withLock {
+        let replacementGeneration = connectionLock.withLock {
             connection = replacement
             connectionGeneration += 1
+            return connectionGeneration
         }
+        tuningFailureCapture?.recordStreamDeclaration(
+            streams,
+            connectionGeneration: replacementGeneration
+        )
         processLock.withLock {
             muxer = replacementMuxer
             if replacementTracks.primaryVideoStreamIndex == nil
@@ -2246,6 +2418,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             return lifecycleHandler
         }
         handler?(.terminalFailure(error.localizedDescription))
+        tuningFailureCapture?.markClosed()
         logger.error("HTSP stream ended: \(error.localizedDescription, privacy: .public)")
     }
 }

@@ -153,12 +153,14 @@ struct HTSPPostSeekPacketStager: Sendable {
     private var pinsInitialVideoKeyframe = false
     private var entries: [Entry] = []
     private(set) var payloadByteCount = 0
+    private var nextOrdinal = 0
 
     mutating func begin(pinsInitialVideoKeyframe: Bool) {
         isActive = true
         self.pinsInitialVideoKeyframe = pinsInitialVideoKeyframe
         entries.removeAll(keepingCapacity: true)
         payloadByteCount = 0
+        nextOrdinal = 0
     }
 
     @discardableResult
@@ -173,10 +175,60 @@ struct HTSPPostSeekPacketStager: Sendable {
             return false
         }
         entries.append(
-            Entry(packet: packet, isVideo: isVideo, ordinal: entries.count)
+            Entry(packet: packet, isVideo: isVideo, ordinal: nextOrdinal)
         )
+        nextOrdinal &+= 1
         payloadByteCount = addition.partialValue
         return true
+    }
+
+    /// Makes room for the first primary-audio access unit without discarding
+    /// the keyframe that makes the fallback decodable. Once the ordinary cap
+    /// has been reached, dependent video and ancillary packets are expendable;
+    /// the essential keyframe/audio pair is not. If those two access units by
+    /// themselves exceed the configured cap, their exact combined size is the
+    /// bounded minimum that can represent a usable A/V fallback.
+    mutating func appendRequiredPrimaryAudio(
+        _ packet: HTSPMuxPacket,
+        primaryVideoStreamIndex: Int,
+        maximumPayloadBytes: Int
+    ) -> (appended: Bool, droppedPackets: Bool) {
+        guard isActive else { return (false, false) }
+        let maximumPayloadBytes = max(1, maximumPayloadBytes)
+        if append(
+            packet,
+            isVideo: false,
+            maximumPayloadBytes: maximumPayloadBytes
+        ) {
+            return (true, false)
+        }
+
+        let pinnedKeyframeOrdinal = entries.first(where: { entry in
+            entry.isVideo
+                && entry.packet.streamIndex == primaryVideoStreamIndex
+                && entry.packet.frameType == 0x49
+        })?.ordinal
+        var droppedPackets = false
+        for index in entries.indices.reversed() {
+            let entry = entries[index]
+            guard entry.ordinal != pinnedKeyframeOrdinal else { continue }
+            payloadByteCount -= entry.packet.payload.count
+            entries.remove(at: index)
+            droppedPackets = true
+
+            let addition = payloadByteCount.addingReportingOverflow(packet.payload.count)
+            if !addition.overflow, addition.partialValue <= maximumPayloadBytes {
+                break
+            }
+        }
+
+        let essentialSize = payloadByteCount.addingReportingOverflow(packet.payload.count)
+        guard !essentialSize.overflow else { return (false, droppedPackets) }
+        let effectiveLimit = max(maximumPayloadBytes, essentialSize.partialValue)
+        return (
+            append(packet, isVideo: false, maximumPayloadBytes: effectiveLimit),
+            droppedPackets
+        )
     }
 
     mutating func finish() -> Batch {
@@ -193,6 +245,7 @@ struct HTSPPostSeekPacketStager: Sendable {
         pinsInitialVideoKeyframe = false
         entries.removeAll(keepingCapacity: true)
         payloadByteCount = 0
+        nextOrdinal = 0
     }
 }
 
@@ -235,8 +288,10 @@ struct HTSPInitialTunePacketStager: Sendable {
     private var stagingStartedAt: Date?
     private var acceptedVideoKeyframeAt: Date?
     private var acceptedVideoAnchorTime: Int64?
-    private var maximumWaitBeforeVideoKeyframe: TimeInterval = 3
+    private var maximumWaitBeforeVideoKeyframe: TimeInterval = 12
     private var maximumWaitAfterVideoKeyframe: TimeInterval = 2
+    private var fallbackBoundaryReached = false
+    private var hasAcceptedPrimaryAudio = false
     private(set) var isActive = false
 
     var payloadByteCount: Int {
@@ -249,7 +304,7 @@ struct HTSPInitialTunePacketStager: Sendable {
         primaryAudioStreamIndex: Int?,
         requiredDuration: Int64 = HTSPPostSeekBufferTracker.minimumRequiredDuration,
         maximumPayloadBytes: Int,
-        maximumWaitBeforeVideoKeyframe: TimeInterval = 3,
+        maximumWaitBeforeVideoKeyframe: TimeInterval = 12,
         maximumWaitAfterVideoKeyframe: TimeInterval = 2
     ) {
         cancel()
@@ -297,15 +352,22 @@ struct HTSPInitialTunePacketStager: Sendable {
             }
 
             trimProvisionalPacketsToMakeRoom(for: packet.payload.count)
-            guard packets.append(
+            let keyframeFitsPayloadBudget = packets.append(
                 packet,
                 isVideo: true,
                 maximumPayloadBytes: maximumPayloadBytes
-            ) else {
-                if packets.append(packet, isVideo: true, maximumPayloadBytes: .max) {
-                    return finishOverflow(trailingPacket: nil)
+            )
+            if !keyframeFitsPayloadBudget {
+                guard packets.append(
+                    packet,
+                    isVideo: true,
+                    maximumPayloadBytes: max(maximumPayloadBytes, packet.payload.count)
+                ) else {
+                    return finishFailure(
+                        "The initial video keyframe could not be retained for A/V staging."
+                    )
                 }
-                return finishOverflow(trailingPacket: packet)
+                fallbackBoundaryReached = true
             }
             guard coverage.shouldAcceptPacket(
                 time: packetTime,
@@ -352,12 +414,27 @@ struct HTSPInitialTunePacketStager: Sendable {
                    ) {
                     continue
                 }
-                guard packets.append(
+                let isPrimaryAudio = provisionalPacket.isAudio
+                    && stagedPacket.streamIndex == primaryAudioStreamIndex
+                var droppedPackets = false
+                if !packets.append(
                     stagedPacket,
                     isVideo: false,
                     maximumPayloadBytes: maximumPayloadBytes
-                ) else {
-                    return finishOverflow(trailingPacket: stagedPacket)
+                ) {
+                    fallbackBoundaryReached = true
+                    guard isPrimaryAudio else { continue }
+                    let requiredAppend = packets.appendRequiredPrimaryAudio(
+                        stagedPacket,
+                        primaryVideoStreamIndex: primaryVideoStreamIndex ?? stagedPacket.streamIndex,
+                        maximumPayloadBytes: maximumPayloadBytes
+                    )
+                    guard requiredAppend.appended else {
+                        return finishFailure(
+                            "The first primary-audio packet could not be retained for A/V staging."
+                        )
+                    }
+                    droppedPackets = requiredAppend.droppedPackets
                 }
                 _ = coverage.observePacket(
                     time: stagedTime,
@@ -368,17 +445,34 @@ struct HTSPInitialTunePacketStager: Sendable {
                     isAudio: provisionalPacket.isAudio,
                     frameType: stagedPacket.frameType
                 )
+                if isPrimaryAudio { hasAcceptedPrimaryAudio = true }
+                if droppedPackets {
+                    return finishOverflow(trailingPacket: nil)
+                }
             }
-            return .waiting
+            return fallbackBoundaryReached && hasAcceptedPrimaryAudio
+                ? finishOverflow(trailingPacket: nil)
+                : .waiting
         }
 
         let exceededDeadline = acceptedVideoKeyframeAt.map {
             date.timeIntervalSince($0) >= maximumWaitAfterVideoKeyframe
         } == true
+        let isPrimaryAudio = isAudio
+            && packet.streamIndex == primaryAudioStreamIndex
+
+        // Once a fallback boundary has been reached, or the deadline expires
+        // without audio, freeze the video-heavy batch. Only an acceptable
+        // primary-audio access unit can make the retained keyframe publishable.
+        if fallbackBoundaryReached, !isPrimaryAudio {
+            return .waiting
+        }
+        if exceededDeadline, !hasAcceptedPrimaryAudio, !isPrimaryAudio {
+            fallbackBoundaryReached = true
+            return .waiting
+        }
         if !isVideo, !isAudio, !shouldAcceptAncillaryPacket(packet) {
-            return exceededDeadline
-                ? finishOverflow(trailingPacket: nil)
-                : .waiting
+            return exceededDeadline ? requestFallback() : .waiting
         }
         guard coverage.shouldAcceptPacket(
             time: packetTime,
@@ -388,20 +482,30 @@ struct HTSPInitialTunePacketStager: Sendable {
             isAudio: isAudio,
             frameType: packet.frameType
         ) else {
-            return exceededDeadline
-                ? finishOverflow(trailingPacket: nil)
-                : .waiting
+            return exceededDeadline ? requestFallback() : .waiting
         }
 
-        guard packets.append(
+        var droppedPacketsForRequiredAudio = false
+        if !packets.append(
             packet,
             isVideo: isVideo,
             maximumPayloadBytes: maximumPayloadBytes
-        ) else {
-            if packets.append(packet, isVideo: isVideo, maximumPayloadBytes: .max) {
-                return finishOverflow(trailingPacket: nil)
+        ) {
+            fallbackBoundaryReached = true
+            guard isPrimaryAudio, !hasAcceptedPrimaryAudio else {
+                return requestFallback()
             }
-            return finishOverflow(trailingPacket: packet)
+            let requiredAppend = packets.appendRequiredPrimaryAudio(
+                packet,
+                primaryVideoStreamIndex: primaryVideoStreamIndex ?? packet.streamIndex,
+                maximumPayloadBytes: maximumPayloadBytes
+            )
+            guard requiredAppend.appended else {
+                return finishFailure(
+                    "The first primary-audio packet could not be retained for A/V staging."
+                )
+            }
+            droppedPacketsForRequiredAudio = requiredAppend.droppedPackets
         }
 
         let completion = coverage.observePacket(
@@ -413,9 +517,13 @@ struct HTSPInitialTunePacketStager: Sendable {
             isAudio: isAudio,
             frameType: packet.frameType
         )
+        if isPrimaryAudio { hasAcceptedPrimaryAudio = true }
+        if droppedPacketsForRequiredAudio {
+            return finishOverflow(trailingPacket: nil)
+        }
         guard completion != nil else {
-            return exceededDeadline
-                ? finishOverflow(trailingPacket: nil)
+            return exceededDeadline || fallbackBoundaryReached
+                ? requestFallback()
                 : .waiting
         }
 
@@ -442,9 +550,39 @@ struct HTSPInitialTunePacketStager: Sendable {
         stagingStartedAt = nil
         acceptedVideoKeyframeAt = nil
         acceptedVideoAnchorTime = nil
-        maximumWaitBeforeVideoKeyframe = 3
+        maximumWaitBeforeVideoKeyframe = 12
         maximumWaitAfterVideoKeyframe = 2
+        fallbackBoundaryReached = false
+        hasAcceptedPrimaryAudio = false
         isActive = false
+    }
+
+    /// Gives a candidate-era partial window a foreground staging budget.
+    ///
+    /// Rolling candidates build their replacement window beside the last
+    /// committed window, so their stager can have only a fraction of the
+    /// normal payload budget. Its timeout also starts while the channel is in
+    /// the background. Neither constraint should carry across promotion: the
+    /// retained packets remain useful, but foreground playback needs a full,
+    /// fresh opportunity to finish the common A/V horizon.
+    mutating func prepareForForegroundPromotion(
+        maximumPayloadBytes: Int,
+        maximumWaitBeforeVideoKeyframe: TimeInterval,
+        maximumWaitAfterVideoKeyframe: TimeInterval,
+        at date: Date = Date()
+    ) {
+        guard isActive else { return }
+        self.maximumPayloadBytes = max(
+            max(1, maximumPayloadBytes),
+            payloadByteCount
+        )
+        self.maximumWaitBeforeVideoKeyframe = max(0, maximumWaitBeforeVideoKeyframe)
+        self.maximumWaitAfterVideoKeyframe = max(0, maximumWaitAfterVideoKeyframe)
+        stagingStartedAt = date
+        if acceptedVideoKeyframeAt != nil {
+            acceptedVideoKeyframeAt = date
+        }
+        fallbackBoundaryReached = false
     }
 
     private mutating func retainProvisional(
@@ -483,6 +621,8 @@ struct HTSPInitialTunePacketStager: Sendable {
         stagingStartedAt = nil
         acceptedVideoKeyframeAt = nil
         acceptedVideoAnchorTime = nil
+        fallbackBoundaryReached = false
+        hasAcceptedPrimaryAudio = false
         isActive = false
         return .overflow(
             batch: batch,
@@ -495,6 +635,12 @@ struct HTSPInitialTunePacketStager: Sendable {
     private mutating func finishFailure(_ reason: String) -> Disposition {
         cancel()
         return .failure(reason)
+    }
+
+    private mutating func requestFallback() -> Disposition {
+        fallbackBoundaryReached = true
+        guard hasAcceptedPrimaryAudio else { return .waiting }
+        return finishOverflow(trailingPacket: nil)
     }
 
     private func shouldAcceptAncillaryPacket(_ packet: HTSPMuxPacket) -> Bool {
@@ -544,7 +690,7 @@ struct HTSPRollingTunePacketBuffer: Sendable {
     private var primaryAudioStreamIndex: Int?
     private var requiredDuration: Int64 = 500_000
     private var maximumPayloadBytes = 8 * 1_024 * 1_024
-    private var maximumWaitBeforeVideoKeyframe: TimeInterval = 3
+    private var maximumWaitBeforeVideoKeyframe: TimeInterval = 12
     private var maximumWaitAfterVideoKeyframe: TimeInterval = 2.5
     private var initialStager = HTSPInitialTunePacketStager()
     private var orderedPackets: [HTSPMuxPacket] = []
@@ -566,7 +712,7 @@ struct HTSPRollingTunePacketBuffer: Sendable {
         primaryAudioStreamIndex: Int?,
         requiredDuration: Int64,
         maximumPayloadBytes: Int,
-        maximumWaitBeforeVideoKeyframe: TimeInterval = 3,
+        maximumWaitBeforeVideoKeyframe: TimeInterval = 12,
         maximumWaitAfterVideoKeyframe: TimeInterval = 2.5
     ) {
         self.hasVideo = hasVideo
@@ -693,7 +839,13 @@ struct HTSPRollingTunePacketBuffer: Sendable {
             return .ready(snapshot)
         }
         if initialStager.isActive {
-            let partial = initialStager
+            var partial = initialStager
+            partial.prepareForForegroundPromotion(
+                maximumPayloadBytes: maximumPayloadBytes,
+                maximumWaitBeforeVideoKeyframe: maximumWaitBeforeVideoKeyframe,
+                maximumWaitAfterVideoKeyframe: maximumWaitAfterVideoKeyframe,
+                at: date
+            )
             cancel()
             return .partial(partial)
         }
@@ -980,10 +1132,14 @@ struct MPEGTimestampContinuity {
 }
 
 final class MPEGTransportStreamMuxer {
-    // VLC 3.x intentionally does not propagate the standard MPEG-TS
-    // discontinuity indicator to packetizers and decoders. Its TS demuxer
-    // recognizes this private-data marker and turns it into
-    // BLOCK_FLAG_DISCONTINUITY, which flushes stale audio/video decoder state.
+    /// MPEG-TS requires PCR samples at least every 100 ms. Keep a wider safety
+    /// margin because the callback input is consumed in bursts and VLC uses
+    /// PCR cadence to establish the audio/video presentation clock.
+    private static let maximumPCRIntervalMicroseconds: Int64 = 40_000
+
+    // VLCKit's TS demuxer recognizes this private-data marker and turns it
+    // into BLOCK_FLAG_DISCONTINUITY, flushing stale audio/video decoder state
+    // even on builds where the standard MPEG-TS indicator is not propagated.
     private static let vlcDiscontinuityMarker = Data("VLC_DISCONTINU".utf8)
 
     private struct Track {
@@ -1010,6 +1166,7 @@ final class MPEGTransportStreamMuxer {
     private var pendingDiscontinuityPIDs: Set<UInt16> = []
     private var pendingDecoderFlushPIDs: Set<UInt16> = []
     private var timestampContinuity = MPEGTimestampContinuity()
+    private var lastPCRMicroseconds: Int64?
     private var startupTimestampAnchor: Int64?
     private var startupPacketEvents: [String] = []
     private var startupFirstVideoTimestamp: Int64?
@@ -1156,6 +1313,7 @@ final class MPEGTransportStreamMuxer {
     private func resetTransportState(flushesDecoders: Bool) {
         continuity.removeAll()
         packetsSinceTables = Int.max
+        lastPCRMicroseconds = nil
         pendingBootstrapIndexes = Set(
             tracksByIndex.values.compactMap { track in
                 track.isVideo && track.bootstrap != nil ? track.info.index : nil
@@ -1191,6 +1349,7 @@ final class MPEGTransportStreamMuxer {
         )
         let pts = timestamps.presentationTime ?? timestamps.decodeTime
         let dts = timestamps.decodeTime
+        let clockTime = dts ?? pts
         let pes = Self.pesPacket(
             streamID: track.streamID,
             ptsMicroseconds: pts,
@@ -1204,16 +1363,103 @@ final class MPEGTransportStreamMuxer {
             timestamp: dts ?? pts,
             pes: pes
         )
+        let discontinuity = consumeDiscontinuity(for: track.pid)
+        let canCarryPCRInPES = track.pid == pcrPID
+            && discontinuity != .decoderFlush
+            && clockTime.map { clockTime in
+                lastPCRMicroseconds.map { clockTime >= $0 } ?? true
+            } == true
+        let appendsPCRAfterPES = track.pid == pcrPID
+            && discontinuity == .decoderFlush
+            && clockTime != nil
+        if let clockTime, !appendsPCRAfterPES {
+            appendPCRCadencePackets(
+                through: clockTime,
+                excludingEndpoint: canCarryPCRInPES,
+                to: &output
+            )
+        }
+        let pcrMicroseconds: Int64?
+        if canCarryPCRInPES, let clockTime {
+            pcrMicroseconds = clockTime
+            lastPCRMicroseconds = clockTime
+        } else {
+            pcrMicroseconds = nil
+        }
         let transportPackets = packetize(
             pes,
             pid: track.pid,
             presentationUnitStart: true,
-            pcrMicroseconds: track.pid == pcrPID ? (dts ?? pts) : nil,
-            discontinuity: consumeDiscontinuity(for: track.pid)
+            pcrMicroseconds: pcrMicroseconds,
+            discontinuity: discontinuity
         )
         output.append(transportPackets)
         packetsSinceTables += transportPackets.count / 188
+        if let clockTime, appendsPCRAfterPES {
+            appendPCRCadencePackets(
+                through: clockTime,
+                excludingEndpoint: false,
+                to: &output
+            )
+        }
         return output
+    }
+
+    /// Inserts adaptation-only PCR packets on the PMT-declared PCR PID when
+    /// elementary-stream ordering leaves a long run without video PES. This
+    /// commonly happens at live startup when TVHeadend sends two H.264
+    /// keyframes followed by an audio burst. Without these packets the staged
+    /// output can contain a single PCR and VLC may create a video output and
+    /// briefly decode audio without ever establishing a usable clock.
+    private func appendPCRCadencePackets(
+        through clockTime: Int64,
+        excludingEndpoint: Bool,
+        to output: inout Data
+    ) {
+        guard clockTime >= 0 else { return }
+        guard var lastPCRMicroseconds else {
+            guard !excludingEndpoint else { return }
+            output.append(pcrOnlyPacket(microseconds: clockTime))
+            self.lastPCRMicroseconds = clockTime
+            packetsSinceTables += 1
+            return
+        }
+        guard clockTime > lastPCRMicroseconds else { return }
+
+        while true {
+            let addition = lastPCRMicroseconds.addingReportingOverflow(
+                Self.maximumPCRIntervalMicroseconds
+            )
+            guard !addition.overflow else { return }
+            let nextPCR = addition.partialValue
+            let isDue = excludingEndpoint ? nextPCR < clockTime : nextPCR <= clockTime
+            guard isDue else { return }
+            output.append(pcrOnlyPacket(microseconds: nextPCR))
+            self.lastPCRMicroseconds = nextPCR
+            lastPCRMicroseconds = nextPCR
+            packetsSinceTables += 1
+        }
+    }
+
+    private func pcrOnlyPacket(microseconds: Int64) -> Data {
+        let discontinuity = pendingDiscontinuityPIDs.remove(pcrPID) != nil
+        // Adaptation-only packets do not advance the continuity counter. If a
+        // payload packet has already used this PID, repeat its counter; the
+        // next payload packet will consume the stored next value normally.
+        let continuityCounter = continuity[pcrPID].map { ($0 &+ 15) & 0x0f } ?? 0
+        var packet = Data([
+            0x47,
+            UInt8((pcrPID >> 8) & 0x1f),
+            UInt8(pcrPID & 0xff),
+            0x20 | continuityCounter,
+            183,
+            discontinuity ? 0x90 : 0x10,
+        ])
+        packet.append(Self.pcrBytes(microseconds: microseconds))
+        if packet.count < 188 {
+            packet.append(Data(repeating: 0xff, count: 188 - packet.count))
+        }
+        return packet
     }
 
     func tables() -> Data {

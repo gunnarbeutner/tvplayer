@@ -69,14 +69,14 @@ final class TimeshiftActionTests: XCTestCase {
         )
         gate.arm(from: initial)
         gate.requireSustainedOutput(0.5)
-        gate.requireDisplayedPictures(12)
+        gate.requireFreshVideoAtReveal()
         gate.requireAudioOutput()
         gate.markPipelineRecreated()
         XCTAssertTrue(gate.beginConcealing(from: initial))
 
         // The first observation establishes the new pipeline's baseline. A
-        // twelve-picture startup burst then stops for longer than the cadence
-        // tolerance and must not dismiss the launch surface.
+        // startup burst then stops for longer than the audio cadence tolerance
+        // and must not dismiss the launch surface.
         XCTAssertFalse(gate.observe(initial, at: startedAt))
         XCTAssertFalse(gate.observe(
             PlaybackOutputCounters(displayedPictures: 12, playedAudioBuffers: 12),
@@ -88,7 +88,7 @@ final class TimeshiftActionTests: XCTestCase {
         ))
 
         // Once presentation resumes, the gate needs a complete fresh half
-        // second and twelve new pictures from this continuity epoch.
+        // second of audio and a new picture on the reveal observation.
         XCTAssertFalse(gate.observe(
             PlaybackOutputCounters(displayedPictures: 13, playedAudioBuffers: 13),
             at: startedAt.addingTimeInterval(0.32)
@@ -100,6 +100,68 @@ final class TimeshiftActionTests: XCTestCase {
         XCTAssertTrue(gate.observe(
             PlaybackOutputCounters(displayedPictures: 25, playedAudioBuffers: 25),
             at: startedAt.addingTimeInterval(0.82)
+        ))
+    }
+
+    func testColdTuneOutputGateAcceptsTwoFPSVideoUsingAudioClockContinuity() {
+        var gate = PostSeekPlaybackOutputGate()
+        let startedAt = Date(timeIntervalSinceReferenceDate: 600)
+        let initial = PlaybackOutputCounters(displayedPictures: 0, playedAudioBuffers: 0)
+        gate.arm(from: initial)
+        gate.requireSustainedOutput(0.5)
+        gate.requireFreshVideoAtReveal()
+        gate.requireAudioOutput()
+        gate.markPipelineRecreated()
+        XCTAssertTrue(gate.beginConcealing(from: initial))
+        XCTAssertFalse(gate.observe(initial, at: startedAt))
+
+        XCTAssertFalse(gate.observe(
+            PlaybackOutputCounters(displayedPictures: 1, playedAudioBuffers: 1),
+            at: startedAt.addingTimeInterval(0.01)
+        ))
+        for step in 1...4 {
+            XCTAssertFalse(gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 1,
+                    playedAudioBuffers: step + 1
+                ),
+                at: startedAt.addingTimeInterval(0.01 + Double(step) * 0.1)
+            ))
+        }
+        XCTAssertTrue(gate.observe(
+            PlaybackOutputCounters(displayedPictures: 2, playedAudioBuffers: 5),
+            at: startedAt.addingTimeInterval(0.51)
+        ))
+    }
+
+    func testColdTuneOutputGateAcceptsOneFPSVideoOnlyOnFreshPicture() {
+        var gate = PostSeekPlaybackOutputGate()
+        let startedAt = Date(timeIntervalSinceReferenceDate: 700)
+        let initial = PlaybackOutputCounters(displayedPictures: 0, playedAudioBuffers: 0)
+        gate.arm(from: initial)
+        gate.requireSustainedOutput(0.5)
+        gate.requireFreshVideoAtReveal()
+        gate.requireAudioOutput()
+        gate.markPipelineRecreated()
+        XCTAssertTrue(gate.beginConcealing(from: initial))
+        XCTAssertFalse(gate.observe(initial, at: startedAt))
+
+        XCTAssertFalse(gate.observe(
+            PlaybackOutputCounters(displayedPictures: 1, playedAudioBuffers: 1),
+            at: startedAt.addingTimeInterval(0.01)
+        ))
+        for step in 1...9 {
+            XCTAssertFalse(gate.observe(
+                PlaybackOutputCounters(
+                    displayedPictures: 1,
+                    playedAudioBuffers: step + 1
+                ),
+                at: startedAt.addingTimeInterval(0.01 + Double(step) * 0.1)
+            ))
+        }
+        XCTAssertTrue(gate.observe(
+            PlaybackOutputCounters(displayedPictures: 2, playedAudioBuffers: 10),
+            at: startedAt.addingTimeInterval(1.01)
         ))
     }
 
@@ -358,6 +420,107 @@ final class TimeshiftActionTests: XCTestCase {
                     playedAudioBuffers: 30
                 ),
                 at: start.addingTimeInterval(10),
+                expectsOutput: true,
+                hasFreshInput: true,
+                expectsAudio: true
+            ),
+            .rebuildPlayer
+        )
+    }
+
+    func testOutputWatchdogQuicklyRebuildsWhenStartupAudioBrieflyAdvancesThenStalls() {
+        var monitor = PlaybackOutputHealthMonitor()
+        let start = Date(timeIntervalSinceReferenceDate: 10_000)
+        let initial = PlaybackOutputCounters(displayedPictures: 0, playedAudioBuffers: 0)
+
+        monitor.restartGracePeriod(output: initial, at: start)
+        XCTAssertEqual(
+            monitor.observe(
+                output: PlaybackOutputCounters(
+                    displayedPictures: 1,
+                    playedAudioBuffers: 1
+                ),
+                at: start.addingTimeInterval(0.1),
+                expectsOutput: true,
+                hasFreshInput: true,
+                expectsAudio: true
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            monitor.observe(
+                output: PlaybackOutputCounters(
+                    displayedPictures: 30,
+                    playedAudioBuffers: 1
+                ),
+                at: start.addingTimeInterval(1.59),
+                expectsOutput: true,
+                hasFreshInput: true,
+                expectsAudio: true
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            monitor.observe(
+                output: PlaybackOutputCounters(
+                    displayedPictures: 31,
+                    playedAudioBuffers: 1
+                ),
+                at: start.addingTimeInterval(1.61),
+                expectsOutput: true,
+                hasFreshInput: true,
+                expectsAudio: true
+            ),
+            .rebuildPlayerForStartupAudioStall
+        )
+    }
+
+    func testOutputWatchdogAllowsHalfSecondStartupAudioCounterGaps() {
+        var monitor = PlaybackOutputHealthMonitor()
+        let start = Date(timeIntervalSinceReferenceDate: 10_000)
+        var output = PlaybackOutputCounters(displayedPictures: 0, playedAudioBuffers: 0)
+
+        monitor.restartGracePeriod(output: output, at: start)
+        for step in 1...7 {
+            output = PlaybackOutputCounters(
+                displayedPictures: step * 12,
+                playedAudioBuffers: step
+            )
+            XCTAssertEqual(
+                monitor.observe(
+                    output: output,
+                    at: start.addingTimeInterval(Double(step) * 0.5),
+                    expectsOutput: true,
+                    hasFreshInput: true,
+                    expectsAudio: true
+                ),
+                .none
+            )
+        }
+
+        // Three seconds of advancing output proves the startup cadence. A
+        // subsequent 1.5-second statistics gap therefore uses the normal,
+        // deliberately tolerant steady-state watchdog instead.
+        XCTAssertEqual(
+            monitor.observe(
+                output: PlaybackOutputCounters(
+                    displayedPictures: 120,
+                    playedAudioBuffers: output.playedAudioBuffers
+                ),
+                at: start.addingTimeInterval(5),
+                expectsOutput: true,
+                hasFreshInput: true,
+                expectsAudio: true
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            monitor.observe(
+                output: PlaybackOutputCounters(
+                    displayedPictures: 300,
+                    playedAudioBuffers: output.playedAudioBuffers
+                ),
+                at: start.addingTimeInterval(13.5),
                 expectsOutput: true,
                 hasFreshInput: true,
                 expectsAudio: true

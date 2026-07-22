@@ -195,6 +195,132 @@ final class HTSPRollingTunePacketBufferTests: XCTestCase {
         XCTAssertEqual(packetTags(batch.interleavedPackets), [4, 6, 5])
     }
 
+    func testPartialClaimReceivesFullForegroundPayloadBudget() {
+        var buffer = makeBuffer(maximumPayloadBytes: 4)
+        let startedAt = Date(timeIntervalSinceReferenceDate: 3_100)
+        appendAlignedWindow(
+            to: &buffer,
+            anchorTime: 1_000_000,
+            tags: (videoKeyframe: 1, videoTail: 2, audioTail: 3),
+            startedAt: startedAt
+        )
+
+        let replacementStartedAt = startedAt.addingTimeInterval(0.3)
+        buffer.append(
+            packet(
+                stream: 1,
+                frameType: 0x49,
+                presentationTime: 2_000_000,
+                decodeTime: 2_000_000,
+                tag: 4
+            ),
+            isVideo: true,
+            isAudio: false,
+            at: replacementStartedAt
+        )
+        XCTAssertEqual(buffer.payloadByteCount, 4)
+
+        guard case var .partial(partial) = buffer.claim(
+            at: replacementStartedAt.addingTimeInterval(0.01),
+            maximumAlignedAge: 0
+        ) else {
+            return XCTFail("A stale committed window should yield its partial replacement.")
+        }
+        guard case .waiting = partial.append(
+            packet(
+                stream: 1,
+                frameType: 0x50,
+                presentationTime: 2_500_000,
+                decodeTime: 2_500_000,
+                tag: 5
+            ),
+            isVideo: true,
+            isAudio: false,
+            at: replacementStartedAt.addingTimeInterval(0.1)
+        ) else {
+            return XCTFail("Promotion should replace the candidate's one-byte residual budget.")
+        }
+        let completion = partial.append(
+            packet(
+                stream: 2,
+                presentationTime: 2_480_000,
+                decodeTime: nil,
+                duration: 20_000,
+                tag: 6
+            ),
+            isVideo: false,
+            isAudio: true,
+            at: replacementStartedAt.addingTimeInterval(0.2)
+        )
+        guard case let .ready(batch, _, _, _) = completion else {
+            return XCTFail("The promoted partial should finish a full aligned A/V window.")
+        }
+        XCTAssertEqual(packetTags(batch.interleavedPackets), [4, 6, 5])
+    }
+
+    func testPartialClaimReceivesFreshForegroundDeadline() {
+        var buffer = makeBuffer()
+        let startedAt = Date(timeIntervalSinceReferenceDate: 3_200)
+        appendAlignedWindow(
+            to: &buffer,
+            anchorTime: 1_000_000,
+            tags: (videoKeyframe: 1, videoTail: 2, audioTail: 3),
+            startedAt: startedAt
+        )
+
+        let replacementStartedAt = startedAt.addingTimeInterval(0.3)
+        buffer.append(
+            packet(
+                stream: 1,
+                frameType: 0x49,
+                presentationTime: 2_000_000,
+                decodeTime: 2_000_000,
+                tag: 4
+            ),
+            isVideo: true,
+            isAudio: false,
+            at: replacementStartedAt
+        )
+        let promotedAt = replacementStartedAt.addingTimeInterval(3)
+        guard case var .partial(partial) = buffer.claim(
+            at: promotedAt,
+            maximumAlignedAge: 0.5
+        ) else {
+            return XCTFail("An old partial replacement should still be reusable at promotion.")
+        }
+
+        guard case .waiting = partial.append(
+            packet(
+                stream: 1,
+                frameType: 0x50,
+                presentationTime: 2_500_000,
+                decodeTime: 2_500_000,
+                tag: 5
+            ),
+            isVideo: true,
+            isAudio: false,
+            at: promotedAt.addingTimeInterval(0.1)
+        ) else {
+            return XCTFail("The post-keyframe deadline should restart when promotion begins.")
+        }
+        let completion = partial.append(
+            packet(
+                stream: 2,
+                presentationTime: 2_480_000,
+                decodeTime: nil,
+                duration: 20_000,
+                tag: 6
+            ),
+            isVideo: false,
+            isAudio: true,
+            at: promotedAt.addingTimeInterval(0.2)
+        )
+        guard case let .ready(batch, _, _, _) = completion else {
+            return XCTFail("The refreshed partial should complete before its new deadline.")
+        }
+        XCTAssertEqual(packetTags(batch.interleavedPackets), [4, 6, 5])
+    }
+
     func testPayloadLimitFreezesRatherThanInvalidatesReadyWindow() {
         var buffer = makeBuffer(maximumPayloadBytes: 3)
         let startedAt = Date(timeIntervalSinceReferenceDate: 4_000)
