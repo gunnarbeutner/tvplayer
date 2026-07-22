@@ -44,15 +44,20 @@ final class RecordingThumbnailGenerator {
             thumbnailer?.fetchThumbnail()
         }
 
-        func mediaThumbnailerDidTimeOut(_ mediaThumbnailer: VLCMediaThumbnailer) {
-            finish(with: nil)
+        nonisolated func mediaThumbnailerDidTimeOut(_ mediaThumbnailer: VLCMediaThumbnailer) {
+            Task { @MainActor [weak self] in
+                self?.finish(with: nil)
+            }
         }
 
-        func mediaThumbnailer(
+        nonisolated func mediaThumbnailer(
             _ mediaThumbnailer: VLCMediaThumbnailer,
             didFinishThumbnail thumbnail: CGImage
         ) {
-            finish(with: Self.jpegData(from: thumbnail, outputSize: outputSize))
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                finish(with: Self.jpegData(from: thumbnail, outputSize: outputSize))
+            }
         }
 
         private func finish(with data: Data?) {

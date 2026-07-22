@@ -10,6 +10,13 @@ enum AppRoute: Equatable, Sendable {
     case playChannel(String, topShelf: TopShelfLaunchContext? = nil)
     case playRecording(String)
 
+    var opensPlayback: Bool {
+        switch self {
+        case .guide: false
+        case .playChannel, .playRecording: true
+        }
+    }
+
     init?(url: URL) {
         guard url.scheme?.localizedCaseInsensitiveCompare("tvplayer") == .orderedSame else {
             return nil

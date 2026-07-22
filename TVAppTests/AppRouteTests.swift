@@ -32,4 +32,10 @@ final class AppRouteTests: XCTestCase {
         XCTAssertNil(AppRoute(url: URL(string: "https://example.com/guide")!))
         XCTAssertNil(AppRoute(url: URL(string: "tvplayer://play/unknown/123")!))
     }
+
+    func testOnlyPlayerRoutesOpenPlayback() {
+        XCTAssertFalse(AppRoute.guide.opensPlayback)
+        XCTAssertTrue(AppRoute.playChannel("channel").opensPlayback)
+        XCTAssertTrue(AppRoute.playRecording("recording").opensPlayback)
+    }
 }

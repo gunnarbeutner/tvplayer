@@ -49,6 +49,14 @@ enum PlaybackExitCommandPolicy {
     }
 }
 
+#if os(tvOS)
+private enum StartupRoutePhase: Equatable {
+    case awaitingOpenURL
+    case launchingPlayback
+    case normal
+}
+#endif
+
 private struct LiveChannelOrderSynchronization: ViewModifier {
     @ObservedObject var guide: GuideViewModel
     @ObservedObject var channelPreferences: ChannelPreferencesStore
@@ -88,6 +96,9 @@ struct RootTabView: View {
     @State private var recordingAlertMessage: String?
     @State private var pendingRoute: AppRoute?
 #if os(tvOS)
+    @State private var startupRoutePhase: StartupRoutePhase
+    @State private var startupPlaybackRoute: AppRoute?
+    @State private var topShelfLaunchItem: TopShelfSnapshot.Item?
     @State private var navigationFocusRequest: AppTab?
     @State private var isSectionNavigatorFocused = false
     @State private var channelsFocusRequest: UUID?
@@ -101,6 +112,11 @@ struct RootTabView: View {
     init() {
         let playback = PlaybackCoordinator()
         _playback = StateObject(wrappedValue: playback)
+#if os(tvOS)
+        _startupRoutePhase = State(initialValue: .awaitingOpenURL)
+        _startupPlaybackRoute = State(initialValue: nil)
+        _topShelfLaunchItem = State(initialValue: nil)
+#endif
         _selection = State(initialValue: Self.appTab(for: playback.initialStartupSection))
         let settings = ServerSettingsStore()
         let configuration = settings.configuration
@@ -189,8 +205,17 @@ struct RootTabView: View {
             // so the tab content underneath stays mounted and focusable.
             // Disable it while the player is up; otherwise remote presses
             // keep driving the invisible guide instead of the player chrome.
-            navigableTabs
-                .disabled(playback.isPlayerPresented)
+            if mountsNavigation {
+                navigableTabs
+                    .disabled(playback.isPlayerPresented)
+            } else {
+                // SwiftUI delivers a cold-launch URL after constructing the
+                // scene. Keep focusable navigation out of the hierarchy until
+                // that delivery turn has completed, so Top Shelf cannot show
+                // or move the guide before playback's launch surface appears.
+                Color.black
+                    .ignoresSafeArea()
+            }
 
             // Keep VLC's drawable mounted while the guide is visible. A new
             // UIView on each full-screen presentation can leave VLC's audio
@@ -212,18 +237,28 @@ struct RootTabView: View {
             // whole guide above it. The guide header can then act as a window
             // onto the persistent VLC surface while the tabs and cog remain
             // crisp, visible, and focusable.
-            sectionNavigator
-                .disabled(playback.isPlayerPresented)
-                .opacity(playback.isPlayerPresented ? 0 : 1)
-                .zIndex(2)
+            if mountsNavigation {
+                sectionNavigator
+                    .disabled(playback.isPlayerPresented)
+                    .opacity(playback.isPlayerPresented ? 0 : 1)
+                    .zIndex(2)
 
-            SectionFocusBridge(
-                isEnabled: allowsSectionNavigatorFocus
-                    && !isSectionNavigatorFocused
-                    && !playback.isPlayerPresented,
-                onFocused: { navigationFocusRequest = selection }
-            )
-            .zIndex(3)
+                SectionFocusBridge(
+                    isEnabled: allowsSectionNavigatorFocus
+                        && !isSectionNavigatorFocused
+                        && !playback.isPlayerPresented,
+                    onFocused: { navigationFocusRequest = selection }
+                )
+                .zIndex(3)
+            }
+
+            if startupRoutePhase == .launchingPlayback,
+               !playback.isPlayerPresented,
+               playback.launchPresentation == nil,
+               let topShelfLaunchItem {
+                TopShelfStartupLaunchView(item: topShelfLaunchItem)
+                    .zIndex(11.5)
+            }
 #endif
 
             if playback.isPlayerPresented,
@@ -295,6 +330,12 @@ struct RootTabView: View {
         ))
         .onChange(of: playback.isPlayerPresented) { wasPresented, isPresented in
 #if os(tvOS)
+            if isPresented {
+                // The cached Top Shelf bridge is only for route resolution.
+                // Once PlaybackLaunchView takes over, discard it permanently
+                // so it cannot reappear above video when that view clears.
+                topShelfLaunchItem = nil
+            }
             if isPresented, selection == .guide {
                 // Keep the header and its focus bridge out of the focus race
                 // when the player later reveals the guide. GuideView enables
@@ -303,7 +344,12 @@ struct RootTabView: View {
                 allowsSectionNavigatorFocus = false
             }
 #endif
-            if wasPresented && !isPresented { playback.playerDidDismiss() }
+            if wasPresented && !isPresented {
+#if os(tvOS)
+                finishStartupPlaybackRouting()
+#endif
+                playback.playerDidDismiss()
+            }
         }
 #if os(tvOS)
         .onChange(of: scenePhase) { _, phase in
@@ -358,18 +404,35 @@ struct RootTabView: View {
         }
         .onOpenURL { url in
             guard let route = AppRoute(url: url) else { return }
-            pendingRoute = route
+            receive(route)
         }
 #if os(tvOS)
         .onContinueUserActivity(TVUserActivityTypeBrowsingChannelGuide) { _ in
-            pendingRoute = .guide
+            receive(.guide)
         }
 #endif
         .task(id: pendingRoute) {
             guard let route = pendingRoute else { return }
             await handle(route)
-            if pendingRoute == route { pendingRoute = nil }
+            if pendingRoute == route {
+                pendingRoute = nil
+#if os(tvOS)
+                if startupPlaybackRoute == route, !playback.isPlayerPresented {
+                    finishStartupPlaybackRouting()
+                }
+#endif
+            }
         }
+#if os(tvOS)
+        .task {
+            // onOpenURL arrives after SwiftUI has constructed the scene. Keep
+            // navigation unmounted through the system's cold-launch delivery
+            // window so a Top Shelf item cannot flash or focus the guide.
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled, startupRoutePhase == .awaitingOpenURL else { return }
+            startupRoutePhase = .normal
+        }
+#endif
         .onAppear {
 #if os(tvOS)
             TVRemoteCommandCenter.exitHandler = handlePlaybackExitCommand
@@ -437,6 +500,53 @@ struct RootTabView: View {
         }
 #endif
     }
+
+    private var mountsNavigation: Bool {
+#if os(tvOS)
+        startupRoutePhase == .normal
+#else
+        true
+#endif
+    }
+
+    @MainActor
+    private func receive(_ route: AppRoute) {
+#if os(tvOS)
+        if startupRoutePhase == .launchingPlayback,
+           startupPlaybackRoute == route {
+            // UIKit launch options and SwiftUI onOpenURL may both report the
+            // same cold-launch URL. It represents one playback intent.
+            return
+        }
+        if route.opensPlayback {
+            // Also cover a Top Shelf selection delivered after the initial
+            // connection turn, or while a warm scene is showing navigation.
+            startupRoutePhase = .launchingPlayback
+            startupPlaybackRoute = route
+            topShelfLaunchItem = Self.topShelfItem(for: route)
+        } else if startupRoutePhase == .awaitingOpenURL {
+            startupRoutePhase = .normal
+        }
+#endif
+        pendingRoute = route
+    }
+
+#if os(tvOS)
+    private static func topShelfItem(for route: AppRoute) -> TopShelfSnapshot.Item? {
+        guard route.opensPlayback, let snapshot = TopShelfSnapshotStore.load() else { return nil }
+        return (snapshot.onNow + snapshot.recordings).first { item in
+            URL(string: item.routeURL).flatMap(AppRoute.init(url:)) == route
+        }
+    }
+
+    @MainActor
+    private func finishStartupPlaybackRouting() {
+        guard startupRoutePhase == .launchingPlayback else { return }
+        startupRoutePhase = .normal
+        startupPlaybackRoute = nil
+        topShelfLaunchItem = nil
+    }
+#endif
 
 #if os(tvOS)
     private var topShelfRevision: TopShelfPublishRevision {
@@ -838,6 +948,59 @@ private struct TopShelfPublishRevision: Hashable {
 #endif
 
 #if os(tvOS)
+private struct TopShelfStartupLaunchView: View {
+    let item: TopShelfSnapshot.Item
+    private let artwork: UIImage?
+
+    init(item: TopShelfSnapshot.Item) {
+        self.item = item
+        artwork = item.artworkFilename
+            .flatMap { TopShelfSnapshotStore.cachedArtworkURL(for: $0) }
+            .flatMap { UIImage(contentsOfFile: $0.path) }
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            if let artwork {
+                GeometryReader { geometry in
+                    Image(uiImage: artwork)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .clipped()
+
+                    RadialGradient(
+                        stops: [
+                            .init(color: .clear, location: 0.56),
+                            .init(color: .black.opacity(0.28), location: 1),
+                        ],
+                        center: .center,
+                        startRadius: 0,
+                        endRadius: max(geometry.size.width, geometry.size.height) * 0.72
+                    )
+
+                    LinearGradient(
+                        colors: [.black.opacity(0.62), .clear],
+                        startPoint: .topLeading,
+                        endPoint: .center
+                    )
+                }
+                .ignoresSafeArea()
+            }
+
+            Text(item.title)
+                .font(.headline.bold())
+                .lineLimit(2)
+                .foregroundStyle(.white)
+                .padding(48)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .accessibilityLabel("Opening \(item.title)")
+    }
+}
+
 private struct SectionFocusBridge: View {
     let isEnabled: Bool
     let onFocused: () -> Void
