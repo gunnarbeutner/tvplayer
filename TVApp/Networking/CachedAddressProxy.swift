@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import OSLog
 
 /// A loopback HTTP proxy which resolves selected logical hosts through the
 /// last A/AAAA records observed during Bonjour discovery. URLSession and VLC
@@ -7,6 +8,11 @@ import Foundation
 /// validation, redirects, and authentication remain scoped to that origin.
 final class CachedAddressProxy: @unchecked Sendable {
     static let shared = CachedAddressProxy()
+
+    private static let logger = Logger(
+        subsystem: "de.beutner.TVPlayer",
+        category: "CachedAddressProxy"
+    )
 
     private let addressLock = NSLock()
     private var addressesByHost: [String: [String]] = [:]
@@ -88,13 +94,42 @@ final class CachedAddressProxy: @unchecked Sendable {
         while true {
             let client = Darwin.accept(listenerDescriptor, nil, nil)
             if client < 0 {
-                if errno == EINTR { continue }
-                return
+                let error = errno
+                guard !Self.isFatalAcceptError(error) else {
+                    Self.logger.error(
+                        "Proxy listener stopped after accept failed with errno \(error)"
+                    )
+                    return
+                }
+                if Self.shouldBackOffAfterAcceptError(error) {
+                    // Avoid a tight retry loop while the process or system is
+                    // temporarily unable to allocate another socket.
+                    usleep(100_000)
+                }
+                continue
             }
             Self.disableSIGPIPE(on: client)
             DispatchQueue.global(qos: .utility).async { [self] in
                 handleHTTPProxyConnection(client)
             }
+        }
+    }
+
+    static func isFatalAcceptError(_ error: Int32) -> Bool {
+        switch error {
+        case EBADF, EINVAL, ENOTSOCK, EOPNOTSUPP:
+            true
+        default:
+            false
+        }
+    }
+
+    static func shouldBackOffAfterAcceptError(_ error: Int32) -> Bool {
+        switch error {
+        case EMFILE, ENFILE, ENOMEM:
+            true
+        default:
+            false
         }
     }
 

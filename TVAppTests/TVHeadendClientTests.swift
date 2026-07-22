@@ -158,6 +158,26 @@ final class TVHeadendClientTests: XCTestCase {
         ))
     }
 
+    func testCachedAddressProxyKeepsAcceptingAfterRecoverableErrors() {
+        XCTAssertFalse(CachedAddressProxy.isFatalAcceptError(EINTR))
+        XCTAssertFalse(CachedAddressProxy.isFatalAcceptError(ECONNABORTED))
+        XCTAssertFalse(CachedAddressProxy.isFatalAcceptError(EMFILE))
+        XCTAssertFalse(CachedAddressProxy.isFatalAcceptError(ENFILE))
+        XCTAssertFalse(CachedAddressProxy.isFatalAcceptError(ENOMEM))
+
+        XCTAssertTrue(CachedAddressProxy.shouldBackOffAfterAcceptError(EMFILE))
+        XCTAssertTrue(CachedAddressProxy.shouldBackOffAfterAcceptError(ENFILE))
+        XCTAssertTrue(CachedAddressProxy.shouldBackOffAfterAcceptError(ENOMEM))
+        XCTAssertFalse(CachedAddressProxy.shouldBackOffAfterAcceptError(ECONNABORTED))
+    }
+
+    func testCachedAddressProxyStopsForInvalidListenerErrors() {
+        XCTAssertTrue(CachedAddressProxy.isFatalAcceptError(EBADF))
+        XCTAssertTrue(CachedAddressProxy.isFatalAcceptError(EINVAL))
+        XCTAssertTrue(CachedAddressProxy.isFatalAcceptError(ENOTSOCK))
+        XCTAssertTrue(CachedAddressProxy.isFatalAcceptError(EOPNOTSUPP))
+    }
+
     func testTicketedPlaylistChannelsAreParsedCentrally() {
         let channels = TVHeadendClient.playlistChannels(in: #"""
         #EXTM3U
