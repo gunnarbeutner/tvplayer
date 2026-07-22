@@ -85,6 +85,8 @@ struct PlaybackView: View {
     @State private var timelineSeekTargetsLiveEdge = false
     @State private var timelineSeekCommitTask: Task<Void, Never>?
     @State private var timelineSeekRepeatTask: Task<Void, Never>?
+    @State private var transientPlaybackStatus: String?
+    @State private var playbackStatusDismissTask: Task<Void, Never>?
 #if os(tvOS)
     @State private var timelineSeekRepeatedDuringPress = false
 #endif
@@ -141,11 +143,22 @@ struct PlaybackView: View {
             if chromeMode == .timeline {
                 VStack {
                     Spacer()
+                    if let transientPlaybackStatus {
+                        Text(transientPlaybackStatus)
+                            .font(.headline.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 9)
+                            .background(.black.opacity(0.68), in: Capsule())
+                            .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                            .accessibilityHidden(true)
+                    }
                     if let recording = presentation.recording {
                         RecordingPlaybackTimeline(
                             recording: recording,
                             elapsedSeconds: engine.elapsedSeconds,
                             isPlaying: engine.state == .playing,
+                            isPaused: engine.state == .paused,
                             canSeek: engine.isSeekable,
                             usesCompactLayout: usesCompactLayout,
                             usesCompactHeight: usesCompactHeight,
@@ -168,6 +181,7 @@ struct PlaybackView: View {
                             canPause: engine.canPause,
                             canSeek: engine.isSeekable,
                             isPlaying: engine.state == .playing,
+                            isPaused: engine.state == .paused,
                             usesCompactLayout: usesCompactLayout,
                             usesCompactHeight: usesCompactHeight,
                             seekBackward: { stageTimelineSeek(by: -$0) },
@@ -343,6 +357,7 @@ struct PlaybackView: View {
         .onDisappear {
             timelineSeekCommitTask?.cancel()
             timelineSeekRepeatTask?.cancel()
+            playbackStatusDismissTask?.cancel()
 #if os(tvOS)
             TVRemoteCommandCenter.seekHoldHandler = nil
 #endif
@@ -418,7 +433,12 @@ struct PlaybackView: View {
             perform(command)
         }
 #endif
-        .onChange(of: engine.state) { _, state in
+        .onChange(of: engine.state) { previousState, state in
+            let announcesPause = state == .paused
+                && previousState != .paused
+                && hasStartedCurrentPresentation
+            let announcesResume = state == .playing && previousState == .paused
+
             if state == .playing {
                 hasStartedCurrentPresentation = true
                 if chromeMode == .timeline { noteActivity() }
@@ -431,6 +451,12 @@ struct PlaybackView: View {
                 Task { await refreshGrowingRecording() }
             } else {
                 showTimeline()
+            }
+
+            if announcesPause {
+                showPlaybackStatus("Paused")
+            } else if announcesResume {
+                showPlaybackStatus("Playing")
             }
         }
     }
@@ -543,6 +569,25 @@ struct PlaybackView: View {
 
     private func noteActivity() {
         chromeActivity = UUID()
+    }
+
+    private func showPlaybackStatus(_ status: String) {
+        playbackStatusDismissTask?.cancel()
+        withAnimation(.easeOut(duration: 0.16)) {
+            transientPlaybackStatus = status
+        }
+        AccessibilityNotification.Announcement("Playback \(status.lowercased())").post()
+
+        playbackStatusDismissTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .seconds(1.2))
+            } catch {
+                return
+            }
+            withAnimation(.easeIn(duration: 0.2)) {
+                transientPlaybackStatus = nil
+            }
+        }
     }
 
     private func skipForward(by seconds: TimeInterval) {
@@ -715,6 +760,7 @@ private struct RecordingPlaybackTimeline: View {
     let recording: TVRecording
     let elapsedSeconds: TimeInterval
     let isPlaying: Bool
+    let isPaused: Bool
     let canSeek: Bool
     let usesCompactLayout: Bool
     let usesCompactHeight: Bool
@@ -776,11 +822,14 @@ private struct RecordingPlaybackTimeline: View {
                         .fill(.white)
                         .frame(width: 3, height: 31)
                         .offset(x: min(max(0, playhead - 1.5), width - 3))
-                    Text(clock(recording.start.addingTimeInterval(elapsedSeconds)))
+                    Text(playbackTimeLabel(recording.start.addingTimeInterval(elapsedSeconds)))
                         .font(.callout.bold().monospacedDigit())
                         .foregroundStyle(.white)
                         .fixedSize()
-                        .position(x: min(max(54, playhead), width - 54), y: 38)
+                        .position(
+                            x: min(max(timeLabelInset, playhead), width - timeLabelInset),
+                            y: 38
+                        )
                 }
             }
             .frame(height: 52)
@@ -854,6 +903,12 @@ private struct RecordingPlaybackTimeline: View {
     private func clock(_ date: Date) -> String {
         date.formatted(date: .omitted, time: .standard)
     }
+
+    private func playbackTimeLabel(_ date: Date) -> String {
+        clock(date) + (isPaused ? " · Paused" : "")
+    }
+
+    private var timeLabelInset: CGFloat { isPaused ? 86 : 54 }
 }
 
 private struct ProgrammePlaybackTimeline: View {
@@ -867,6 +922,7 @@ private struct ProgrammePlaybackTimeline: View {
     let canPause: Bool
     let canSeek: Bool
     let isPlaying: Bool
+    let isPaused: Bool
     let usesCompactLayout: Bool
     let usesCompactHeight: Bool
     let seekBackward: (TimeInterval) -> Void
@@ -940,6 +996,7 @@ private struct ProgrammePlaybackTimeline: View {
                     playbackDate: playbackDate,
                     availableStart: max(program.start, bufferStartedAt ?? liveDate),
                     availableEnd: min(program.end, liveDate),
+                    isPaused: isPaused,
                     isFocused: isFocused
                 )
 
@@ -1104,6 +1161,7 @@ private struct TimelineBar: View {
     let playbackDate: Date
     let availableStart: Date
     let availableEnd: Date
+    let isPaused: Bool
     let isFocused: Bool
 
     var body: some View {
@@ -1129,11 +1187,14 @@ private struct TimelineBar: View {
                     .frame(width: 3, height: 31)
                     .offset(x: min(max(0, playhead - 1.5), width - 3))
 
-                Text(clock(playbackDate))
+                Text(playbackTimeLabel(playbackDate))
                     .font(.callout.bold().monospacedDigit())
                     .foregroundStyle(.white)
                     .fixedSize()
-                    .position(x: min(max(54, playhead), width - 54), y: 38)
+                    .position(
+                        x: min(max(timeLabelInset, playhead), width - timeLabelInset),
+                        y: 38
+                    )
             }
         }
         .frame(height: 52)
@@ -1146,6 +1207,12 @@ private struct TimelineBar: View {
     private func clock(_ date: Date) -> String {
         date.formatted(date: .omitted, time: .standard)
     }
+
+    private func playbackTimeLabel(_ date: Date) -> String {
+        clock(date) + (isPaused ? " · Paused" : "")
+    }
+
+    private var timeLabelInset: CGFloat { isPaused ? 86 : 54 }
 }
 
 private struct PlayerTabbedOverlay: View {
