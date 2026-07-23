@@ -276,6 +276,11 @@ struct GuideView: View {
                 showLoadingSkeleton = true
             }
         }
+        .task(id: channelLogoWarmupID, priority: .utility) {
+            await ChannelLogoDataLoader.shared.warmCachedArtwork(
+                at: displayedChannels.compactMap(\.iconURL)
+            )
+        }
         .task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(30))
@@ -296,6 +301,10 @@ struct GuideView: View {
 #else
         false
 #endif
+    }
+
+    private var channelLogoWarmupID: [String] {
+        displayedChannels.compactMap(\.iconURL).map(ChannelLogoImageCache.cacheKey)
     }
 
     private var usesLandscapeGuide: Bool {

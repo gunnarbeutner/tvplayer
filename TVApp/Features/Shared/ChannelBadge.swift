@@ -361,6 +361,29 @@ actor ChannelLogoDataLoader {
     private var clientConfiguration: TVHeadendConfiguration?
     private var client: TVHeadendClient?
 
+    /// Restores persisted artwork into the decoded cache without causing
+    /// network requests. Yield between files so visible badges can take
+    /// priority when the guide is being scrolled during hydration.
+    func warmCachedArtwork(
+        at urls: [URL],
+        kind: CachedArtworkKind = .channelLogo
+    ) async {
+        var warmedKeys = Set<String>()
+
+        for url in urls {
+            guard !Task.isCancelled else { return }
+
+            let key = ChannelLogoImageCache.cacheKey(for: url)
+            guard warmedKeys.insert(key).inserted else { continue }
+
+            _ = ChannelLogoImageCache.shared.loadArtworkFromDisk(
+                for: url,
+                kind: kind
+            )
+            await Task.yield()
+        }
+    }
+
     func artwork(
         at url: URL,
         configuration: TVHeadendConfiguration,
