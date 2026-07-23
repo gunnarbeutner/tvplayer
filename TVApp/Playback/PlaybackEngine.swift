@@ -299,6 +299,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     // reported Stopped. Keep each cheap, weak-source reader alive for the
     // engine lifetime; releasing it at Stopped races VLCKit's access callback.
     private var retainedNativeVLCReaders: [InputStream] = []
+    private var activeNativeVLCReader: InputStream?
     private let timeshiftAudioLogger: VLCTimeshiftAudioLogger?
     private var nativeTimeshiftActions: NativeTimeshiftActionController?
     private var nativeTimeshiftSessionID: UUID?
@@ -477,7 +478,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                         throw CancellationError()
                     }
                     let reader = stream.makeVLCReader()
-                    retainedNativeVLCReaders.append(reader)
+                    retainNativeVLCReader(reader)
                     media = Self.makeNativeHTSPMedia(stream: reader)
                     nativeInputStream = stream
                     nativeTimeshiftActions = NativeTimeshiftActionController(sink: stream)
@@ -618,6 +619,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         pipelineRecoveryID = nil
         recoveryReason = nil
         recoveryAttempt = 0
+        closeActiveNativeVLCReader()
         mediaPlayer.stop()
 #if !os(macOS)
         // On macOS, VLC 4 tears its OpenGL vout down asynchronously. Keep the
@@ -1175,6 +1177,16 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         mediaPlayer.videoFitMode = .smaller
     }
 
+    private func retainNativeVLCReader(_ reader: InputStream) {
+        activeNativeVLCReader = reader
+        retainedNativeVLCReaders.append(reader)
+    }
+
+    private func closeActiveNativeVLCReader() {
+        activeNativeVLCReader?.close()
+        activeNativeVLCReader = nil
+    }
+
     private func stopMediaPlayerForReplacement() async throws {
         let startedAt = ProcessInfo.processInfo.systemUptime
         defer {
@@ -1182,6 +1194,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                 ((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000).rounded()
             )
         }
+        // `stop()` cannot finish while VLC's custom-access thread is blocked
+        // inside InputStream.read(). Closing only this disposable reader
+        // invalidates its generation and wakes the read without touching the
+        // long-lived TVHeadend subscription or its timeshift buffer.
+        closeActiveNativeVLCReader()
         mediaPlayer.stop()
         // VLC 4's stop operation is asynchronous. Replacing its media or
         // closing the custom input before Stopped lets the old demux/vout race
@@ -1313,6 +1330,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         pipelineRecoveryID = recoveryID
         nativeTimeshiftSessionID = nil
         nativeTimeshiftActions = nil
+        closeActiveNativeVLCReader()
         mediaPlayer.pause()
         mediaPlayer.stop()
         nativeInputStream?.close()
@@ -1389,7 +1407,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                 }
 
                 let reader = stream.makeVLCReader()
-                retainedNativeVLCReaders.append(reader)
+                retainNativeVLCReader(reader)
                 let media = Self.makeNativeHTSPMedia(stream: reader)
                 addCachingOptions(
                     to: media,
@@ -1560,6 +1578,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 #if DEBUG
         let replacementStartedAt = ProcessInfo.processInfo.systemUptime
 #endif
+        closeActiveNativeVLCReader()
         mediaPlayer.stop()
         // LibVLC 4 stops asynchronously. Installing and playing the fresh
         // media before the Stopped callback lets the old input teardown race
@@ -1572,7 +1591,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             let detail = "VLC did not stop its previous input within five seconds."
             timeshiftNavigationDebugState = "pipeline replacement timed out"
             cancelPostSeekOutputGate()
-            scheduleNativePipelineRecovery(detail: detail)
+            // This is a local VLC teardown failure, not an HTSP failure.
+            // Reconnecting TVHeadend here discards a healthy timeshift buffer.
+            // Leave the server session paused so another local replacement or
+            // an explicit channel change can recover without losing history.
+            lastNativePipelineDiagnostic = nativePipelineDiagnostic(detail: detail)
             logger.error("\(detail, privacy: .public)")
             return false
         }
@@ -1580,7 +1603,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         let stoppedAt = ProcessInfo.processInfo.systemUptime
 #endif
         let reader = stream.makeVLCReader()
-        retainedNativeVLCReaders.append(reader)
+        retainNativeVLCReader(reader)
         let media = Self.makeNativeHTSPMedia(stream: reader)
         let cachingMilliseconds = stream.tuningPolicy.vlcCacheMilliseconds
         addCachingOptions(to: media, milliseconds: cachingMilliseconds)
@@ -2162,6 +2185,49 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 }
 
+private func vlcDisplayAspectRatio(_ mediaPlayer: VLCMediaPlayer) -> CGFloat? {
+    if let video = mediaPlayer.videoTracks.first(where: \.isSelected)?.video {
+        var width = CGFloat(video.width)
+        var height = CGFloat(video.height)
+        if video.orientation.rawValue >= 4 {
+            swap(&width, &height)
+        }
+        let sarNumerator = CGFloat(video.sourceAspectRatio)
+        let sarDenominator = CGFloat(video.sourceAspectRatioDenominator)
+        if sarNumerator > 0, sarDenominator > 0 {
+            width *= sarNumerator / sarDenominator
+        }
+        if width > 0, height > 0 { return width / height }
+    }
+
+    let size = mediaPlayer.videoSize
+    guard size.width > 0, size.height > 0 else { return nil }
+    return size.width / size.height
+}
+
+private func aspectFitRect(aspectRatio: CGFloat, inside bounds: CGRect) -> CGRect {
+    guard aspectRatio.isFinite, aspectRatio > 0,
+          bounds.width > 0, bounds.height > 0
+    else { return bounds }
+    let boundsRatio = bounds.width / bounds.height
+    if boundsRatio > aspectRatio {
+        let width = bounds.height * aspectRatio
+        return CGRect(
+            x: bounds.midX - width / 2,
+            y: bounds.minY,
+            width: width,
+            height: bounds.height
+        )
+    }
+    let height = bounds.width / aspectRatio
+    return CGRect(
+        x: bounds.minX,
+        y: bounds.midY - height / 2,
+        width: bounds.width,
+        height: height
+    )
+}
+
 #if canImport(UIKit)
 struct VLCVideoSurface: UIViewRepresentable {
     let mediaPlayer: VLCMediaPlayer
@@ -2247,9 +2313,6 @@ private final class VLCVideoContainerView: UIView {
         clipsToBounds = true
         layer.masksToBounds = true
         concealmentView.backgroundColor = .black
-        // VLC's `.smaller` fit mode preserves the whole decoded picture.
-        // Match that geometry exactly so switching to the held snapshot does
-        // not introduce a subtle crop or scale jump.
         concealmentView.contentMode = .scaleAspectFit
         concealmentView.clipsToBounds = true
         concealmentView.isUserInteractionEnabled = false
@@ -2282,7 +2345,7 @@ private final class VLCVideoContainerView: UIView {
             updateLeadingFadeMask()
         }
         resizeVideoSubviews()
-        concealmentView.frame = bounds
+        layoutConcealmentView()
         bringSubviewToFront(concealmentView)
         attachIfVisible()
     }
@@ -2322,6 +2385,7 @@ private final class VLCVideoContainerView: UIView {
         }
         concealmentView.image = concealmentImage
         concealmentView.isHidden = !isOutputConcealed
+        setNeedsLayout()
         if isOutputConcealed { bringSubviewToFront(concealmentView) }
         guard isActive else {
             detachIfOwned()
@@ -2359,6 +2423,25 @@ private final class VLCVideoContainerView: UIView {
 
     private func configureVideoSizing(_ mediaPlayer: VLCMediaPlayer) {
         mediaPlayer.scaleFactor = 0
+    }
+
+    private func layoutConcealmentView() {
+        guard let mediaPlayer,
+              let aspectRatio = vlcDisplayAspectRatio(mediaPlayer)
+        else {
+            concealmentView.frame = bounds
+            concealmentView.contentMode = .scaleAspectFit
+            return
+        }
+        // VLC applies sample aspect ratio and orientation before fitting the
+        // decoded picture. Its PNG snapshot can have the coded-pixel aspect
+        // instead, so fit the renderer's display rectangle and stretch only
+        // within that rectangle.
+        concealmentView.frame = aspectFitRect(
+            aspectRatio: aspectRatio,
+            inside: bounds
+        )
+        concealmentView.contentMode = .scaleToFill
     }
 
     func detachIfOwned() {
@@ -2494,7 +2577,7 @@ private final class VLCVideoContainerView: NSView {
             NSAnimationContext.endGrouping()
             updateLeadingFadeMask()
         }
-        concealmentView.frame = bounds
+        layoutConcealmentView()
         attachIfVisible()
     }
 
@@ -2524,6 +2607,7 @@ private final class VLCVideoContainerView: NSView {
         }
         concealmentView.image = concealmentImage
         concealmentView.isHidden = !isOutputConcealed
+        needsLayout = true
         guard isActive else {
             detachIfOwned()
             return
@@ -2564,6 +2648,21 @@ private final class VLCVideoContainerView: NSView {
 
     private func configureVideoSizing(_ mediaPlayer: VLCMediaPlayer) {
         mediaPlayer.scaleFactor = 0
+    }
+
+    private func layoutConcealmentView() {
+        guard let mediaPlayer,
+              let aspectRatio = vlcDisplayAspectRatio(mediaPlayer)
+        else {
+            concealmentView.frame = bounds
+            concealmentView.imageScaling = .scaleProportionallyUpOrDown
+            return
+        }
+        concealmentView.frame = aspectFitRect(
+            aspectRatio: aspectRatio,
+            inside: bounds
+        )
+        concealmentView.imageScaling = .scaleAxesIndependently
     }
 
     func detachIfOwned() {
