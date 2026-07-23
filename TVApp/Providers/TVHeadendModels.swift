@@ -64,13 +64,20 @@ struct TVHeadendEPGEvent: Codable, Sendable {
     let start: Int64
     let stop: Int64
     let seasonNumber: String?
+    let seasonCount: String?
     let episodeNumber: String?
+    let episodeCount: String?
+    let episodeOnscreen: String?
     let partNumber: String?
+    let partCount: String?
+    let firstAired: Int64?
     let genres: [Int]
     let categories: [String]
     let ageRating: String?
     let ratingLabel: String?
     let ratingLabelIcon: String?
+    let ratingCountry: String?
+    let ratingAuthority: String?
     let starRating: String?
     let imageURL: String?
     let isHD: Bool
@@ -82,8 +89,10 @@ struct TVHeadendEPGEvent: Codable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case title, subtitle, summary, description, extraText, start, stop
-        case seasonNumber, episodeNumber, partNumber, categories, category
-        case genre, ageRating, ratingLabel, ratingLabelIcon, starRating, image
+        case seasonNumber, seasonCount, episodeNumber, episodeCount, episodeOnscreen
+        case partNumber, partCount, firstAired, categories, category
+        case genre, ageRating, ratingLabel, ratingLabelIcon, ratingCountry, ratingAuthority
+        case starRating, image
         case hd, widescreen, subtitled, new
         case dvrUUID = "dvrUuid"
         case dvrState
@@ -108,8 +117,13 @@ struct TVHeadendEPGEvent: Codable, Sendable {
         start = values.flexibleInt64(forKey: .start) ?? 0
         stop = values.flexibleInt64(forKey: .stop) ?? start
         seasonNumber = values.flexibleString(forKey: .seasonNumber)
+        seasonCount = values.flexibleString(forKey: .seasonCount)
         episodeNumber = values.flexibleString(forKey: .episodeNumber)
+        episodeCount = values.flexibleString(forKey: .episodeCount)
+        episodeOnscreen = values.flexibleString(forKey: .episodeOnscreen)
         partNumber = values.flexibleString(forKey: .partNumber)
+        partCount = values.flexibleString(forKey: .partCount)
+        firstAired = values.flexibleInt64(forKey: .firstAired)
         var decodedGenres = (try? values.decodeIfPresent([Int].self, forKey: .genre)) ?? []
         if decodedGenres.isEmpty, let genre = values.flexibleInt64(forKey: .genre) {
             decodedGenres = [Int(genre)]
@@ -129,6 +143,8 @@ struct TVHeadendEPGEvent: Codable, Sendable {
         ageRating = values.flexibleString(forKey: .ageRating)
         ratingLabel = values.flexibleString(forKey: .ratingLabel)
         ratingLabelIcon = values.flexibleString(forKey: .ratingLabelIcon)
+        ratingCountry = values.flexibleString(forKey: .ratingCountry)
+        ratingAuthority = values.flexibleString(forKey: .ratingAuthority)
         starRating = values.flexibleString(forKey: .starRating)
         imageURL = values.flexibleString(forKey: .image)
         isHD = values.flexibleBool(forKey: .hd)
@@ -153,13 +169,20 @@ struct TVHeadendEPGEvent: Codable, Sendable {
         try values.encode(start, forKey: .start)
         try values.encode(stop, forKey: .stop)
         try values.encodeIfPresent(seasonNumber, forKey: .seasonNumber)
+        try values.encodeIfPresent(seasonCount, forKey: .seasonCount)
         try values.encodeIfPresent(episodeNumber, forKey: .episodeNumber)
+        try values.encodeIfPresent(episodeCount, forKey: .episodeCount)
+        try values.encodeIfPresent(episodeOnscreen, forKey: .episodeOnscreen)
         try values.encodeIfPresent(partNumber, forKey: .partNumber)
+        try values.encodeIfPresent(partCount, forKey: .partCount)
+        try values.encodeIfPresent(firstAired, forKey: .firstAired)
         if !genres.isEmpty { try values.encode(genres, forKey: .genre) }
         if !categories.isEmpty { try values.encode(categories, forKey: .categories) }
         try values.encodeIfPresent(ageRating, forKey: .ageRating)
         try values.encodeIfPresent(ratingLabel, forKey: .ratingLabel)
         try values.encodeIfPresent(ratingLabelIcon, forKey: .ratingLabelIcon)
+        try values.encodeIfPresent(ratingCountry, forKey: .ratingCountry)
+        try values.encodeIfPresent(ratingAuthority, forKey: .ratingAuthority)
         try values.encodeIfPresent(starRating, forKey: .starRating)
         try values.encodeIfPresent(imageURL, forKey: .image)
         if isHD { try values.encode(true, forKey: .hd) }

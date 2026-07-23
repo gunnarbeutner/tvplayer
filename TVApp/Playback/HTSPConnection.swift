@@ -253,6 +253,41 @@ struct HTSPStreamInfo: Equatable, Sendable {
     }
 }
 
+struct HTSPSourceInfo: Equatable, Sendable {
+    let adapter: String?
+    let mux: String?
+    let network: String?
+    let provider: String?
+    let service: String?
+    let satellitePosition: String?
+
+    static func decode(_ value: HTSPValue?) -> HTSPSourceInfo? {
+        guard let source = value?.mapValue else { return nil }
+        let info = HTSPSourceInfo(
+            adapter: source["adapter"]?.stringValue,
+            mux: source["mux"]?.stringValue,
+            network: source["network"]?.stringValue,
+            provider: source["provider"]?.stringValue,
+            service: source["service"]?.stringValue,
+            satellitePosition: source["satpos"]?.stringValue
+        )
+        return [
+            info.adapter,
+            info.mux,
+            info.network,
+            info.provider,
+            info.service,
+            info.satellitePosition,
+        ].contains { $0?.isEmpty == false } ? info : nil
+    }
+}
+
+struct HTSPSubscriptionStart: Equatable, Sendable {
+    let timeshiftPeriod: Int64
+    let streams: [HTSPStreamInfo]
+    let sourceInfo: HTSPSourceInfo?
+}
+
 protocol HTSPConnectionTransport: AnyObject, Sendable {
     var capabilities: Set<String> { get }
 
@@ -262,7 +297,7 @@ protocol HTSPConnectionTransport: AnyObject, Sendable {
         channelID: UInt32,
         profile: String,
         weight: UInt32
-    ) throws -> (Int64, [HTSPStreamInfo])
+    ) throws -> HTSPSubscriptionStart
     func reserveSequence() -> Int64
     func sendRequest(
         method: String,
@@ -509,7 +544,7 @@ final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
         channelID: UInt32,
         profile: String,
         weight: UInt32
-    ) throws -> (Int64, [HTSPStreamInfo]) {
+    ) throws -> HTSPSubscriptionStart {
         let deadline = makeSynchronousReadDeadline()
         let response = try request(
             method: "subscribe",
@@ -534,7 +569,11 @@ final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
             }
             guard message["method"]?.stringValue == "subscriptionStart" else { continue }
             let streams = HTSPStreamInfo.decodeList(message["streams"])
-            return (period, streams)
+            return HTSPSubscriptionStart(
+                timeshiftPeriod: period,
+                streams: streams,
+                sourceInfo: HTSPSourceInfo.decode(message["sourceinfo"])
+            )
         }
     }
 

@@ -14,6 +14,72 @@ final class TVHeadendClientTests: XCTestCase {
         super.tearDown()
     }
 
+    func testEPGMetadataDecodesHighValueProgrammeFields() throws {
+        let data = Data(#"""
+        {
+          "eventId": 123,
+          "channelUuid": "channel-1",
+          "title": "Example",
+          "summary": "A concise summary.",
+          "extraText": "An extended description.",
+          "start": 1760000000,
+          "stop": 1760003600,
+          "seasonNumber": 2,
+          "seasonCount": 4,
+          "episodeNumber": 3,
+          "episodeCount": 8,
+          "episodeOnscreen": "S02E03",
+          "partNumber": 1,
+          "partCount": 2,
+          "firstAired": 1700000000,
+          "genre": [16, 64],
+          "ratingLabel": "FSK 12",
+          "ratingCountry": "DE",
+          "ratingAuthority": "FSK"
+        }
+        """#.utf8)
+
+        let event = try JSONDecoder().decode(TVHeadendEPGEvent.self, from: data)
+        let metadata = GuideProgramMetadata(
+            seasonNumber: event.seasonNumber,
+            seasonCount: event.seasonCount,
+            episodeNumber: event.episodeNumber,
+            episodeCount: event.episodeCount,
+            episodeOnscreen: event.episodeOnscreen,
+            partNumber: event.partNumber,
+            partCount: event.partCount,
+            firstAired: event.firstAired,
+            genres: event.genres,
+            summary: event.summary,
+            extraText: event.extraText,
+            ratingLabel: event.ratingLabel,
+            ratingCountry: event.ratingCountry,
+            ratingAuthority: event.ratingAuthority
+        )
+
+        XCTAssertEqual(metadata.displayLabels.first, "Season 2 of 4 · Episode 3 of 8")
+        XCTAssertTrue(metadata.displayLabels.contains("Part 1 of 2"))
+        XCTAssertTrue(metadata.displayLabels.contains("Movie / Drama"))
+        XCTAssertTrue(metadata.displayLabels.contains("Sports"))
+        XCTAssertTrue(metadata.displayLabels.contains("FSK 12"))
+        XCTAssertFalse(metadata.displayFacts.contains("Broadcast episode S02E03"))
+        XCTAssertTrue(metadata.displayFacts.contains("Rating source FSK · DE"))
+        XCTAssertEqual(
+            metadata.supplementaryDescriptions(excluding: "A concise summary."),
+            ["An extended description."]
+        )
+    }
+
+    func testDistinctBroadcastEpisodeIdentifierRemainsVisible() {
+        let metadata = GuideProgramMetadata(
+            seasonNumber: "2",
+            episodeNumber: "3",
+            episodeOnscreen: "Special 14"
+        )
+
+        XCTAssertTrue(metadata.displayFacts.contains("Broadcast episode Special 14"))
+    }
+
     func testLivePlaybackRequestsCacheServerCapabilities() async throws {
         let sessionConfiguration = URLSessionConfiguration.ephemeral
         sessionConfiguration.protocolClasses = [PlaybackURLProtocol.self]
@@ -446,9 +512,9 @@ private final class PrewarmHTSPConnection: HTSPConnectionTransport, @unchecked S
         channelID: UInt32,
         profile: String,
         weight: UInt32
-    ) throws -> (Int64, [HTSPStreamInfo]) {
+    ) throws -> HTSPSubscriptionStart {
         lock.withLock { subscriptions += 1 }
-        return (60, [])
+        return HTSPSubscriptionStart(timeshiftPeriod: 60, streams: [], sourceInfo: nil)
     }
 
     func reserveSequence() -> Int64 { 1 }

@@ -1994,9 +1994,58 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         }
         var details = [
             PlaybackTechnicalDetail(label: "Delivery", value: delivery),
-            PlaybackTechnicalDetail(label: "Container", value: "MPEG transport stream"),
-            PlaybackTechnicalDetail(label: "Player", value: "VLC"),
         ]
+
+        if let nativeMetadata = nativeInputStream?.playbackMetadataSnapshot {
+            if let source = nativeMetadata.sourceInfo {
+                let network = [source.network, source.satellitePosition]
+                    .compactMap { Self.nonEmpty($0) }
+                    .joined(separator: " · ")
+                if !network.isEmpty {
+                    details.append(PlaybackTechnicalDetail(label: "Source", value: network))
+                }
+                if let service = Self.nonEmpty(source.service) {
+                    details.append(PlaybackTechnicalDetail(label: "Service", value: service))
+                }
+                if let provider = Self.nonEmpty(source.provider) {
+                    details.append(PlaybackTechnicalDetail(label: "Provider", value: provider))
+                }
+                if let mux = Self.nonEmpty(source.mux) {
+                    details.append(PlaybackTechnicalDetail(label: "Multiplex", value: mux))
+                }
+                if let adapter = Self.nonEmpty(source.adapter) {
+                    details.append(PlaybackTechnicalDetail(label: "Tuner", value: adapter))
+                }
+            }
+
+            if let signal = nativeMetadata.signalStatus {
+                let quality = [
+                    Self.nonEmpty(signal.status),
+                    signal.signal.map { "signal \(Self.signalPercentage($0))" },
+                    signal.signalToNoiseRatio.map { "SNR \(Self.signalPercentage($0))" },
+                ].compactMap(\.self)
+                if !quality.isEmpty {
+                    details.append(
+                        PlaybackTechnicalDetail(
+                            label: "Signal",
+                            value: quality.joined(separator: " · ")
+                        )
+                    )
+                }
+                let errors = [
+                    signal.bitErrorRate.map { "BER \($0.formatted())" },
+                    signal.uncorrectedBlocks.map { "uncorrected \($0.formatted())" },
+                ].compactMap(\.self)
+                if !errors.isEmpty {
+                    details.append(
+                        PlaybackTechnicalDetail(
+                            label: "Signal errors",
+                            value: errors.joined(separator: " · ")
+                        )
+                    )
+                }
+            }
+        }
 
         if let videoDetails = video?.video,
            videoDetails.width > 0, videoDetails.height > 0 {
@@ -2072,6 +2121,23 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         return hours > 0
             ? String(format: "%d:%02d:%02d", hours, minutes, remainder)
             : String(format: "%d:%02d", minutes, remainder)
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty
+        else { return nil }
+        return value
+    }
+
+    private static func signalPercentage(_ value: Int64) -> String {
+        let percentage: Double
+        if value <= 100 {
+            percentage = Double(max(0, value))
+        } else {
+            percentage = min(100, max(0, Double(value) / 65_535 * 100))
+        }
+        return percentage.formatted(.number.precision(.fractionLength(0))) + "%"
     }
 }
 

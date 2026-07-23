@@ -79,6 +79,34 @@ final class HTSPTimeshiftTests: XCTestCase {
         )
     }
 
+    func testSubscriptionMetadataDecodesSourceDetails() throws {
+        let source = try XCTUnwrap(HTSPSourceInfo.decode(.map([
+            "adapter": .string("Silicon Labs Si2168 #1 : DVB-T #0"),
+            "mux": .string("642MHz"),
+            "network": .string("DVB-T2"),
+            "provider": .string("BR"),
+            "service": .string("Das Erste HD"),
+        ])))
+
+        XCTAssertEqual(source.network, "DVB-T2")
+        XCTAssertEqual(source.mux, "642MHz")
+        XCTAssertEqual(source.service, "Das Erste HD")
+    }
+
+    func testSignalStatusAcceptsOptionalFrontendMeasurements() {
+        let signal = HTSPSignalStatus.decode([
+            "feStatus": .string("GOOD"),
+            "feBER": .int(0),
+            "feUNC": .int(111_049),
+        ])
+
+        XCTAssertEqual(signal.status, "GOOD")
+        XCTAssertEqual(signal.bitErrorRate, 0)
+        XCTAssertEqual(signal.uncorrectedBlocks, 111_049)
+        XCTAssertNil(signal.signal)
+        XCTAssertNil(signal.signalToNoiseRatio)
+    }
+
     func testCanonicalStreamURLProvidesNumericHTSPChannelID() throws {
         let url = try XCTUnwrap(
             URL(string: "http://tvheadend.local:9981/stream/channelid/42?ticket=temporary")
@@ -2190,9 +2218,13 @@ private final class ScriptedHTSPConnection: HTSPConnectionTransport, @unchecked 
         channelID: UInt32,
         profile: String,
         weight: UInt32
-    ) throws -> (Int64, [HTSPStreamInfo]) {
+    ) throws -> HTSPSubscriptionStart {
         condition.withLock { subscribeWeights.append(weight) }
-        return (Int64(UInt32.max), streams)
+        return HTSPSubscriptionStart(
+            timeshiftPeriod: Int64(UInt32.max),
+            streams: streams,
+            sourceInfo: nil
+        )
     }
 
     func reserveSequence() -> Int64 {

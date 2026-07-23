@@ -84,6 +84,29 @@ struct HTSPStreamHealthSnapshot: Equatable, Sendable {
     let initialTuneStagingGeneration: UInt64
 }
 
+struct HTSPSignalStatus: Equatable, Sendable {
+    let status: String?
+    let signal: Int64?
+    let signalToNoiseRatio: Int64?
+    let bitErrorRate: Int64?
+    let uncorrectedBlocks: Int64?
+
+    static func decode(_ message: [String: HTSPValue]) -> HTSPSignalStatus {
+        HTSPSignalStatus(
+            status: message["feStatus"]?.stringValue,
+            signal: message["feSignal"]?.intValue,
+            signalToNoiseRatio: message["feSNR"]?.intValue,
+            bitErrorRate: message["feBER"]?.intValue,
+            uncorrectedBlocks: message["feUNC"]?.intValue
+        )
+    }
+}
+
+struct HTSPPlaybackMetadataSnapshot: Equatable, Sendable {
+    let sourceInfo: HTSPSourceInfo?
+    let signalStatus: HTSPSignalStatus?
+}
+
 private enum HTSPStreamFailure: LocalizedError {
     case packetStalled
 
@@ -206,6 +229,8 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     private var readOffset = 0
     private var currentStatus: Stream.Status = .notOpen
     private var currentError: Error?
+    private var currentSourceInfo: HTSPSourceInfo?
+    private var currentSignalStatus: HTSPSignalStatus?
     private var stopped = false
     private var deliveryRole: DeliveryRole
     private var rollingTuneBuffer = HTSPRollingTunePacketBuffer()
@@ -267,6 +292,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         connection: any HTSPConnectionTransport,
         connectionFactory: @escaping HTSPConnectionFactory,
         streams: [HTSPStreamInfo],
+        sourceInfo: HTSPSourceInfo?,
         acceptedTimeshiftPeriod: TimeInterval,
         tuningPolicy: NativeTimeshiftTuningPolicy,
         startsAsCandidate: Bool,
@@ -277,6 +303,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         self.profile = profile
         self.connection = connection
         self.connectionFactory = connectionFactory
+        currentSourceInfo = sourceInfo
         deliveryRole = startsAsCandidate ? .candidate : .playback
         muxer = try MPEGTransportStreamMuxer(streams: streams)
         self.acceptedTimeshiftPeriod = acceptedTimeshiftPeriod
@@ -410,8 +437,8 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             }.value
             subscribedConnection = connected.0
             tuningFailureCapture?.updateSubscriptionMetadata(
-                acceptedTimeshiftPeriodSeconds: TimeInterval(connected.1.0),
-                streams: connected.1.1
+                acceptedTimeshiftPeriodSeconds: TimeInterval(connected.1.timeshiftPeriod),
+                streams: connected.1.streams
             )
             let stream = try HTSPLiveInputStream(
                 configuration: configuration,
@@ -419,8 +446,9 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 profile: profile,
                 connection: connected.0,
                 connectionFactory: connectionFactory,
-                streams: connected.1.1,
-                acceptedTimeshiftPeriod: TimeInterval(connected.1.0),
+                streams: connected.1.streams,
+                sourceInfo: connected.1.sourceInfo,
+                acceptedTimeshiftPeriod: TimeInterval(connected.1.timeshiftPeriod),
                 tuningPolicy: tuningPolicy,
                 startsAsCandidate: startsAsCandidate,
                 tuningFailureCapture: tuningFailureCapture
@@ -519,6 +547,15 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 transportStartup: streamInfo.transportStartup,
                 initialTuneStagingQuality: initialTuneStagingQuality,
                 initialTuneStagingGeneration: postSeekStagingEpoch
+            )
+        }
+    }
+
+    var playbackMetadataSnapshot: HTSPPlaybackMetadataSnapshot {
+        condition.withLock {
+            HTSPPlaybackMetadataSnapshot(
+                sourceInfo: currentSourceInfo,
+                signalStatus: currentSignalStatus
             )
         }
     }
@@ -1044,6 +1081,11 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
         case "subscriptionStart":
             let streams = HTSPStreamInfo.decodeList(message["streams"])
+            condition.withLock {
+                currentSourceInfo = HTSPSourceInfo.decode(message["sourceinfo"])
+                    ?? currentSourceInfo
+                currentSignalStatus = nil
+            }
             tuningFailureCapture?.recordStreamDeclaration(
                 streams,
                 connectionGeneration: connectionGeneration
@@ -1071,6 +1113,11 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 }
                 self.completeBufferedNavigationAtNormalSpeedIfReady()
                 self.sendPendingNavigationIfPaused()
+            }
+
+        case "signalStatus":
+            condition.withLock {
+                currentSignalStatus = HTSPSignalStatus.decode(message)
             }
 
         case "subscriptionStop":
@@ -2213,7 +2260,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                     profile: profile,
                     weight: Self.foregroundSubscriptionWeight
                 )
-                let replacementMuxer = try MPEGTransportStreamMuxer(streams: subscription.1)
+                let replacementMuxer = try MPEGTransportStreamMuxer(streams: subscription.streams)
                 guard !condition.withLock({ stopped }) else {
                     replacement.setRawMessageObserver(nil)
                     replacement.close()
@@ -2222,8 +2269,12 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 installReplacementConnection(
                     replacement,
                     muxer: replacementMuxer,
-                    streams: subscription.1
+                    streams: subscription.streams
                 )
+                condition.withLock {
+                    currentSourceInfo = subscription.sourceInfo
+                    currentSignalStatus = nil
+                }
                 logger.info("Rebuilt TVHeadend subscription at the live edge")
                 return true
             } catch {

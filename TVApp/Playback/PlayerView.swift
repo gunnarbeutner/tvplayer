@@ -2068,7 +2068,19 @@ private struct PlayerTabbedOverlay: View {
                     .foregroundStyle(AppTheme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if !program.metadata.displayFacts.isEmpty {
+                Text(program.metadata.displayFacts.joined(separator: "  •  "))
+                    .font(.subheadline)
+                    .foregroundStyle(AppTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             programmeOverview(program.overview)
+            ForEach(
+                program.metadata.supplementaryDescriptions(excluding: program.overview),
+                id: \.self
+            ) { description in
+                programmeOverview(description)
+            }
         }
     }
 

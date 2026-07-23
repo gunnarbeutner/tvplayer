@@ -14,13 +14,22 @@ struct GuideChannel: Identifiable, Equatable, Sendable {
 struct GuideProgramMetadata: Hashable, Codable, Sendable {
     let episodeURI: String?
     let seasonNumber: String?
+    let seasonCount: String?
     let episodeNumber: String?
+    let episodeCount: String?
+    let episodeOnscreen: String?
     let partNumber: String?
+    let partCount: String?
+    let firstAired: Int64?
     let genres: [Int]
     let categories: [String]
+    let summary: String?
+    let extraText: String?
     let ageRating: String?
     let ratingLabel: String?
     let ratingLabelIcon: String?
+    let ratingCountry: String?
+    let ratingAuthority: String?
     let starRating: String?
     let imageURL: String?
     let isHD: Bool
@@ -33,13 +42,22 @@ struct GuideProgramMetadata: Hashable, Codable, Sendable {
     init(
         episodeURI: String? = nil,
         seasonNumber: String? = nil,
+        seasonCount: String? = nil,
         episodeNumber: String? = nil,
+        episodeCount: String? = nil,
+        episodeOnscreen: String? = nil,
         partNumber: String? = nil,
+        partCount: String? = nil,
+        firstAired: Int64? = nil,
         genres: [Int] = [],
         categories: [String] = [],
+        summary: String? = nil,
+        extraText: String? = nil,
         ageRating: String? = nil,
         ratingLabel: String? = nil,
         ratingLabelIcon: String? = nil,
+        ratingCountry: String? = nil,
+        ratingAuthority: String? = nil,
         starRating: String? = nil,
         imageURL: String? = nil,
         isHD: Bool = false,
@@ -51,13 +69,22 @@ struct GuideProgramMetadata: Hashable, Codable, Sendable {
     ) {
         self.episodeURI = episodeURI
         self.seasonNumber = seasonNumber
+        self.seasonCount = seasonCount
         self.episodeNumber = episodeNumber
+        self.episodeCount = episodeCount
+        self.episodeOnscreen = episodeOnscreen
         self.partNumber = partNumber
+        self.partCount = partCount
+        self.firstAired = firstAired
         self.genres = genres
         self.categories = categories
+        self.summary = summary
+        self.extraText = extraText
         self.ageRating = ageRating
         self.ratingLabel = ratingLabel
         self.ratingLabelIcon = ratingLabelIcon
+        self.ratingCountry = ratingCountry
+        self.ratingAuthority = ratingAuthority
         self.starRating = starRating
         self.imageURL = imageURL
         self.isHD = isHD
@@ -73,15 +100,27 @@ struct GuideProgramMetadata: Hashable, Codable, Sendable {
     var displayLabels: [String] {
         var labels: [String] = []
 
-        if let season = seasonNumber, let episode = episodeNumber {
-            labels.append("Season \(season) · Episode \(episode)")
-        } else if let season = seasonNumber {
-            labels.append("Season \(season)")
-        } else if let episode = episodeNumber {
-            labels.append("Episode \(episode)")
+        let seasonDescription = Self.numberDescription(
+            label: "Season",
+            number: seasonNumber,
+            count: seasonCount
+        )
+        let episodeDescription = Self.numberDescription(
+            label: "Episode",
+            number: episodeNumber,
+            count: episodeCount
+        )
+        if let seasonDescription, let episodeDescription {
+            labels.append("\(seasonDescription) · \(episodeDescription)")
+        } else if let seasonDescription {
+            labels.append(seasonDescription)
+        } else if let episodeDescription {
+            labels.append(episodeDescription)
         }
-        if let part = partNumber { labels.append("Part \(part)") }
-        labels.append(contentsOf: categories.prefix(2))
+        if let part = Self.numberDescription(label: "Part", number: partNumber, count: partCount) {
+            labels.append(part)
+        }
+        labels.append(contentsOf: contentLabels.prefix(3))
         if isNew { labels.append("New") }
         if isHD { labels.append("HD") }
         if isWidescreen { labels.append("Widescreen") }
@@ -95,6 +134,112 @@ struct GuideProgramMetadata: Hashable, Codable, Sendable {
     var displayDescription: String? {
         let labels = displayLabels
         return labels.isEmpty ? nil : labels.joined(separator: "  •  ")
+    }
+
+    var displayFacts: [String] {
+        var facts: [String] = []
+        if let firstAired, firstAired > 0 {
+            let date = Date(timeIntervalSince1970: TimeInterval(firstAired))
+            facts.append("First aired \(date.formatted(date: .abbreviated, time: .omitted))")
+        }
+        if let episodeOnscreen = Self.nonEmpty(episodeOnscreen),
+           !Self.isRedundantEpisodeOnscreen(
+               episodeOnscreen,
+               seasonNumber: seasonNumber,
+               episodeNumber: episodeNumber
+           ) {
+            facts.append("Broadcast episode \(episodeOnscreen)")
+        }
+        let provenance = [Self.nonEmpty(ratingAuthority), Self.nonEmpty(ratingCountry)]
+            .compactMap(\.self)
+            .joined(separator: " · ")
+        if !provenance.isEmpty {
+            facts.append("Rating source \(provenance)")
+        }
+        return facts
+    }
+
+    func supplementaryDescriptions(excluding overview: String) -> [String] {
+        let normalizedOverview = Self.normalized(overview)
+        var seen = Set([normalizedOverview])
+        return [summary, extraText].compactMap(Self.nonEmpty).filter {
+            seen.insert(Self.normalized($0)).inserted
+        }
+    }
+
+    private var contentLabels: [String] {
+        var result: [String] = []
+        var seen = Set<String>()
+        for label in categories + genres.compactMap(Self.genreName) {
+            let normalized = Self.normalized(label)
+            guard !normalized.isEmpty, seen.insert(normalized).inserted else { continue }
+            result.append(label)
+        }
+        return result
+    }
+
+    private static func numberDescription(
+        label: String,
+        number: String?,
+        count: String?
+    ) -> String? {
+        guard let number = nonEmpty(number) else { return nil }
+        if let count = nonEmpty(count), count != number {
+            return "\(label) \(number) of \(count)"
+        }
+        return "\(label) \(number)"
+    }
+
+    private static func isRedundantEpisodeOnscreen(
+        _ value: String,
+        seasonNumber: String?,
+        episodeNumber: String?
+    ) -> Bool {
+        guard let season = canonicalEpisodeComponent(seasonNumber),
+              let episode = canonicalEpisodeComponent(episodeNumber)
+        else { return false }
+        let normalized = value.lowercased().filter { $0.isLetter || $0.isNumber }
+        return normalized == "s\(season)e\(episode)"
+            || normalized == "season\(season)episode\(episode)"
+    }
+
+    private static func canonicalEpisodeComponent(_ value: String?) -> String? {
+        guard let value = nonEmpty(value) else { return nil }
+        if let number = Int(value) { return String(number) }
+        let normalized = value.lowercased().filter { $0.isLetter || $0.isNumber }
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private static func genreName(_ value: Int) -> String? {
+        let group = value > 0x0f ? value >> 4 : value
+        return switch group {
+        case 0x1: "Movie / Drama"
+        case 0x2: "News / Current affairs"
+        case 0x3: "Show / Game show"
+        case 0x4: "Sports"
+        case 0x5: "Children / Youth"
+        case 0x6: "Music / Dance"
+        case 0x7: "Arts / Culture"
+        case 0x8: "Social / Political"
+        case 0x9: "Education / Science"
+        case 0xa: "Leisure / Hobbies"
+        case 0xb: "Special interest"
+        default: nil
+        }
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty
+        else { return nil }
+        return value
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: .current
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

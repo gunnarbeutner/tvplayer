@@ -245,10 +245,28 @@ struct ProgrammeDetailView: View {
 #endif
                     }
 
+                    if !program.metadata.displayFacts.isEmpty {
+                        Text(program.metadata.displayFacts.joined(separator: "  •  "))
+                            .font(.subheadline)
+                            .foregroundStyle(AppTheme.secondaryText)
+                    }
+
                     Text(program.overview)
                         .font(overviewFont)
                         .foregroundStyle(.white.opacity(0.9))
                         .lineLimit(8)
+
+                    ForEach(
+                        program.metadata.supplementaryDescriptions(
+                            excluding: program.overview
+                        ),
+                        id: \.self
+                    ) { description in
+                        Text(description)
+                            .font(overviewFont)
+                            .foregroundStyle(.white.opacity(0.78))
+                            .lineLimit(6)
+                    }
                 } else {
                     Text("No programme metadata is available for this channel at the moment.")
                         .font(.title3)
