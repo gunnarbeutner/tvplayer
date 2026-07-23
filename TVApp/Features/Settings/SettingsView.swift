@@ -1,5 +1,8 @@
 import SwiftUI
 @preconcurrency import VLCKit
+#if os(tvOS)
+import UIKit
+#endif
 
 struct SettingsView: View {
     let focusRequest: UUID?
@@ -462,6 +465,18 @@ private struct ServerEditorView: View {
     @State private var saveError: String?
     @State private var streamProfiles: [TVHeadendStreamProfile] = []
     @State private var isLoadingStreamProfiles = false
+    @State private var textFieldGeneration = 0
+    @FocusState private var focusedEditorField: EditorField?
+
+    private enum EditorField: Hashable {
+        case name
+        case serverURL
+        case username
+        case password
+        case htspPort
+        case guideCacheURL
+        case xmltvURL
+    }
 
     var body: some View {
         ZStack {
@@ -491,6 +506,9 @@ private struct ServerEditorView: View {
                     }
 
                     editorFields
+#if os(tvOS)
+                        .id(textFieldGeneration)
+#endif
 
                     actionButtons
                 }
@@ -500,6 +518,15 @@ private struct ServerEditorView: View {
         }
         .platformExitCommand(close)
         .task { await loadStreamProfiles() }
+#if os(tvOS)
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: UITextField.textDidEndEditingNotification
+            )
+        ) { _ in
+            recoverFocusAfterKeyboardDismissal()
+        }
+#endif
     }
 
     private var editorFields: some View {
@@ -513,6 +540,7 @@ private struct ServerEditorView: View {
                     text: $settings.displayNameText,
                     prompt: settingsPrompt("e.g. Living room")
                 )
+                .focused($focusedEditorField, equals: .name)
             }
 
             SettingsField(
@@ -524,6 +552,7 @@ private struct ServerEditorView: View {
                     text: $settings.baseURLText,
                     prompt: settingsPrompt("e.g. http://tvheadend.local:9981")
                 )
+                .focused($focusedEditorField, equals: .serverURL)
             }
 
             adaptiveLayout {
@@ -536,6 +565,7 @@ private struct ServerEditorView: View {
                         text: $settings.username,
                         prompt: settingsPrompt("Optional")
                     )
+                    .focused($focusedEditorField, equals: .username)
                 }
 
                 SettingsField(
@@ -547,6 +577,7 @@ private struct ServerEditorView: View {
                         text: $settings.password,
                         prompt: settingsPrompt("Optional")
                     )
+                    .focused($focusedEditorField, equals: .password)
                 }
             }
 
@@ -572,6 +603,7 @@ private struct ServerEditorView: View {
                         text: $settings.htspPortText,
                         prompt: settingsPrompt("Default: 9982")
                     )
+                    .focused($focusedEditorField, equals: .htspPort)
                 }
             }
 
@@ -584,6 +616,7 @@ private struct ServerEditorView: View {
                     text: $settings.guideCacheURLText,
                     prompt: settingsPrompt("Optional")
                 )
+                .focused($focusedEditorField, equals: .guideCacheURL)
             }
 
             SettingsField(
@@ -595,6 +628,7 @@ private struct ServerEditorView: View {
                     text: $settings.xmltvURLText,
                     prompt: settingsPrompt("Optional")
                 )
+                .focused($focusedEditorField, equals: .xmltvURL)
             }
         }
     }
@@ -747,6 +781,23 @@ private struct ServerEditorView: View {
             // cannot be queried yet (for example while adding a server).
         }
     }
+
+#if os(tvOS)
+    private func recoverFocusAfterKeyboardDismissal() {
+        guard let field = focusedEditorField else { return }
+
+        // SwiftUI can leave a TextField's focus binding set after tvOS has
+        // dismissed its keyboard, while UIKit has removed that field from the
+        // focus system. Rebuild only the editor fields and drive the binding
+        // through nil so the same field becomes a valid focus item again.
+        focusedEditorField = nil
+        textFieldGeneration &+= 1
+        Task { @MainActor in
+            await Task.yield()
+            focusedEditorField = field
+        }
+    }
+#endif
 
     private func close() {
         settings.cancelEditing()
