@@ -2408,6 +2408,7 @@ private final class VLCVideoContainerView: NSView {
     private var fadesLeadingEdge: Bool
     private var leadingFadeInset: CGFloat
     private var attachedBoundsSize = CGSize.zero
+    private var requiresReattachment = false
     private let leadingFadeMask = CAGradientLayer()
     private let concealmentView = NSImageView()
 
@@ -2461,27 +2462,36 @@ private final class VLCVideoContainerView: NSView {
             attachedBoundsSize = bounds.size
             updateLeadingFadeMask()
         }
-        resizeVideoSubviews()
         concealmentView.frame = bounds
-        if concealmentView.superview === self {
-            addSubview(concealmentView, positioned: .above, relativeTo: nil)
-        }
         attachIfVisible()
+    }
+
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
+        // SwiftUI can briefly collapse an NSViewRepresentable while moving it
+        // between the guide preview and full player. Passing that zero-sized
+        // transition to VLCOpenGLVideoView produces an incomplete framebuffer
+        // which VLC 4 asserts on from its render thread. Keep the last usable
+        // drawable size until AppKit gives us another real one.
+        guard hasRenderableBounds else { return }
+        super.resizeSubviews(withOldSize: oldSize)
     }
 
     override func didAddSubview(_ subview: NSView) {
         super.didAddSubview(subview)
-        subview.frame = bounds
         subview.autoresizingMask = [.width, .height]
+        if hasRenderableBounds {
+            subview.frame = bounds
+        }
         if subview !== concealmentView {
             addSubview(concealmentView, positioned: .above, relativeTo: subview)
         }
     }
 
-    private func resizeVideoSubviews() {
-        for subview in subviews where subview !== concealmentView && subview.frame != bounds {
-            subview.frame = bounds
-        }
+    private var hasRenderableBounds: Bool {
+        bounds.width.isFinite
+            && bounds.height.isFinite
+            && bounds.width > 1
+            && bounds.height > 1
     }
 
     func updateAttachment(
@@ -2493,6 +2503,7 @@ private final class VLCVideoContainerView: NSView {
         concealmentImage: PlatformImage?
     ) {
         let mustReattach = revision != attachmentRevision
+        requiresReattachment = requiresReattachment || mustReattach
         attachmentRevision = revision
         self.isActive = isActive
         if self.fadesLeadingEdge != fadesLeadingEdge || self.leadingFadeInset != leadingFadeInset {
@@ -2509,7 +2520,7 @@ private final class VLCVideoContainerView: NSView {
             detachIfOwned()
             return
         }
-        attachIfVisible(force: mustReattach)
+        attachIfVisible()
     }
 
     private func updateLeadingFadeMask() {
@@ -2530,10 +2541,16 @@ private final class VLCVideoContainerView: NSView {
     }
 
     private func attachIfVisible(force: Bool = false) {
-        guard window != nil, let mediaPlayer else { return }
-        if !force, let current = mediaPlayer.drawable as? NSView, current === self { return }
+        requiresReattachment = requiresReattachment || force
+        guard isActive, window != nil, hasRenderableBounds, let mediaPlayer else { return }
+        if !requiresReattachment,
+           let current = mediaPlayer.drawable as? NSView,
+           current === self {
+            return
+        }
         mediaPlayer.drawable = nil
         mediaPlayer.drawable = self
+        requiresReattachment = false
         configureVideoSizing(mediaPlayer)
     }
 
