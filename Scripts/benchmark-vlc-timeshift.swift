@@ -31,6 +31,14 @@ func run(_ executable: String, _ arguments: [String]) throws -> String {
     return output
 }
 
+func buildSetting(_ name: String, from output: String) -> String? {
+    let prefix = "\(name) = "
+    return output.split(whereSeparator: \.isNewline)
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .first { $0.hasPrefix(prefix) }
+        .map { String($0.dropFirst(prefix.count)) }
+}
+
 do {
     let arguments = ProcessInfo.processInfo.arguments
     let cycles: Int = {
@@ -45,20 +53,34 @@ do {
         }
         return max(1, Int(arguments[index + 1]) ?? 40)
     }()
-    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-    let derivedData = root.appending(path: ".build/DerivedData-VLCTimeshiftBenchmarkMac")
     print("Building the macOS VLC benchmark…")
+    let buildArguments = [
+        "xcodebuild", "build", "-quiet",
+        "-project", "TVApp.xcodeproj",
+        "-scheme", "TVApp-macOS",
+        "-destination", "platform=macOS",
+    ]
     _ = try run(
         "/usr/bin/xcrun",
+        buildArguments
+    )
+    let buildSettings = try run(
+        "/usr/bin/xcrun",
         [
-            "xcodebuild", "build", "-quiet",
+            "xcodebuild", "-showBuildSettings",
             "-project", "TVApp.xcodeproj",
             "-scheme", "TVApp-macOS",
             "-destination", "platform=macOS",
-            "-derivedDataPath", derivedData.path,
         ]
     )
-    let app = derivedData.appending(path: "Build/Products/Debug/TVApp.app")
+    guard let targetBuildDirectory = buildSetting(
+        "TARGET_BUILD_DIR",
+        from: buildSettings
+    ), let wrapperName = buildSetting("WRAPPER_NAME", from: buildSettings) else {
+        throw RunnerError.commandFailed("xcodebuild -showBuildSettings", 1)
+    }
+    let app = URL(fileURLWithPath: targetBuildDirectory)
+        .appending(path: wrapperName)
     print("Launching the player and event timeline…")
     let executable = app.appending(path: "Contents/MacOS/TVApp")
     let benchmark = Process()
