@@ -86,6 +86,18 @@ enum GuideFocusScrollPosition {
     }
 }
 
+enum GuideDirectionalScrollPolicy {
+    static let repeatInterval: TimeInterval = 0.3
+
+    static func animatesScroll(
+        previousInputAt: TimeInterval?,
+        inputAt: TimeInterval
+    ) -> Bool {
+        guard let previousInputAt else { return true }
+        return inputAt - previousInputAt > repeatInterval
+    }
+}
+
 enum GuideFocusPresentation {
     static func selectionProgramID(
         requested: GuideProgram.ID?,
@@ -710,6 +722,7 @@ private final class GuideCollectionView: UICollectionView,
     private var guideSnapshot: GuideGridSnapshot?
     private var snapshotBuildTask: Task<Void, Never>?
     private var focusRetryTask: Task<Void, Never>?
+    private var focusVisibilityCorrectionTask: Task<Void, Never>?
     private var focusRequestAwaitingStableLayout: (
         programID: GuideProgram.ID,
         retriesRemaining: Int,
@@ -731,6 +744,7 @@ private final class GuideCollectionView: UICollectionView,
     private var channelIDAwaitingSnapshotFocus: GuideChannel.ID?
     private var channelReturnProgramIDAwaitingSnapshotFocus: GuideProgram.ID?
     private var navigationSignpostID: OSSignpostID?
+    private var lastDirectionalInputAt: TimeInterval?
 #if os(tvOS)
     private var pageCommandObserver: NSObjectProtocol?
 #endif
@@ -973,6 +987,7 @@ private final class GuideCollectionView: UICollectionView,
     func cancelPendingWork() {
         snapshotBuildTask?.cancel()
         focusRetryTask?.cancel()
+        focusVisibilityCorrectionTask?.cancel()
         channelFocusRetryTask?.cancel()
         focusRequestAwaitingStableLayout = nil
 #if os(tvOS)
@@ -1296,7 +1311,13 @@ private final class GuideCollectionView: UICollectionView,
         // spans an irregular width (e.g. a long programme): its candidate can
         // land on the wrong neighbour. Always resolve the destination from
         // the indexed snapshot instead of delegating to a native focus move.
-        requestFocus(on: destination, animated: true, retriesRemaining: 8)
+        let inputAt = ProcessInfo.processInfo.systemUptime
+        let animatesScroll = GuideDirectionalScrollPolicy.animatesScroll(
+            previousInputAt: lastDirectionalInputAt,
+            inputAt: inputAt
+        )
+        lastDirectionalInputAt = inputAt
+        requestFocus(on: destination, animated: animatesScroll, retriesRemaining: 8)
         return .consumed
     }
 
@@ -1313,6 +1334,7 @@ private final class GuideCollectionView: UICollectionView,
         returningTo programID: GuideProgram.ID,
         retriesRemaining: Int = 16
     ) {
+        focusVisibilityCorrectionTask?.cancel()
         guard let section = guideSnapshot?.channels.firstIndex(where: { $0.id == channelID })
         else { return }
         let headerIndexPath = IndexPath(item: 0, section: section)
@@ -1466,6 +1488,7 @@ private final class GuideCollectionView: UICollectionView,
         }
         os_signpost(.event, log: guidePerformanceLog, name: "GuideFocusDidUpdate", "id=%{public}s", programID)
         onFocused(programID)
+        scheduleFocusVisibilityCorrection(on: programID)
 
         guard let snapshot = guideSnapshot,
               let indexPath = snapshot.indexPath(for: programID),
@@ -1475,6 +1498,31 @@ private final class GuideCollectionView: UICollectionView,
         if item.frame.minX < pinnedTrailingEdge {
             let correctedX = max(0, item.frame.minX - GuideGridMetrics.channelWidth - 8)
             setContentOffset(CGPoint(x: correctedX, y: contentOffset.y), animated: true)
+        }
+    }
+
+    private func scheduleFocusVisibilityCorrection(on programID: GuideProgram.ID) {
+        focusVisibilityCorrectionTask?.cancel()
+        focusVisibilityCorrectionTask = Task { @MainActor [weak self] in
+            do {
+                // Directional repeats keep replacing this task. Once input
+                // and focus updates go quiet, finish at the exact offset for
+                // the final card instead of trusting the last interrupted
+                // UIScrollView animation to catch up.
+                try await Task.sleep(for: .milliseconds(140))
+                guard !Task.isCancelled,
+                      let self,
+                      self.requestedFocusedProgramID == programID,
+                      self.pendingFocusProgramID == nil,
+                      let snapshot = self.guideSnapshot,
+                      let indexPath = snapshot.indexPath(for: programID),
+                      let item = snapshot.item(at: indexPath)
+                else { return }
+                _ = self.reveal(item: item, animated: false)
+                self.lastDirectionalInputAt = nil
+            } catch {
+                // A newer focus update superseded this correction.
+            }
         }
     }
 
