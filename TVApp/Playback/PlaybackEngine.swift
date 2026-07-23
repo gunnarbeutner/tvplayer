@@ -548,6 +548,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         isPrimingPausedSeekFrame = false
         clearPausedFrame()
         let wasPaused = state == .paused
+        if wasPaused, isPlaybackOutputConcealed, !postSeekOutputGate.isArmed {
+            revealPostSeekPlaybackOutput()
+        }
         if wasPaused {
             logger.info("Resuming VLC playback")
         } else {
@@ -652,9 +655,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         installPausedFrame(image, shouldConcealSeek: shouldConcealSeek)
     }
 
-    private func capturePausedFrame() {
+    private func capturePausedFrame(preservingCurrentFrame: Bool = false) {
         guard state == .paused, pendingSnapshotURL == nil else { return }
-        pausedFrame = nil
+        if !preservingCurrentFrame {
+            pausedFrame = nil
+        }
 
         let snapshotURL = FileManager.default.temporaryDirectory
             .appending(path: "tvplayer-paused-frame-\(UUID().uuidString)")
@@ -804,6 +809,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 
     func refreshPlaybackInformation(at date: Date = Date()) {
         lastMetricsUpdate = date
+        if isPlaybackOutputConcealed {
+            concealPlaybackOutput()
+        }
 
         let isLive = activeRequest?.kind.isLive == true
         if let nativeInputStream {
@@ -1090,10 +1098,13 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                 setState(.failed(detail ?? "VLC could not play this TVHeadend stream."))
             }
         } else if isStopped, recoveryReason == nil, pipelineRecoveryTask == nil {
-                hasStartedPlayback = false
-                pauseRequested = false
-                livePlaybackPosition.reset()
-                setState(.idle)
+            hasStartedPlayback = false
+            pauseRequested = false
+            livePlaybackPosition.reset()
+            setState(.idle)
+        }
+        if isPlaybackOutputConcealed {
+            concealPlaybackOutput()
         }
         refreshPlaybackInformation()
     }
@@ -1642,9 +1653,12 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 
     private func concealPlaybackOutput() {
-        guard !isPlaybackOutputConcealed else { return }
-
-        isPlaybackOutputConcealed = true
+        if !isPlaybackOutputConcealed {
+            isPlaybackOutputConcealed = true
+        }
+        // Installing a fresh VLCMedia pipeline may reset the audio output's
+        // mute state while concealment remains active. Reassert it every time
+        // catch-up playback starts, not only on the first state transition.
         if let audio = mediaPlayer.audio, !audio.isMuted {
             audio.isMuted = true
             shouldRestoreAudioAfterOutputGate = true
@@ -1666,11 +1680,12 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             mediaPlayer.pause()
             setState(.paused)
             timeshiftNavigationDebugState = "paused on selected frame"
-            // Reveal VLC's verified destination picture before replacing the
-            // frozen pre-seek snapshot. This prevents a transient black frame
-            // between the two published updates.
-            revealPostSeekPlaybackOutput()
-            capturePausedFrame()
+            // Keep the pre-seek snapshot and mute in place while the final
+            // destination picture is captured. Replacing the image in the
+            // concealment view is atomic from SwiftUI's perspective, whereas
+            // revealing VLC here can expose both catch-up video and audio
+            // before its asynchronous pause has taken effect.
+            capturePausedFrame(preservingCurrentFrame: true)
         } else {
             revealPostSeekPlaybackOutput()
         }

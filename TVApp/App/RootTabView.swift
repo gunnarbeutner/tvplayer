@@ -1239,20 +1239,26 @@ private struct PersistentPlaybackSurface: View {
                     VLCSampleBufferVideoSurface(
                         displayLayer: engine.sampleBufferBridge.displayLayer,
                         fadesLeadingEdge: showsGuidePreview,
-                        leadingFadeInset: showsGuidePreview ? guideLeadingCrop : 0
+                        leadingFadeInset: showsGuidePreview ? guideLeadingCrop : 0,
+                        isOutputConcealed: isPresented && engine.isPlaybackOutputConcealed,
+                        concealmentImage: isPresented ? engine.pausedFrame : nil
                     )
                 } else {
                     VLCVideoSurface(
                         mediaPlayer: engine.mediaPlayer,
                         fadesLeadingEdge: showsGuidePreview,
-                        leadingFadeInset: showsGuidePreview ? guideLeadingCrop : 0
+                        leadingFadeInset: showsGuidePreview ? guideLeadingCrop : 0,
+                        isOutputConcealed: isPresented && engine.isPlaybackOutputConcealed,
+                        concealmentImage: isPresented ? engine.pausedFrame : nil
                     )
                 }
 #else
                 VLCVideoSurface(
                     mediaPlayer: engine.mediaPlayer,
                     fadesLeadingEdge: showsGuidePreview,
-                    leadingFadeInset: showsGuidePreview ? guideLeadingCrop : 0
+                    leadingFadeInset: showsGuidePreview ? guideLeadingCrop : 0,
+                    isOutputConcealed: isPresented && engine.isPlaybackOutputConcealed,
+                    concealmentImage: isPresented ? engine.pausedFrame : nil
                 )
 #endif
             }

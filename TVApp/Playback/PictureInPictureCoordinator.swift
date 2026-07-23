@@ -137,17 +137,25 @@ struct VLCSampleBufferVideoSurface: UIViewRepresentable {
     let displayLayer: AVSampleBufferDisplayLayer
     let fadesLeadingEdge: Bool
     let leadingFadeInset: CGFloat
+    let isOutputConcealed: Bool
+    let concealmentImage: PlatformImage?
 
     func makeUIView(context: Context) -> SampleBufferHostView {
         SampleBufferHostView(
             displayLayer: displayLayer,
             fadesLeadingEdge: fadesLeadingEdge,
-            leadingFadeInset: leadingFadeInset
+            leadingFadeInset: leadingFadeInset,
+            isOutputConcealed: isOutputConcealed,
+            concealmentImage: concealmentImage
         )
     }
 
     func updateUIView(_ view: SampleBufferHostView, context: Context) {
         view.updateFade(fadesLeadingEdge: fadesLeadingEdge, leadingFadeInset: leadingFadeInset)
+        view.updateConcealment(
+            isOutputConcealed: isOutputConcealed,
+            image: concealmentImage
+        )
     }
 }
 
@@ -156,11 +164,14 @@ final class SampleBufferHostView: UIView {
     private let leadingFadeMask = CAGradientLayer()
     private var fadesLeadingEdge: Bool
     private var leadingFadeInset: CGFloat
+    private let concealmentView = UIImageView()
 
     init(
         displayLayer: AVSampleBufferDisplayLayer,
         fadesLeadingEdge: Bool,
-        leadingFadeInset: CGFloat
+        leadingFadeInset: CGFloat,
+        isOutputConcealed: Bool,
+        concealmentImage: PlatformImage?
     ) {
         self.displayLayer = displayLayer
         self.fadesLeadingEdge = fadesLeadingEdge
@@ -169,6 +180,13 @@ final class SampleBufferHostView: UIView {
         backgroundColor = .black
         clipsToBounds = true
         layer.addSublayer(displayLayer)
+        concealmentView.backgroundColor = .black
+        concealmentView.contentMode = .scaleAspectFill
+        concealmentView.clipsToBounds = true
+        concealmentView.isUserInteractionEnabled = false
+        concealmentView.image = concealmentImage
+        concealmentView.isHidden = !isOutputConcealed
+        addSubview(concealmentView)
     }
 
     @available(*, unavailable)
@@ -177,6 +195,8 @@ final class SampleBufferHostView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         displayLayer.frame = bounds
+        concealmentView.frame = bounds
+        bringSubviewToFront(concealmentView)
         updateMask()
     }
 
@@ -184,6 +204,14 @@ final class SampleBufferHostView: UIView {
         self.fadesLeadingEdge = fadesLeadingEdge
         self.leadingFadeInset = leadingFadeInset
         updateMask()
+    }
+
+    func updateConcealment(isOutputConcealed: Bool, image: PlatformImage?) {
+        concealmentView.image = image
+        concealmentView.isHidden = !isOutputConcealed
+        if isOutputConcealed {
+            bringSubviewToFront(concealmentView)
+        }
     }
 
     private func updateMask() {
