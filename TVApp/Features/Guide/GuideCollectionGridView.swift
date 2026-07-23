@@ -2357,6 +2357,7 @@ struct GuideGridView: View {
     let onReady: () -> Void
     let onFocusAcquired: () -> Void
     let onExitToNavigator: () -> Void
+    @FocusState private var keyboardFocusedProgramID: GuideProgram.ID?
 
     private var snapshot: GuideGridSnapshot {
         GuideGridSnapshot(
@@ -2388,13 +2389,14 @@ struct GuideGridView: View {
                                         GuideProgramCard(
                                             program: item.program,
                                             now: now,
-                                            isFocused: focusedProgramID == item.id,
+                                            isFocused: keyboardFocusedProgramID == item.id,
                                             isPlaying: playingProgramID == item.id,
                                             recordingState: recordingState(item.program),
                                             leadingContentInset: 0
                                         )
                                     }
                                     .buttonStyle(.plain)
+                                    .focused($keyboardFocusedProgramID, equals: item.id)
                                     .frame(
                                         width: item.frame.width,
                                         height: item.frame.height
@@ -2508,16 +2510,31 @@ struct GuideGridView: View {
             }
         }
         .background(AppTheme.background)
+        .defaultFocus($keyboardFocusedProgramID, preferredProgramID)
         .onAppear {
-            if focusedProgramID == nil { focusedProgramID = preferredProgramID }
+            let initialProgramID = focusedProgramID ?? preferredProgramID
+            focusedProgramID = initialProgramID
+            keyboardFocusedProgramID = initialProgramID
             onReady()
+        }
+        .onChange(of: keyboardFocusedProgramID) { _, programID in
+            guard let programID else { return }
+            focusedProgramID = programID
             onFocusAcquired()
         }
+        .onChange(of: focusedProgramID) { _, programID in
+            guard let programID, programID != keyboardFocusedProgramID else { return }
+            keyboardFocusedProgramID = programID
+        }
         .onChange(of: focusRestoreRequest) { _, _ in
-            focusedProgramID = preferredProgramID ?? focusedProgramID
+            let programID = preferredProgramID ?? focusedProgramID
+            focusedProgramID = programID
+            keyboardFocusedProgramID = programID
         }
         .onChange(of: recenterRequest) { _, _ in
-            focusedProgramID = preferredProgramID ?? focusedProgramID
+            let programID = preferredProgramID ?? focusedProgramID
+            focusedProgramID = programID
+            keyboardFocusedProgramID = programID
         }
     }
 
