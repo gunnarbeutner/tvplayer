@@ -638,55 +638,66 @@ private struct ServerEditorView: View {
     }
 
     private var actionButtons: some View {
-        adaptiveLayout {
-            SettingsActionButton(
-                title: settings.isAddingServer ? "Add Server" : "Save",
-                systemImage: "checkmark",
-                style: .primary,
-                action: save
-            )
-
-            SettingsActionButton(
-                title: settings.connectionStatus == .checking ? "Checking…" : "Test Connection",
-                systemImage: settings.connectionStatus == .checking
-                    ? "arrow.triangle.2.circlepath" : "network",
-                style: .secondary,
-                isEnabled: settings.connectionStatus != .checking,
-                action: testConnection
-            )
-
-            if let profile = settings.editingProfile,
-               profile.origin == .discovered,
-               profile.isEdited {
+        VStack(alignment: .leading, spacing: 16) {
+            adaptiveLayout {
                 SettingsActionButton(
-                    title: "Use Automatic Updates",
-                    systemImage: "arrow.triangle.2.circlepath",
-                    style: .secondary
-                ) {
-                    settings.restoreAutomaticUpdates(profile.id)
-                    saveError = nil
+                    title: settings.isAddingServer ? "Add Server" : "Save",
+                    systemImage: "checkmark",
+                    style: .primary,
+                    action: save
+                )
+
+                SettingsActionButton(
+                    title: isTestingConnection ? "Checking…" : "Test Connection",
+                    systemImage: isTestingConnection
+                        ? "arrow.triangle.2.circlepath" : "network",
+                    style: .secondary,
+                    isEnabled: !isTestingConnection,
+                    action: testConnection
+                )
+
+                if let profile = settings.editingProfile,
+                   profile.origin == .discovered,
+                   profile.isEdited {
+                    SettingsActionButton(
+                        title: "Use Automatic Updates",
+                        systemImage: "arrow.triangle.2.circlepath",
+                        style: .secondary
+                    ) {
+                        settings.restoreAutomaticUpdates(profile.id)
+                        saveError = nil
+                    }
+                }
+
+                if let profile = settings.editingProfile {
+                    SettingsActionButton(
+                        title: "Forget",
+                        systemImage: "trash",
+                        style: .destructive,
+                        isEnabled: settings.canForget(profile)
+                    ) {
+                        settings.forget(profile.id)
+                        dismiss()
+                    }
+                }
+
+                if let saveError {
+                    Label(saveError, systemImage: "exclamationmark.triangle.fill")
+                        .font(.headline)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
                 }
             }
 
-            if let profile = settings.editingProfile {
-                SettingsActionButton(
-                    title: "Forget",
-                    systemImage: "trash",
-                    style: .destructive,
-                    isEnabled: settings.canForget(profile)
-                ) {
-                    settings.forget(profile.id)
-                    dismiss()
-                }
-            }
-
-            if let saveError {
-                Label(saveError, systemImage: "exclamationmark.triangle.fill")
-                    .font(.headline)
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
-            }
+            ConnectionTestFeedbackView(
+                connectionStatus: settings.connectionStatus,
+                timeshiftStatus: settings.timeshiftStatus
+            )
         }
+    }
+
+    private var isTestingConnection: Bool {
+        settings.connectionStatus == .checking || settings.timeshiftStatus == .checking
     }
 
     private var adaptiveLayout: AnyLayout {
@@ -740,6 +751,112 @@ private struct ServerEditorView: View {
     private func close() {
         settings.cancelEditing()
         dismiss()
+    }
+}
+
+private struct ConnectionTestFeedbackView: View {
+    let connectionStatus: ServerConnectionStatus
+    let timeshiftStatus: TVHeadendTimeshiftStatus
+
+    private struct Feedback {
+        let title: String
+        let message: String
+        let systemImage: String
+        let color: Color
+        let showsProgress: Bool
+    }
+
+    private var feedback: Feedback? {
+        switch connectionStatus {
+        case .notTested:
+            return nil
+        case .checking:
+            return Feedback(
+                title: "Testing connection…",
+                message: "Contacting TVHeadend.",
+                systemImage: "network",
+                color: AppTheme.accent,
+                showsProgress: true
+            )
+        case let .failed(message):
+            return Feedback(
+                title: "Connection failed",
+                message: message,
+                systemImage: "xmark.octagon.fill",
+                color: .red,
+                showsProgress: false
+            )
+        case let .connected(server):
+            return connectedFeedback(server: server)
+        }
+    }
+
+    private func connectedFeedback(server: String) -> Feedback {
+        let serverDescription = server.isEmpty ? "TVHeadend is reachable." : "Connected to \(server)."
+        switch timeshiftStatus {
+        case .checking:
+            return Feedback(
+                title: "Connection successful",
+                message: "\(serverDescription) Checking timeshift support…",
+                systemImage: "checkmark.circle.fill",
+                color: .green,
+                showsProgress: true
+            )
+        case .ready:
+            return Feedback(
+                title: "Connection successful",
+                message: "\(serverDescription) Native timeshift is available.",
+                systemImage: "checkmark.circle.fill",
+                color: .green,
+                showsProgress: false
+            )
+        case let .unavailable(reason):
+            return Feedback(
+                title: "Connection successful",
+                message: "\(serverDescription) Timeshift is unavailable: \(reason).",
+                systemImage: "checkmark.circle.fill",
+                color: .green,
+                showsProgress: false
+            )
+        case .notTested:
+            return Feedback(
+                title: "Connection successful",
+                message: serverDescription,
+                systemImage: "checkmark.circle.fill",
+                color: .green,
+                showsProgress: false
+            )
+        }
+    }
+
+    var body: some View {
+        if let feedback {
+            HStack(alignment: .top, spacing: 14) {
+                if feedback.showsProgress {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(feedback.color)
+                } else {
+                    Image(systemName: feedback.systemImage)
+                        .font(.title3.bold())
+                        .foregroundStyle(feedback.color)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(feedback.title)
+                        .font(.headline)
+                        .foregroundStyle(feedback.color)
+                    Text(feedback.message)
+                        .font(.callout)
+                        .foregroundStyle(AppTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(AppTheme.surface, in: RoundedRectangle(cornerRadius: 12))
+            .accessibilityElement(children: .combine)
+        }
     }
 }
 

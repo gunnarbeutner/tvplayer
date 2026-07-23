@@ -133,7 +133,8 @@ struct TVSourceStateView: View {
 
                     if state.isFailure {
                         Button("Try Again", action: retry)
-                            .buttonStyle(.bordered)
+                            .buttonStyle(.borderedProminent)
+                            .tint(AppTheme.surfaceRaised)
                             .focused($focusedAction, equals: .retry)
                     }
                 }
