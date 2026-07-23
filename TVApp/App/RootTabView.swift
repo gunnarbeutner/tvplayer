@@ -217,6 +217,16 @@ struct RootTabView: View {
                     .ignoresSafeArea()
             }
 
+            // In compact portrait the persistent video occupies a 16:9 hero
+            // rather than the full screen. Obscure the still-mounted guide
+            // beneath it so the remainder of the player stays visually
+            // isolated without placing an opaque layer over VLC's drawable.
+            if playback.isPlayerPresented {
+                Color.black
+                    .ignoresSafeArea()
+                    .zIndex(9)
+            }
+
             // Keep VLC's drawable mounted while the guide is visible. A new
             // UIView on each full-screen presentation can leave VLC's audio
             // output running while its video output remains bound to the
@@ -273,6 +283,7 @@ struct RootTabView: View {
                 )
                 .environmentObject(playback)
                 .environmentObject(settings)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .zIndex(11)
             }
 
@@ -282,6 +293,7 @@ struct RootTabView: View {
                     engine: playback.engine
                 )
                     .environmentObject(playback)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .transition(.opacity)
                     .zIndex(12)
                     .task(id: launch.id) {
@@ -309,6 +321,7 @@ struct RootTabView: View {
                     }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.easeOut(duration: 0.18), value: playback.launchPresentation?.id)
         .tint(AppTheme.accent)
 #if os(macOS)
@@ -1179,6 +1192,10 @@ private struct PersistentPlaybackSurface: View {
     @ObservedObject var engine: VLCPlaybackEngine
     let isPresented: Bool
     let showsGuidePreview: Bool
+#if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+#endif
 
     private var guidePreviewHeight: CGFloat {
         GuideArtworkStyle.previewHeight
@@ -1200,8 +1217,22 @@ private struct PersistentPlaybackSurface: View {
 #endif
     }
 
+    private var usesCompactPortraitPlayer: Bool {
+#if os(iOS)
+        isPresented
+            && horizontalSizeClass == .compact
+            && verticalSizeClass != .compact
+#else
+        false
+#endif
+    }
+
     var body: some View {
         GeometryReader { proxy in
+            let presentedHeight = usesCompactPortraitPlayer
+                ? proxy.size.width * 9 / 16
+                : proxy.size.height
+
             Group {
 #if os(tvOS)
                 if engine.usesSampleBufferRendering {
@@ -1227,18 +1258,22 @@ private struct PersistentPlaybackSurface: View {
             }
             .frame(
                 width: isPresented ? proxy.size.width : guideVideoWidth,
-                height: isPresented ? proxy.size.height : guidePreviewHeight
+                height: isPresented ? presentedHeight : guidePreviewHeight
             )
             // Broadcast video is normally 16:9 while the deliberately taller
             // guide artwork region is not. Render at the source aspect and
             // crop the leading side instead of asking VLC to letterbox it.
             .frame(
                 width: isPresented ? proxy.size.width : GuideArtworkStyle.artworkWidth,
-                height: isPresented ? proxy.size.height : guidePreviewHeight,
+                height: isPresented ? presentedHeight : guidePreviewHeight,
                 alignment: .trailing
             )
             .clipped()
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .frame(
+                maxWidth: .infinity,
+                maxHeight: .infinity,
+                alignment: usesCompactPortraitPlayer ? .center : .topTrailing
+            )
         }
         .ignoresSafeArea(.container, edges: ignoredSafeAreaEdges)
         .opacity(isPresented || showsGuidePreview ? 1 : 0)

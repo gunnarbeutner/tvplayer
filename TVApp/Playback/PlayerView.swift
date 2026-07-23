@@ -464,7 +464,11 @@ struct PlaybackView: View {
 #if !os(tvOS)
             if chromeMode != .hidden {
                 Button {
-                    dismissPlayer()
+                    if chromeMode == .panel {
+                        showTimeline()
+                    } else {
+                        dismissPlayer()
+                    }
                 } label: {
                     Image(systemName: "xmark")
                         .font(.headline.bold())
@@ -476,7 +480,7 @@ struct PlaybackView: View {
                         }
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Close Player")
+                .accessibilityLabel(chromeMode == .panel ? "Close Info" : "Close Player")
                 .keyboardShortcut(.cancelAction)
                 .padding(.horizontal, usesCompactLayout ? 16 : 20)
                 .padding(.vertical, usesCompactHeight ? 8 : (usesCompactLayout ? 12 : 20))
@@ -600,14 +604,14 @@ struct PlaybackView: View {
         }
         .task(id: chromeActivity) {
             guard chromeMode == .timeline,
-                  engine.state == .playing,
-                  !hasActiveSeekPreview
+                  !hasActiveSeekPreview,
+                  shouldAutoHideChrome
             else { return }
             try? await Task.sleep(for: .seconds(5))
             guard !Task.isCancelled,
                   chromeMode == .timeline,
-                  engine.state == .playing,
-                  !hasActiveSeekPreview
+                  !hasActiveSeekPreview,
+                  shouldAutoHideChrome
             else { return }
             hideChrome()
         }
@@ -889,6 +893,17 @@ struct PlaybackView: View {
 
     private func noteActivity() {
         chromeActivity = UUID()
+    }
+
+    private var shouldAutoHideChrome: Bool {
+#if os(iOS)
+        !isUserPaused && {
+            if case .failed = engine.state { return false }
+            return true
+        }()
+#else
+        engine.state == .playing
+#endif
     }
 
     private var hasActiveSeekPreview: Bool {
@@ -2108,6 +2123,53 @@ private struct PlaybackTransportControls: View {
     let showPanel: () -> Void
 
     var body: some View {
+        Group {
+            if usesCompactLayout {
+                compactControls
+            } else {
+                regularControls
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var compactControls: some View {
+        HStack(spacing: 8) {
+            compactButton(
+                label: "Back 10 Seconds",
+                systemImage: "gobackward.10",
+                isEnabled: canSeek,
+                action: seekBackward
+            )
+            compactButton(
+                label: isPlaying ? "Pause" : "Play",
+                systemImage: isPlaying ? "pause.fill" : "play.fill",
+                isEnabled: canPause,
+                isProminent: true,
+                action: togglePlayback
+            )
+            compactButton(
+                label: "Forward 10 Seconds",
+                systemImage: "goforward.10",
+                isEnabled: canSeek,
+                action: seekForward
+            )
+            if showsGoLive {
+                compactButton(
+                    label: "Go Live",
+                    systemImage: "dot.radiowaves.left.and.right",
+                    action: goLive
+                )
+            }
+            compactButton(
+                label: "Playback Options",
+                systemImage: "slider.horizontal.3",
+                action: showPanel
+            )
+        }
+    }
+
+    private var regularControls: some View {
         HStack(spacing: usesCompactLayout ? 12 : 18) {
             Button(action: seekBackward) {
                 Label("Back 10 Seconds", systemImage: "gobackward.10")
@@ -2156,10 +2218,34 @@ private struct PlaybackTransportControls: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity)
         .font(.title3)
         .buttonStyle(.bordered)
         .controlSize(.large)
+    }
+
+    private func compactButton(
+        label: String,
+        systemImage: String,
+        isEnabled: Bool = true,
+        isProminent: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.headline.bold())
+                .foregroundStyle(.white)
+                .frame(width: 52, height: 52)
+                .background(
+                    isProminent ? AppTheme.accent : AppTheme.surfaceRaised,
+                    in: Circle()
+                )
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.42)
+        .frame(maxWidth: .infinity)
+        .accessibilityLabel(label)
     }
 }
 #endif

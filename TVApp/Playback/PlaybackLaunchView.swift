@@ -1,7 +1,12 @@
 import SwiftUI
 
 struct PlaybackLaunchView: View {
+    @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var playback: PlaybackCoordinator
+#if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+#endif
     @ObservedObject var engine: VLCPlaybackEngine
     @FocusState private var isFocused: Bool
     @State private var artwork: ChannelLogoArtwork?
@@ -39,11 +44,37 @@ struct PlaybackLaunchView: View {
                     let labelRadius = max(geometry.size.width, geometry.size.height) * 0.56
 
                     ZStack {
-                        platformImage(artwork.image)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: geometry.size.width, height: geometry.size.height)
-                            .clipped()
+                        if usesCompactPortraitLayout {
+                            platformImage(artwork.image)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: geometry.size.width, height: geometry.size.height)
+                                .clipped()
+                                .blur(radius: 28)
+                                .scaleEffect(1.12)
+                                .opacity(0.46)
+
+                            LinearGradient(
+                                colors: [.black.opacity(0.42), .black.opacity(0.18), .black.opacity(0.72)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+
+                            platformImage(artwork.image)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(
+                                    width: geometry.size.width,
+                                    height: geometry.size.height * 0.58
+                                )
+                                .shadow(color: .black.opacity(0.38), radius: 20, y: 8)
+                        } else {
+                            platformImage(artwork.image)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: geometry.size.width, height: geometry.size.height)
+                                .clipped()
+                        }
 
                         RadialGradient(
                             stops: [
@@ -78,15 +109,18 @@ struct PlaybackLaunchView: View {
             }
 
             VStack(alignment: identityHorizontalAlignment, spacing: 14) {
-                ChannelBadge(channel: presentation.channel, diameter: 112)
+                ChannelBadge(
+                    channel: presentation.channel,
+                    diameter: usesCompactPortraitLayout ? 76 : 112
+                )
 
                 Text(presentation.channel.name)
                     .font(.headline.bold())
                     .lineLimit(1)
                     .multilineTextAlignment(centersChannelIdentity ? .center : .leading)
             }
-            .padding(.horizontal, 48)
-            .padding(.vertical, 48)
+            .padding(.horizontal, usesCompactPortraitLayout ? 24 : 48)
+            .padding(.vertical, usesCompactPortraitLayout ? 24 : 48)
             .frame(
                 maxWidth: .infinity,
                 maxHeight: .infinity,
@@ -121,6 +155,7 @@ struct PlaybackLaunchView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
 #endif
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
 #if os(tvOS)
         .onAppear { isFocused = true }
 #endif
@@ -131,6 +166,9 @@ struct PlaybackLaunchView: View {
             withAnimation(.easeOut(duration: 0.2)) {
                 showsTuningIndicator = true
             }
+        }
+        .task(id: artworkURL) {
+            await loadArtwork()
         }
         .platformExitCommand { playback.leavePlayer() }
     }
@@ -179,13 +217,54 @@ struct PlaybackLaunchView: View {
         return "Tuning \(presentation.channel.name)…"
     }
 
+    private var usesCompactPortraitLayout: Bool {
+#if os(iOS)
+        horizontalSizeClass == .compact && verticalSizeClass != .compact
+#else
+        false
+#endif
+    }
+
+    private var artworkURL: URL? {
+        presentation.program?.metadata.imageURL.flatMap(URL.init(string:))
+    }
+
     private var centersChannelIdentity: Bool {
-        guard let program = presentation.program else { return false }
-        return program.metadata.imageURL == nil
+        artwork == nil
     }
 
     private var identityHorizontalAlignment: HorizontalAlignment {
         centersChannelIdentity ? .center : .leading
+    }
+
+    @MainActor
+    private func loadArtwork() async {
+        guard let artworkURL else {
+            artwork = nil
+            return
+        }
+        if let cached = ChannelLogoImageCache.shared.memoryArtwork(
+            for: artworkURL,
+            kind: .programmeArtwork
+        ) {
+            artwork = cached
+            return
+        }
+
+        do {
+            let loaded = try await ChannelLogoDataLoader.shared.artwork(
+                at: artworkURL,
+                configuration: settings.configuration,
+                kind: .programmeArtwork
+            )
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.2)) {
+                artwork = loaded
+            }
+        } catch {
+            // Artwork is optional. Keep the centered channel identity when it
+            // is unavailable rather than leaving it in an empty hero layout.
+        }
     }
 
     private var accessibilityStatus: String {

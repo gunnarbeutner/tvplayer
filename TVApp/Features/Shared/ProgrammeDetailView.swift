@@ -10,6 +10,7 @@ struct ProgrammeDetailView: View {
     @Environment(\.dismiss) private var dismiss
 #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
 #endif
     @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var playback: PlaybackCoordinator
@@ -39,9 +40,15 @@ struct ProgrammeDetailView: View {
     }
 
     private var detailLayout: AnyLayout {
-        usesCompactLayout
+        usesCompactPortraitLayout
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: 28))
             : AnyLayout(HStackLayout(alignment: .top, spacing: detailColumnSpacing))
+    }
+
+    private var identityLayout: AnyLayout {
+        usesCompactPortraitLayout
+            ? AnyLayout(HStackLayout(alignment: .center, spacing: 18))
+            : AnyLayout(VStackLayout(alignment: .center, spacing: 14))
     }
 
     private var usesCompactLayout: Bool {
@@ -52,9 +59,23 @@ struct ProgrammeDetailView: View {
 #endif
     }
 
+    private var usesCompactHeight: Bool {
+#if os(iOS)
+        verticalSizeClass == .compact
+#else
+        false
+#endif
+    }
+
+    private var usesCompactPortraitLayout: Bool {
+        usesCompactLayout && !usesCompactHeight
+    }
+
     private var detailPadding: CGFloat {
 #if os(tvOS)
         80
+#elseif os(iOS)
+        usesCompactHeight ? 20 : PlatformLayout.contentPadding
 #else
         PlatformLayout.contentPadding
 #endif
@@ -63,6 +84,8 @@ struct ProgrammeDetailView: View {
     private var detailColumnSpacing: CGFloat {
 #if os(macOS)
         32
+#elseif os(iOS)
+        usesCompactHeight ? 22 : 54
 #else
         54
 #endif
@@ -71,6 +94,8 @@ struct ProgrammeDetailView: View {
     private var channelBadgeDiameter: CGFloat {
 #if os(macOS)
         104
+#elseif os(iOS)
+        usesCompactHeight ? 72 : (usesCompactLayout ? 88 : 132)
 #else
         132
 #endif
@@ -79,6 +104,8 @@ struct ProgrammeDetailView: View {
     private var channelColumnWidth: CGFloat {
 #if os(macOS)
         180
+#elseif os(iOS)
+        usesCompactHeight ? 140 : 280
 #else
         280
 #endif
@@ -95,6 +122,8 @@ struct ProgrammeDetailView: View {
     private var titleFont: Font {
 #if os(macOS)
         .title.bold()
+#elseif os(iOS)
+        usesCompactHeight ? .title2.bold() : .largeTitle.bold()
 #else
         .largeTitle.bold()
 #endif
@@ -103,9 +132,15 @@ struct ProgrammeDetailView: View {
     private var overviewFont: Font {
 #if os(macOS)
         .body
+#elseif os(iOS)
+        usesCompactHeight ? .body : .title3
 #else
         .title3
 #endif
+    }
+
+    private var contentSpacing: CGFloat {
+        usesCompactHeight ? 10 : (usesCompactLayout ? 20 : 16)
     }
 
     private var actionColumns: [GridItem] {
@@ -192,15 +227,20 @@ struct ProgrammeDetailView: View {
 
     private var detailContent: some View {
         detailLayout {
-            VStack(spacing: 22) {
+            identityLayout {
                 ChannelBadge(channel: channel, diameter: channelBadgeDiameter)
 
                 Text(channel.name)
-                    .font(.title2.bold())
+                    .font(usesCompactHeight ? .headline.bold() : .title2.bold())
+                    .lineLimit(2)
+                    .multilineTextAlignment(usesCompactPortraitLayout ? .leading : .center)
             }
-            .frame(width: usesCompactLayout ? nil : channelColumnWidth)
+            .frame(
+                width: usesCompactPortraitLayout ? nil : channelColumnWidth,
+                alignment: .top
+            )
 
-            VStack(alignment: .leading, spacing: usesCompactLayout ? 20 : 16) {
+            VStack(alignment: .leading, spacing: contentSpacing) {
                 if let program, program.isAiring(at: Date()) {
                     Text("LIVE NOW")
                         .font(.caption.bold())
@@ -236,8 +276,8 @@ struct ProgrammeDetailView: View {
                         }
                     }
 
-                    if !program.metadata.displayFacts.isEmpty {
-                        Text(program.metadata.displayFacts.joined(separator: "  •  "))
+                    if !userFacingDisplayFacts.isEmpty {
+                        Text(userFacingDisplayFacts.joined(separator: "  •  "))
                             .font(.subheadline)
                             .foregroundStyle(AppTheme.secondaryText)
                     }
@@ -271,6 +311,12 @@ struct ProgrammeDetailView: View {
         }
         .frame(maxWidth: detailMaximumWidth, alignment: .leading)
         .padding(detailPadding)
+    }
+
+    private var userFacingDisplayFacts: [String] {
+        program?.metadata.displayFacts.filter {
+            !$0.lowercased().hasPrefix("broadcast episode ")
+        } ?? []
     }
 
     @ViewBuilder
