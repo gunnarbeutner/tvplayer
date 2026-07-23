@@ -2,6 +2,44 @@ import XCTest
 @testable import TVApp
 
 final class GuideTimelineTests: XCTestCase {
+    func testSurroundingTimelineIncludesAtLeastTheNext24Hours() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 7,
+            day: 23,
+            hour: 10,
+            minute: 47,
+            second: 20
+        )))
+
+        let timeline = GuideTimeline.surrounding(now, calendar: calendar)
+
+        XCTAssertEqual(
+            timeline.start,
+            calendar.date(from: DateComponents(
+                year: 2026,
+                month: 7,
+                day: 23,
+                hour: 9,
+                minute: 30
+            ))
+        )
+        XCTAssertEqual(
+            timeline.end,
+            calendar.date(from: DateComponents(
+                year: 2026,
+                month: 7,
+                day: 24,
+                hour: 11
+            ))
+        )
+        XCTAssertGreaterThanOrEqual(timeline.end.timeIntervalSince(now), 24 * 3_600)
+        XCTAssertLessThan(timeline.end.timeIntervalSince(now), 24.5 * 3_600)
+        XCTAssertEqual(timeline.halfHourMarks.last, timeline.end)
+    }
+
     func testAvailableCoverageUsesTheLastReturnedProgramme() {
         let start = Date(timeIntervalSince1970: 10_000)
         let timeline = GuideTimeline(start: start, end: start.addingTimeInterval(6 * 3_600))

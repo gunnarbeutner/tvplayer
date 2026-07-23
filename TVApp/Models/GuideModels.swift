@@ -183,6 +183,8 @@ enum GuideChannelAppearance {
 
 struct GuideTimeline: Equatable {
     static let pointsPerHour: CGFloat = 360
+    private static let halfHour: TimeInterval = 1_800
+    private static let futureDuration: TimeInterval = 24 * 3_600
 
     let start: Date
     let end: Date
@@ -222,7 +224,11 @@ struct GuideTimeline: Equatable {
 
         let rounded = calendar.date(from: roundedComponents) ?? date
         let start = calendar.date(byAdding: .hour, value: -1, to: rounded) ?? rounded
-        let end = calendar.date(byAdding: .hour, value: 6, to: start) ?? start.addingTimeInterval(21_600)
+        let minimumEnd = date.addingTimeInterval(Self.futureDuration)
+        let halfHoursToEnd = ceil(
+            minimumEnd.timeIntervalSince(rounded) / Self.halfHour
+        )
+        let end = rounded.addingTimeInterval(halfHoursToEnd * Self.halfHour)
         return GuideTimeline(start: start, end: end)
     }
 
@@ -231,7 +237,7 @@ struct GuideTimeline: Equatable {
         var date = start
         while date <= end {
             dates.append(date)
-            date = date.addingTimeInterval(1_800)
+            date = date.addingTimeInterval(Self.halfHour)
         }
         return dates
     }
