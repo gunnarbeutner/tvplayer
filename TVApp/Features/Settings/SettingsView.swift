@@ -371,7 +371,11 @@ private struct LicensesView: View {
                         .font(.callout)
                         .foregroundStyle(AppTheme.secondaryText)
 
-                    LazyVStack(alignment: .leading, spacing: 12) {
+                    // tvOS directional focus needs the next paragraph to
+                    // exist before it can scroll toward it. A lazy stack
+                    // leaves the LGPL text unrealized below the viewport,
+                    // trapping focus in the preceding MIT section.
+                    VStack(alignment: .leading, spacing: 12) {
                         ForEach(Array(licenseParagraphs.enumerated()), id: \.offset) { _, paragraph in
                             LicenseParagraph(text: paragraph)
                         }
