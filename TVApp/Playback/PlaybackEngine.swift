@@ -295,8 +295,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 
     private var nativeInputStream: HTSPLiveInputStream?
     // VLCKit's custom-stream bridge does not retain the InputStream passed to
-    // VLCMedia(stream:), and closes it asynchronously. Keep disposable readers
-    // alive until VLC confirms the corresponding pipeline has stopped.
+    // VLCMedia(stream:), and can still open or close it after the player has
+    // reported Stopped. Keep each cheap, weak-source reader alive for the
+    // engine lifetime; releasing it at Stopped races VLCKit's access callback.
     private var retainedNativeVLCReaders: [InputStream] = []
     private let timeshiftAudioLogger: VLCTimeshiftAudioLogger?
     private var nativeTimeshiftActions: NativeTimeshiftActionController?
@@ -426,7 +427,6 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         logger.info("Preparing stream from \(request.url.host ?? "unknown host", privacy: .public)")
 
         try await stopMediaPlayerForReplacement()
-        retainedNativeVLCReaders.removeAll(keepingCapacity: true)
         nativeInputStream?.close()
         nativeInputStream = nil
         nativeTimeshiftActions = nil
@@ -1576,7 +1576,6 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             logger.error("\(detail, privacy: .public)")
             return false
         }
-        retainedNativeVLCReaders.removeAll(keepingCapacity: true)
 #if DEBUG
         let stoppedAt = ProcessInfo.processInfo.systemUptime
 #endif
@@ -2248,7 +2247,10 @@ private final class VLCVideoContainerView: UIView {
         clipsToBounds = true
         layer.masksToBounds = true
         concealmentView.backgroundColor = .black
-        concealmentView.contentMode = .scaleAspectFill
+        // VLC's `.smaller` fit mode preserves the whole decoded picture.
+        // Match that geometry exactly so switching to the held snapshot does
+        // not introduce a subtle crop or scale jump.
+        concealmentView.contentMode = .scaleAspectFit
         concealmentView.clipsToBounds = true
         concealmentView.isUserInteractionEnabled = false
         concealmentView.image = concealmentImage
@@ -2458,7 +2460,7 @@ private final class VLCVideoContainerView: NSView {
         addSubview(videoView)
         concealmentView.wantsLayer = true
         concealmentView.layer?.backgroundColor = NSColor.black.cgColor
-        concealmentView.layer?.contentsGravity = .resizeAspectFill
+        concealmentView.layer?.contentsGravity = .resizeAspect
         concealmentView.imageScaling = .scaleProportionallyUpOrDown
         concealmentView.image = concealmentImage
         concealmentView.isHidden = !isOutputConcealed
