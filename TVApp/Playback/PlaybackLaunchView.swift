@@ -77,16 +77,21 @@ struct PlaybackLaunchView: View {
                 .ignoresSafeArea()
             }
 
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: identityHorizontalAlignment, spacing: 14) {
                 ChannelBadge(channel: presentation.channel, diameter: 112)
 
                 Text(presentation.channel.name)
                     .font(.headline.bold())
                     .lineLimit(1)
+                    .multilineTextAlignment(centersChannelIdentity ? .center : .leading)
             }
             .padding(.horizontal, 48)
             .padding(.vertical, 48)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .frame(
+                maxWidth: .infinity,
+                maxHeight: .infinity,
+                alignment: centersChannelIdentity ? .center : .topLeading
+            )
 
             launchStatus
 
@@ -168,6 +173,15 @@ struct PlaybackLaunchView: View {
             return reason.message
         }
         return "Tuning \(presentation.channel.name)…"
+    }
+
+    private var centersChannelIdentity: Bool {
+        guard let program = presentation.program else { return false }
+        return program.metadata.imageURL == nil
+    }
+
+    private var identityHorizontalAlignment: HorizontalAlignment {
+        centersChannelIdentity ? .center : .leading
     }
 
     private var accessibilityStatus: String {
