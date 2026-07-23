@@ -1034,11 +1034,18 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
     private(set) var channelID: String?
 
     override init() {
-        let library = VLCLibrary(options: [
+        var libraryOptions = [
             "--quiet",
             "--no-snapshot-preview",
             "--no-audio"
-        ])
+        ]
+#if os(macOS)
+        // Keep the hidden analysis player off VLCKit 4's legacy NSOpenGL
+        // output too. It starts alongside regular playback and can otherwise
+        // trip the same framebuffer assertion as the visible player.
+        libraryOptions.append("--vout=samplebufferdisplay")
+#endif
+        let library = VLCLibrary(options: libraryOptions)
         mediaPlayer = VLCMediaPlayer(library: library)
         super.init()
         mediaPlayer.delegate = self

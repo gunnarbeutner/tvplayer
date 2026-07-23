@@ -336,6 +336,13 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             ? VLCTimeshiftAudioLogger()
             : nil
         var libraryOptions = ["--no-snapshot-preview"]
+#if os(macOS)
+        // VLCKit 4's legacy NSOpenGL output occasionally asserts while
+        // creating or resizing its framebuffer. Use VLC 4's default Apple
+        // CoreMedia/sample-buffer display explicitly so regular playback
+        // never enters that legacy renderer.
+        libraryOptions.append("--vout=samplebufferdisplay")
+#endif
         if !runsTimeshiftBenchmark { libraryOptions.append("--quiet") }
         let library = VLCLibrary(options: libraryOptions)
         if let timeshiftAudioLogger { library.loggers = [timeshiftAudioLogger] }
@@ -2409,6 +2416,7 @@ private final class VLCVideoContainerView: NSView {
     private var leadingFadeInset: CGFloat
     private var attachedBoundsSize = CGSize.zero
     private var requiresReattachment = false
+    private let videoView = VLCVideoView()
     private let leadingFadeMask = CAGradientLayer()
     private let concealmentView = NSImageView()
 
@@ -2430,6 +2438,9 @@ private final class VLCVideoContainerView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
         layer?.masksToBounds = true
+        videoView.backColor = .black
+        videoView.fillScreen = false
+        addSubview(videoView)
         concealmentView.wantsLayer = true
         concealmentView.layer?.backgroundColor = NSColor.black.cgColor
         concealmentView.layer?.contentsGravity = .resizeAspectFill
@@ -2460,31 +2471,14 @@ private final class VLCVideoContainerView: NSView {
 
         if attachedBoundsSize != bounds.size {
             attachedBoundsSize = bounds.size
+            NSAnimationContext.beginGrouping()
+            NSAnimationContext.current.duration = 0
+            videoView.frame = bounds
+            NSAnimationContext.endGrouping()
             updateLeadingFadeMask()
         }
         concealmentView.frame = bounds
         attachIfVisible()
-    }
-
-    override func resizeSubviews(withOldSize oldSize: NSSize) {
-        // SwiftUI can briefly collapse an NSViewRepresentable while moving it
-        // between the guide preview and full player. Passing that zero-sized
-        // transition to VLCOpenGLVideoView produces an incomplete framebuffer
-        // which VLC 4 asserts on from its render thread. Keep the last usable
-        // drawable size until AppKit gives us another real one.
-        guard hasRenderableBounds else { return }
-        super.resizeSubviews(withOldSize: oldSize)
-    }
-
-    override func didAddSubview(_ subview: NSView) {
-        super.didAddSubview(subview)
-        subview.autoresizingMask = [.width, .height]
-        if hasRenderableBounds {
-            subview.frame = bounds
-        }
-        if subview !== concealmentView {
-            addSubview(concealmentView, positioned: .above, relativeTo: subview)
-        }
     }
 
     private var hasRenderableBounds: Bool {
@@ -2513,9 +2507,6 @@ private final class VLCVideoContainerView: NSView {
         }
         concealmentView.image = concealmentImage
         concealmentView.isHidden = !isOutputConcealed
-        if isOutputConcealed {
-            addSubview(concealmentView, positioned: .above, relativeTo: nil)
-        }
         guard isActive else {
             detachIfOwned()
             return
@@ -2544,12 +2535,12 @@ private final class VLCVideoContainerView: NSView {
         requiresReattachment = requiresReattachment || force
         guard isActive, window != nil, hasRenderableBounds, let mediaPlayer else { return }
         if !requiresReattachment,
-           let current = mediaPlayer.drawable as? NSView,
-           current === self {
+           let current = mediaPlayer.drawable as? VLCVideoView,
+           current === videoView {
             return
         }
         mediaPlayer.drawable = nil
-        mediaPlayer.drawable = self
+        mediaPlayer.drawable = videoView
         requiresReattachment = false
         configureVideoSizing(mediaPlayer)
     }
@@ -2560,8 +2551,8 @@ private final class VLCVideoContainerView: NSView {
 
     func detachIfOwned() {
         guard let mediaPlayer,
-              let current = mediaPlayer.drawable as? NSView,
-              current === self
+              let current = mediaPlayer.drawable as? VLCVideoView,
+              current === videoView
         else { return }
         mediaPlayer.drawable = nil
     }
