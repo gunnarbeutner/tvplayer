@@ -27,31 +27,37 @@ struct PlaceholderView: View {
     }
 
     var body: some View {
-        ZStack {
-            AppTheme.background.ignoresSafeArea()
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(spacing: 28) {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 72, weight: .medium))
+                        .foregroundStyle(AppTheme.accent)
 
-            VStack(spacing: 28) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 72, weight: .medium))
-                    .foregroundStyle(AppTheme.accent)
+                    Text(title)
+                        .font(.largeTitle.bold())
+                        .multilineTextAlignment(.center)
 
-                Text(title)
-                    .font(.largeTitle.bold())
+                    Text(message)
+                        .font(.title3)
+                        .foregroundStyle(AppTheme.secondaryText)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 680)
 
-                Text(message)
-                    .font(.title3)
-                    .foregroundStyle(AppTheme.secondaryText)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 680)
-
-                if let actionTitle, let action {
-                    Button(actionTitle, action: action)
-                        .buttonStyle(.borderedProminent)
-                        .tint(AppTheme.focused)
-                        .focused($isActionFocused)
+                    if let actionTitle, let action {
+                        Button(actionTitle, action: action)
+                            .buttonStyle(.borderedProminent)
+                            .tint(AppTheme.focused)
+                            .focused($isActionFocused)
+                    }
                 }
+                .frame(maxWidth: .infinity, minHeight: geometry.size.height)
+                .padding(PlatformLayout.contentPadding)
             }
+            .scrollBounceBehavior(.basedOnSize)
+            .background(AppTheme.background)
         }
+        .background(AppTheme.background.ignoresSafeArea())
         .onChange(of: focusRequest) { _, request in
             guard request != nil, action != nil else { return }
             Task { @MainActor in
@@ -105,49 +111,65 @@ struct TVSourceStateView: View {
     }
 
     var body: some View {
-        VStack(spacing: 24) {
-            if state == .loading {
-                ProgressView()
-                    .controlSize(.large)
-            } else {
-                Image(systemName: content.image)
-                    .font(.system(size: 64, weight: .medium))
-                    .foregroundStyle(state.isFailure ? Color.orange : AppTheme.accent)
-            }
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(spacing: 24) {
+                    if state == .loading {
+                        ProgressView()
+                            .controlSize(.large)
+                    } else {
+                        Image(systemName: content.image)
+                            .font(.system(size: 64, weight: .medium))
+                            .foregroundStyle(state.isFailure ? Color.orange : AppTheme.accent)
+                    }
 
-            Text(content.title)
-                .font(.largeTitle.bold())
+                    Text(content.title)
+                        .font(.largeTitle.bold())
+                        .multilineTextAlignment(.center)
 
-            Text(content.message)
-                .font(.title3)
-                .foregroundStyle(AppTheme.secondaryText)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 760)
+                    Text(content.message)
+                        .font(.title3)
+                        .foregroundStyle(AppTheme.secondaryText)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 760)
 
-            if state != .loading {
-                HStack(spacing: 18) {
-                    Button("Open Settings", action: openSettings)
-                        .buttonStyle(.borderedProminent)
-                        .tint(AppTheme.focused)
-                        .focused($focusedAction, equals: .openSettings)
-
-                    if state.isFailure {
-                        Button("Try Again", action: retry)
-                            .buttonStyle(.borderedProminent)
-                            .tint(AppTheme.surfaceRaised)
-                            .focused($focusedAction, equals: .retry)
+                    if state != .loading {
+                        ViewThatFits {
+                            HStack(spacing: 18) {
+                                sourceActionButtons
+                            }
+                            VStack(spacing: 14) {
+                                sourceActionButtons
+                            }
+                        }
                     }
                 }
+                .frame(maxWidth: .infinity, minHeight: geometry.size.height)
+                .padding(PlatformLayout.contentPadding)
             }
+            .scrollBounceBehavior(.basedOnSize)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(60)
         .onChange(of: focusRequest) { _, request in
             guard request != nil, state != .loading else { return }
             Task { @MainActor in
                 await Task.yield()
                 focusedAction = .openSettings
             }
+        }
+    }
+
+    @ViewBuilder
+    private var sourceActionButtons: some View {
+        Button("Open Settings", action: openSettings)
+            .buttonStyle(.borderedProminent)
+            .tint(AppTheme.focused)
+            .focused($focusedAction, equals: .openSettings)
+
+        if state.isFailure {
+            Button("Try Again", action: retry)
+                .buttonStyle(.borderedProminent)
+                .tint(AppTheme.surfaceRaised)
+                .focused($focusedAction, equals: .retry)
         }
     }
 }

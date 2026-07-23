@@ -75,11 +75,18 @@ struct ChannelsView: View {
                                 .focused($focusedChannelID, equals: channel.id)
                                 .focusEffectDisabled()
                                 .onTapGesture {
-                                    detail = ProgrammeDetailPresentation(
-                                        program: currentProgram(for: channel),
-                                        channel: channel
-                                    )
+                                    presentDetails(for: channel)
                                 }
+#if os(macOS)
+                                .onKeyPress(.return) {
+                                    presentDetails(for: channel)
+                                    return .handled
+                                }
+                                .onKeyPress(.space) {
+                                    presentDetails(for: channel)
+                                    return .handled
+                                }
+#endif
                                 .contextMenu {
                                     Button {
                                         toggleFavorite(channel.id)
@@ -96,10 +103,7 @@ struct ChannelsView: View {
                                 }
                                 .accessibilityAddTraits(.isButton)
                                 .accessibilityAction {
-                                    detail = ProgrammeDetailPresentation(
-                                        program: currentProgram(for: channel),
-                                        channel: channel
-                                    )
+                                    presentDetails(for: channel)
                                 }
                                 .accessibilityAction(
                                     named: channelPreferences.isFavorite(channel.id)
@@ -188,6 +192,13 @@ struct ChannelsView: View {
 
     private func currentProgram(for channel: GuideChannel) -> GuideProgram? {
         channel.programs.first { $0.isAiring(at: model.now) }
+    }
+
+    private func presentDetails(for channel: GuideChannel) {
+        detail = ProgrammeDetailPresentation(
+            program: currentProgram(for: channel),
+            channel: channel
+        )
     }
 
     private func toggleFavorite(_ channelID: GuideChannel.ID) {

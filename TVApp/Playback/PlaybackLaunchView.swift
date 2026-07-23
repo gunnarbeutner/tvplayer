@@ -95,6 +95,7 @@ struct PlaybackLaunchView: View {
 
             launchStatus
 
+#if os(tvOS)
             Color.clear
                 .contentShape(Rectangle())
                 .ignoresSafeArea()
@@ -102,6 +103,7 @@ struct PlaybackLaunchView: View {
                 .focused($isFocused)
                 .focusEffectDisabled()
                 .accessibilityLabel(accessibilityStatus)
+#endif
 
 #if !os(tvOS)
             Button {
@@ -119,7 +121,9 @@ struct PlaybackLaunchView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
 #endif
         }
+#if os(tvOS)
         .onAppear { isFocused = true }
+#endif
         .task(id: presentation.id) {
             showsTuningIndicator = false
             try? await Task.sleep(for: .seconds(5))

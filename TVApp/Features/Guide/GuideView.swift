@@ -532,6 +532,7 @@ private struct GuideLoadingSkeleton: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.verticalSizeClass) private var verticalSizeClass
 #endif
     @State private var isDimmed = false
@@ -539,6 +540,14 @@ private struct GuideLoadingSkeleton: View {
     private var usesCompactLayout: Bool {
 #if os(iOS)
         verticalSizeClass == .compact
+#else
+        false
+#endif
+    }
+
+    private var usesCompactListLayout: Bool {
+#if os(iOS)
+        horizontalSizeClass == .compact && verticalSizeClass != .compact
 #else
         false
 #endif
@@ -555,33 +564,42 @@ private struct GuideLoadingSkeleton: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let rowCount = visibleRowCount(for: geometry.size.height)
-
-            VStack(spacing: 0) {
-                informationPlaceholder
+            if usesCompactListLayout {
+                compactListPlaceholder
+                    .frame(
+                        width: geometry.size.width,
+                        height: geometry.size.height,
+                        alignment: .topLeading
+                    )
+            } else {
+                let rowCount = visibleRowCount(for: geometry.size.height)
 
                 VStack(spacing: 0) {
-                    timelinePlaceholder
+                    informationPlaceholder
 
-                    ForEach(0..<rowCount, id: \.self) { index in
-                        HStack(spacing: 0) {
-                            channelPlaceholder(at: index)
-                            programmePlaceholders(for: index)
+                    VStack(spacing: 0) {
+                        timelinePlaceholder
+
+                        ForEach(0..<rowCount, id: \.self) { index in
+                            HStack(spacing: 0) {
+                                channelPlaceholder(at: index)
+                                programmePlaceholders(for: index)
+                            }
+                            .frame(height: GuideGridMetrics.rowHeight)
                         }
-                        .frame(height: GuideGridMetrics.rowHeight)
                     }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .clipped()
+                    .opacity(isDimmed ? 0.48 : 0.78)
                 }
-                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .frame(
+                    width: geometry.size.width,
+                    height: geometry.size.height,
+                    alignment: .topLeading
+                )
+                .background(AppTheme.background)
                 .clipped()
-                .opacity(isDimmed ? 0.48 : 0.78)
             }
-            .frame(
-                width: geometry.size.width,
-                height: geometry.size.height,
-                alignment: .topLeading
-            )
-            .background(AppTheme.background)
-            .clipped()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppTheme.background.ignoresSafeArea())
@@ -593,6 +611,46 @@ private struct GuideLoadingSkeleton: View {
                 isDimmed = true
             }
         }
+    }
+
+    private var compactListPlaceholder: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 18) {
+                placeholder(width: 150, height: 30)
+
+                ForEach(0..<5, id: \.self) { channelIndex in
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 12) {
+                            if channels.indices.contains(channelIndex) {
+                                ChannelBadge(channel: channels[channelIndex], diameter: 44)
+                                Text(channels[channelIndex].name)
+                                    .font(.headline)
+                                    .foregroundStyle(.white.opacity(0.72))
+                                    .lineLimit(1)
+                            } else {
+                                Circle()
+                                    .fill(AppTheme.surfaceRaised)
+                                    .frame(width: 44, height: 44)
+                                placeholder(width: 150, height: 20)
+                            }
+                        }
+
+                        ForEach(0..<2, id: \.self) { index in
+                            VStack(alignment: .leading, spacing: 7) {
+                                placeholder(width: index == 0 ? 230 : 180, height: 18)
+                                placeholder(width: 110, height: 13)
+                            }
+                            .padding(14)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(AppTheme.surface, in: RoundedRectangle(cornerRadius: 14))
+                        }
+                    }
+                }
+            }
+            .padding(PlatformLayout.contentPadding)
+            .opacity(isDimmed ? 0.48 : 0.78)
+        }
+        .background(AppTheme.background)
     }
 
     private func visibleRowCount(for availableHeight: CGFloat) -> Int {

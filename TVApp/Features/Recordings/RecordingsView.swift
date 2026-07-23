@@ -177,6 +177,16 @@ struct RecordingsView: View {
                         .focused($focusedRecordingID, equals: recording.id)
                         .focusEffectDisabled()
                         .onTapGesture { selectedRecording = recording }
+#if os(macOS)
+                        .onKeyPress(.return) {
+                            selectedRecording = recording
+                            return .handled
+                        }
+                        .onKeyPress(.space) {
+                            selectedRecording = recording
+                            return .handled
+                        }
+#endif
                         .accessibilityAddTraits(.isButton)
                         .accessibilityHint(recording.isPlayable
                             ? "Select for details. Press Play to start playback."
@@ -199,6 +209,8 @@ struct RecordingsView: View {
 
                 LazyVGrid(columns: columns, alignment: .leading, spacing: 28) {
                     ForEach(store.rules) { rule in
+                        let focusID = "rule:\(rule.id)"
+                        let isFocused = focusedRecordingID == focusID
                         Button {
                             ruleToDelete = rule
                         } label: {
@@ -221,10 +233,21 @@ struct RecordingsView: View {
                             }
                             .padding(22)
                             .frame(height: 150)
-                            .background(AppTheme.surface, in: RoundedRectangle(cornerRadius: 14))
+                            .background(
+                                isFocused ? AppTheme.focused : AppTheme.surface,
+                                in: RoundedRectangle(cornerRadius: 14)
+                            )
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 14)
+                                    .strokeBorder(
+                                        isFocused ? AppTheme.focusBorder : .clear,
+                                        lineWidth: 3
+                                    )
+                            }
                         }
                         .buttonStyle(.plain)
-                        .focused($focusedRecordingID, equals: "rule:\(rule.id)")
+                        .focused($focusedRecordingID, equals: focusID)
+                        .focusEffectDisabled()
                     }
                 }
             }
@@ -480,7 +503,7 @@ private struct RecordingDetailView: View {
                         Text(recording.overview)
                             .font(.title3)
                             .foregroundStyle(.white.opacity(0.9))
-                            .lineLimit(7)
+                            .fixedSize(horizontal: false, vertical: true)
 
                         if let warning = recording.warningText {
                             Label(warning, systemImage: "exclamationmark.triangle.fill")

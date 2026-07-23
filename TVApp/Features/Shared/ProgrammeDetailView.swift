@@ -229,20 +229,11 @@ struct ProgrammeDetailView: View {
                     .foregroundStyle(AppTheme.secondaryText)
 
                     if !metadataLabels.isEmpty {
-#if os(macOS)
                         ProgrammeMetadataFlowLayout(spacing: 8) {
                             ForEach(metadataLabels, id: \.self) { label in
                                 metadataBadge(label)
                             }
                         }
-#else
-                        HStack(spacing: 10) {
-                            ForEach(metadataLabels, id: \.self) { label in
-                                metadataBadge(label)
-                            }
-                        }
-                        .lineLimit(1)
-#endif
                     }
 
                     if !program.metadata.displayFacts.isEmpty {
@@ -254,7 +245,7 @@ struct ProgrammeDetailView: View {
                     Text(program.overview)
                         .font(overviewFont)
                         .foregroundStyle(.white.opacity(0.9))
-                        .lineLimit(8)
+                        .fixedSize(horizontal: false, vertical: true)
 
                     ForEach(
                         program.metadata.supplementaryDescriptions(
@@ -390,7 +381,6 @@ struct ProgrammeDetailView: View {
     }
 }
 
-#if os(macOS)
 /// A compact wrapping row for metadata pills. Adaptive grids force every pill
 /// into an equal-width column, which truncates useful labels in narrow sheets.
 private struct ProgrammeMetadataFlowLayout: Layout {
@@ -457,4 +447,3 @@ private struct ProgrammeMetadataFlowLayout: Layout {
         }
     }
 }
-#endif

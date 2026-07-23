@@ -216,21 +216,21 @@ struct SettingsView: View {
             } else {
                 VStack(spacing: 10) {
                     ForEach(settings.profiles) { profile in
-                        ServerProfileRow(
-                            profile: profile,
-                            isActive: settings.activeProfileID == profile.id,
-                            isOnline: settings.isOnline(profile),
-                            isFocused: focusedControl == .server(profile.id)
-                        )
-                        .contentShape(RoundedRectangle(cornerRadius: 12))
-                        .focusable()
-                        .focusEffectDisabled()
-                        .focused($focusedControl, equals: .server(profile.id))
-                        .onTapGesture {
+                        Button {
                             settings.selectServer(profile.id)
                             showsServerEditor = true
+                        } label: {
+                            ServerProfileRow(
+                                profile: profile,
+                                isActive: settings.activeProfileID == profile.id,
+                                isOnline: settings.isOnline(profile),
+                                isFocused: focusedControl == .server(profile.id)
+                            )
                         }
-                        .accessibilityAddTraits(.isButton)
+                        .buttonStyle(.plain)
+                        .contentShape(RoundedRectangle(cornerRadius: 12))
+                        .focusEffectDisabled()
+                        .focused($focusedControl, equals: .server(profile.id))
                         .accessibilityHint("Select and edit this server")
                     }
                 }
@@ -466,6 +466,7 @@ private struct ServerEditorView: View {
     @State private var streamProfiles: [TVHeadendStreamProfile] = []
     @State private var isLoadingStreamProfiles = false
     @State private var textFieldGeneration = 0
+    @State private var profileToForget: TVHeadendServerProfile?
     @FocusState private var focusedEditorField: EditorField?
 
     private enum EditorField: Hashable {
@@ -518,6 +519,27 @@ private struct ServerEditorView: View {
         }
         .platformExitCommand(close)
         .task { await loadStreamProfiles() }
+        .confirmationDialog(
+            "Forget this server?",
+            isPresented: Binding(
+                get: { profileToForget != nil },
+                set: { if !$0 { profileToForget = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let profileToForget {
+                Button("Forget “\(profileToForget.name)”", role: .destructive) {
+                    settings.forget(profileToForget.id)
+                    self.profileToForget = nil
+                    dismiss()
+                }
+            }
+            Button("Keep Server", role: .cancel) {
+                profileToForget = nil
+            }
+        } message: {
+            Text("The saved connection and its credentials will be removed from TV Player.")
+        }
 #if os(tvOS)
         .onReceive(
             NotificationCenter.default.publisher(
@@ -710,8 +732,7 @@ private struct ServerEditorView: View {
                         style: .destructive,
                         isEnabled: settings.canForget(profile)
                     ) {
-                        settings.forget(profile.id)
-                        dismiss()
+                        profileToForget = profile
                     }
                 }
 
@@ -948,6 +969,8 @@ private struct SettingsActionButton: View {
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled)
+        .focused($isFocused)
+        .focusEffectDisabled()
 #endif
     }
 

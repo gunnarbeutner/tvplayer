@@ -1880,41 +1880,12 @@ private struct PlayerTabbedOverlay: View {
     let noteActivity: () -> Void
 
     @FocusState private var tabBarFocused: Bool
+    @FocusState private var focusedTab: PlayerOverlayTab?
     @FocusState private var focusedTechnicalDetailID: PlaybackTechnicalDetail.ID?
 
     var body: some View {
         VStack(alignment: .leading, spacing: usesCompactHeight ? 10 : 22) {
-            HStack(spacing: 12) {
-                ForEach(PlayerOverlayTab.allCases) { tab in
-                    Text(tab.rawValue)
-                        .font(.headline)
-                        .foregroundStyle(.white)
-                        .frame(maxWidth: usesCompactLayout ? .infinity : nil)
-                        .padding(.horizontal, usesCompactLayout ? 10 : 24)
-                        .padding(.vertical, usesCompactLayout ? 10 : 12)
-                        .background(
-                            selectedTab == tab
-                                ? AppTheme.focused
-                                : Color.white.opacity(0.08),
-                            in: Capsule()
-                        )
-                        .contentShape(Capsule())
-                        .onTapGesture {
-                            selectedTab = tab
-                            noteActivity()
-                        }
-                        .accessibilityAddTraits(.isButton)
-                }
-            }
-            .contentShape(Rectangle())
-            .focusable()
-            .focused($tabBarFocused)
-            .focusEffectDisabled()
-            .platformMoveCommand(moveTab)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(selectedTab.rawValue) tab")
-            .accessibilityHint("Swipe left or right to change tabs")
-            .padding(.leading, usesCompactHeight ? 56 : 0)
+            tabSelector
 
             Divider().overlay(.white.opacity(0.2))
 
@@ -1928,12 +1899,12 @@ private struct PlayerTabbedOverlay: View {
             }
             .frame(
                 maxWidth: .infinity,
-                minHeight: usesCompactHeight ? 190 : (usesCompactLayout ? 440 : 300),
-                maxHeight: usesCompactHeight ? 240 : (usesCompactLayout ? 560 : 420),
+                minHeight: panelMinimumHeight,
+                maxHeight: panelMaximumHeight,
                 alignment: .topLeading
             )
         }
-        .padding(.horizontal, usesCompactHeight ? 16 : (usesCompactLayout ? 20 : 48))
+        .padding(.horizontal, overlayHorizontalPadding)
         .padding(.top, usesCompactHeight ? 8 : (usesCompactLayout ? 72 : 26))
         .padding(.bottom, usesCompactHeight ? 10 : (usesCompactLayout ? 24 : 34))
         .frame(maxWidth: .infinity)
@@ -1942,6 +1913,113 @@ private struct PlayerTabbedOverlay: View {
             guard detailID != nil else { return }
             noteActivity()
         }
+    }
+
+    @ViewBuilder
+    private var tabSelector: some View {
+#if os(tvOS)
+        HStack(spacing: 12) {
+            ForEach(PlayerOverlayTab.allCases) { tab in
+                tabLabel(tab, isFocused: false)
+                    .onTapGesture { selectTab(tab) }
+            }
+        }
+        .contentShape(Rectangle())
+        .focusable()
+        .focused($tabBarFocused)
+        .focusEffectDisabled()
+        .platformMoveCommand(moveTab)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(selectedTab.rawValue) tab")
+        .accessibilityValue("\(selectedTab.rawValue), \(selectedTabIndex + 1) of \(PlayerOverlayTab.allCases.count)")
+        .accessibilityHint("Swipe up or down to change tabs")
+        .accessibilityAdjustableAction { direction in
+            adjustSelectedTab(direction)
+        }
+        .padding(.leading, usesCompactHeight ? 56 : 0)
+#else
+        HStack(spacing: 12) {
+            ForEach(PlayerOverlayTab.allCases) { tab in
+                Button {
+                    selectTab(tab)
+                } label: {
+                    tabLabel(tab, isFocused: focusedTab == tab)
+                }
+                .buttonStyle(.plain)
+                .focused($focusedTab, equals: tab)
+                .focusEffectDisabled()
+                .accessibilityLabel(tab.rawValue)
+                .accessibilityValue(selectedTab == tab ? "Selected" : "")
+            }
+        }
+        .padding(.leading, usesCompactHeight ? 56 : 0)
+#endif
+    }
+
+    private func tabLabel(_ tab: PlayerOverlayTab, isFocused: Bool) -> some View {
+        Text(tab.rawValue)
+            .font(.headline)
+            .foregroundStyle(.white)
+            .frame(maxWidth: usesCompactLayout ? .infinity : nil)
+            .padding(.horizontal, usesCompactLayout ? 10 : 24)
+            .padding(.vertical, usesCompactLayout ? 10 : 12)
+            .background(
+                selectedTab == tab || isFocused
+                    ? AppTheme.focused
+                    : Color.white.opacity(0.08),
+                in: Capsule()
+            )
+            .overlay {
+                Capsule()
+                    .strokeBorder(isFocused ? AppTheme.focusBorder : .clear, lineWidth: 2)
+            }
+            .contentShape(Capsule())
+    }
+
+    private func selectTab(_ tab: PlayerOverlayTab) {
+        selectedTab = tab
+        noteActivity()
+    }
+
+    private var selectedTabIndex: Int {
+        PlayerOverlayTab.allCases.firstIndex(of: selectedTab) ?? 0
+    }
+
+    private func adjustSelectedTab(_ direction: AccessibilityAdjustmentDirection) {
+        let tabs = PlayerOverlayTab.allCases
+        let delta = direction == .increment ? 1 : -1
+        let index = min(max(0, selectedTabIndex + delta), tabs.count - 1)
+        selectTab(tabs[index])
+    }
+
+    private var overlayHorizontalPadding: CGFloat {
+        if usesCompactHeight { return 16 }
+        if usesCompactLayout { return 20 }
+#if os(macOS)
+        return 28
+#else
+        return 48
+#endif
+    }
+
+    private var panelMinimumHeight: CGFloat {
+        if usesCompactHeight { return 190 }
+        if usesCompactLayout { return 440 }
+#if os(macOS)
+        return 260
+#else
+        return 300
+#endif
+    }
+
+    private var panelMaximumHeight: CGFloat {
+        if usesCompactHeight { return 240 }
+        if usesCompactLayout { return 560 }
+#if os(macOS)
+        return 360
+#else
+        return 420
+#endif
     }
 
     private func moveTab(_ direction: PlatformMoveDirection) {
@@ -2185,8 +2263,8 @@ private struct PlayerTabbedOverlay: View {
             columns: [
                 GridItem(
                     .adaptive(
-                        minimum: usesCompactLayout ? 190 : 300,
-                        maximum: usesCompactLayout ? 320 : 360
+                        minimum: usesCompactLayout ? 190 : regularTrackMinimumWidth,
+                        maximum: usesCompactLayout ? 320 : regularTrackMaximumWidth
                     ),
                     spacing: 12
                 )
@@ -2328,9 +2406,9 @@ private struct PlayerTabbedOverlay: View {
             }
             .padding(.vertical, 14)
         } else {
-            HStack(alignment: .top, spacing: 34) {
+            HStack(alignment: .top, spacing: playbackSettingsColumnSpacing) {
                 playbackSettingsLabel(title: title, systemImage: systemImage)
-                    .frame(width: 260, alignment: .leading)
+                    .frame(width: playbackSettingsLabelWidth, alignment: .leading)
                 content()
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -2360,9 +2438,49 @@ private struct PlayerTabbedOverlay: View {
             title: title,
             subtitle: subtitle,
             selected: selected,
-            height: usesCompactLayout ? 72 : 128,
+            height: usesCompactLayout ? 72 : regularChoiceHeight,
             action: action
         )
+    }
+
+    private var regularTrackMinimumWidth: CGFloat {
+#if os(macOS)
+        220
+#else
+        300
+#endif
+    }
+
+    private var regularTrackMaximumWidth: CGFloat {
+#if os(macOS)
+        320
+#else
+        360
+#endif
+    }
+
+    private var playbackSettingsColumnSpacing: CGFloat {
+#if os(macOS)
+        22
+#else
+        34
+#endif
+    }
+
+    private var playbackSettingsLabelWidth: CGFloat {
+#if os(macOS)
+        180
+#else
+        260
+#endif
+    }
+
+    private var regularChoiceHeight: CGFloat {
+#if os(macOS)
+        78
+#else
+        128
+#endif
     }
 
     private func unavailable(_ text: String) -> some View {
