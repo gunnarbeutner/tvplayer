@@ -29,6 +29,21 @@
 			</array>
 		</dict>
 	</array>
+	<key>GCSupportedGameControllers</key>
+	<array>
+		<dict>
+			<key>ProfileName</key>
+			<string>DirectionalGamepad</string>
+		</dict>
+		<dict>
+			<key>ProfileName</key>
+			<string>MicroGamepad</string>
+		</dict>
+	</array>
+	<key>GCSupportsControllerUserInteraction</key>
+	<true/>
+	<key>GCSupportsMultipleMicroGamepads</key>
+	<true/>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
@@ -47,8 +62,6 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>TV Player discovers and connects to your TVHeadend server on the local network.</string>
-	<key>NSPrincipalClass</key>
-	<string>TVPlayerApplication</string>
 	<key>NSUserActivityTypes</key>
 	<array>
 		<string>com.apple.tv.useractivity.channel-guide</string>

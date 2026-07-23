@@ -68,9 +68,13 @@ targets:
           - _tvplayer-guide._tcp
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        GCSupportedGameControllers:
+          - ProfileName: DirectionalGamepad
+          - ProfileName: MicroGamepad
+        GCSupportsControllerUserInteraction: true
+        GCSupportsMultipleMicroGamepads: true
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
-        NSPrincipalClass: TVPlayerApplication
         CFBundleURLTypes:
           - CFBundleURLName: de.beutner.TVPlayer.playback
             CFBundleURLSchemes:

@@ -165,10 +165,8 @@ final class TimeshiftActionTests: XCTestCase {
         ))
     }
 
-    func testTimelineSeekCommitPolicyCoalescesTapsButCommitsHeldSeekOnRelease() {
+    func testTimelineSeekCommitPolicyCoalescesTaps() {
         XCTAssertEqual(TimelineSeekCommitPolicy.coalescingDelayMilliseconds, 250)
-        XCTAssertNil(TimelineSeekCommitPolicy.delayAfterRemoteRelease(didRepeat: false))
-        XCTAssertEqual(TimelineSeekCommitPolicy.delayAfterRemoteRelease(didRepeat: true), 0)
     }
 
     func testPlayStartsNativeTimeshift() {

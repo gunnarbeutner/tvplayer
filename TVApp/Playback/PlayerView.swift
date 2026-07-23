@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(iOS)
+import UIKit
+#endif
 
 private enum PlayerChromeMode: Equatable {
     case hidden
@@ -16,79 +19,86 @@ private enum PlayerOverlayTab: String, CaseIterable, Identifiable {
 
 enum TimelineSeekCommitPolicy {
     static let coalescingDelayMilliseconds = 250
-
-    static func delayAfterRemoteRelease(didRepeat: Bool) -> Int? {
-        didRepeat ? 0 : nil
-    }
 }
 
 enum PlayerNavigationPolicy {
     static let skipInterval: TimeInterval = 10
 }
 
-enum PlayerRemoteSeekOperation: Equatable {
-    case none
-    case live(TimeInterval)
-    case recording(TimeInterval)
-}
+enum HoldSeekVelocityPolicy {
+    static let activationDelayMilliseconds = 350
+    static let touchDeadZone: CGFloat = 16
+    static let maximumRate: Double = 120
+    static let remoteRampDuration: TimeInterval = 3
 
-struct PlayerRemoteSeekPlan: Equatable {
-    let handlesPress: Bool
-    let revealsTimeline: Bool
-    let operation: PlayerRemoteSeekOperation
-}
-
-enum PlayerRemoteSeekPolicy {
-    static let initialRepeatDelayMilliseconds = 450
-    static let repeatIntervalMilliseconds = 180
-
-    static func boundaryFeedback(
-        for interval: TimeInterval
-    ) -> TimelineSeekBoundaryFeedback? {
-        if interval < 0 { return .bufferStart }
-        if interval > 0 { return .liveEdge }
-        return nil
-    }
-
-    static func plan(
-        interval: TimeInterval,
-        chromeIsHidden: Bool,
-        panelIsPresented: Bool,
-        isRecording: Bool,
-        isSeekable: Bool
-    ) -> PlayerRemoteSeekPlan {
-        guard !panelIsPresented else {
-            return PlayerRemoteSeekPlan(
-                handlesPress: false,
-                revealsTimeline: false,
-                operation: .none
-            )
-        }
-
-        let operation: PlayerRemoteSeekOperation
-        if !isSeekable {
-            operation = .none
-        } else if isRecording {
-            operation = .recording(interval)
-        } else {
-            operation = .live(interval)
-        }
-        return PlayerRemoteSeekPlan(
-            handlesPress: true,
-            revealsTimeline: chromeIsHidden,
-            operation: operation
+    static func touchRate(
+        translation: CGFloat,
+        playerWidth: CGFloat
+    ) -> Double {
+        let distance = abs(translation)
+        guard distance > touchDeadZone else { return 0 }
+        let accelerationDistance = max(80, playerWidth * 0.4)
+        let normalized = min(
+            1,
+            Double((distance - touchDeadZone) / max(1, accelerationDistance - touchDeadZone))
         )
+        let magnitude = 1 + (maximumRate - 1) * normalized * normalized
+        return translation < 0 ? -magnitude : magnitude
+    }
+
+#if os(tvOS)
+    static func remoteRate(
+        direction: TVPlayerSeekDirection,
+        heldFor duration: TimeInterval
+    ) -> Double {
+        let normalized = min(1, max(0, duration) / remoteRampDuration)
+        let magnitude = 1 + (maximumRate - 1) * normalized * normalized
+        return direction == .backward ? -magnitude : magnitude
+    }
+#endif
+
+    static func advancedTarget(
+        _ target: TimeInterval,
+        rate: Double,
+        elapsed: TimeInterval,
+        lowerBound: TimeInterval,
+        upperBound: TimeInterval
+    ) -> TimeInterval {
+        let proposed = target + rate * max(0, elapsed)
+        return min(max(proposed, lowerBound), upperBound)
     }
 }
+
+#if os(tvOS)
+enum RemoteSeekReleaseAction: Equatable {
+    case commitQuickSkip
+    case nudgePreview
+    case continuePreview
+}
+
+enum RemoteSeekPreviewPolicy {
+    static func releaseAction(
+        previewWasActive: Bool,
+        holdActivated: Bool
+    ) -> RemoteSeekReleaseAction {
+        if holdActivated { return .continuePreview }
+        return previewWasActive ? .nudgePreview : .commitQuickSkip
+    }
+}
+#endif
 
 enum TimelineSeekBoundaryFeedback: Equatable {
     case bufferStart
     case liveEdge
+    case recordingStart
+    case recordingEnd
 
     var label: String {
         switch self {
         case .bufferStart: "Start of buffer"
         case .liveEdge: "Live"
+        case .recordingStart: "Start of recording"
+        case .recordingEnd: "End of recording"
         }
     }
 
@@ -96,6 +106,8 @@ enum TimelineSeekBoundaryFeedback: Equatable {
         switch self {
         case .bufferStart: "At the start of the timeshift buffer"
         case .liveEdge: "Already live"
+        case .recordingStart: "At the start of the recording"
+        case .recordingEnd: "At the end of the recording"
         }
     }
 }
@@ -201,15 +213,26 @@ struct PlaybackView: View {
     @State private var hasStartedCurrentPresentation = false
     @State private var timelineSeekTargetDate: Date?
     @State private var timelineSeekTargetsLiveEdge = false
-    @State private var timelineSeekBoundaryFeedback: TimelineSeekBoundaryFeedback?
     @State private var timelineSeekCommitTask: Task<Void, Never>?
-    @State private var timelineSeekFeedbackTask: Task<Void, Never>?
-    @State private var timelineSeekRepeatTask: Task<Void, Never>?
+    @State private var recordingSeekTargetSeconds: TimeInterval?
+    @State private var seekPreviewRate: Double?
+    @State private var seekPreviewBoundaryFeedback: TimelineSeekBoundaryFeedback?
+    @State private var seekPreviewTickerTask: Task<Void, Never>?
     @State private var isUserPaused = false
     @State private var userPauseRequestPending = false
     @State private var userResumeRequestPending = false
+#if os(iOS)
+    @State private var isTouchSeekPreviewActive = false
+    @State private var touchSeekTranslation: CGFloat = 0
+    @State private var touchSeekPlayerWidth: CGFloat = 1
+#endif
 #if os(tvOS)
-    @State private var timelineSeekRepeatedDuringPress = false
+    @State private var remoteSeekActivationTask: Task<Void, Never>?
+    @State private var remoteSeekDirection: TVPlayerSeekDirection?
+    @State private var remoteSeekHoldActivated = false
+    @State private var isRemoteSeekPreviewActive = false
+    @State private var remoteSeekPreviewWasActiveAtPress = false
+    @FocusState private var remoteSeekConfirmationFocused: Bool
 #endif
     @State private var isRefreshingGrowingRecording = false
     @State private var videoAttachmentRevision = 0
@@ -236,6 +259,25 @@ struct PlaybackView: View {
 #endif
     }
 
+    private var isSeekConfirmationPending: Bool {
+#if os(tvOS)
+        isRemoteSeekPreviewActive
+#else
+        false
+#endif
+    }
+
+    private var canPreviewSeek: Bool {
+        engine.isSeekable
+            && (presentation.isRecording || engine.bufferStartedAt != nil)
+    }
+
+    private static func seconds(_ duration: Duration) -> TimeInterval {
+        let components = duration.components
+        return Double(components.seconds)
+            + Double(components.attoseconds) / 1_000_000_000_000_000_000
+    }
+
     var body: some View {
         ZStack {
             if showsVideoSurface {
@@ -259,7 +301,19 @@ struct PlaybackView: View {
                     .focusable()
                     .focused($wakeSurfaceFocused)
                     .focusEffectDisabled()
+#if os(iOS)
+                    .modifier(
+                        IOSHoldSeekGestureModifier(
+                            isEnabled: canPreviewSeek,
+                            activate: beginTouchSeekPreview,
+                            updateTranslation: updateTouchSeekPreview,
+                            finish: finishTouchSeekPreview,
+                            tap: showTimeline
+                        )
+                    )
+#else
                     .onTapGesture(perform: showTimeline)
+#endif
                     .accessibilityLabel("Show playback timeline")
             }
 
@@ -285,6 +339,23 @@ struct PlaybackView: View {
                 Color.clear
                     .contentShape(Rectangle())
                     .ignoresSafeArea()
+#if os(iOS)
+                    .modifier(
+                        IOSHoldSeekGestureModifier(
+                            isEnabled: canPreviewSeek && chromeMode != .panel,
+                            activate: beginTouchSeekPreview,
+                            updateTranslation: updateTouchSeekPreview,
+                            finish: finishTouchSeekPreview,
+                            tap: {
+                                if chromeMode == .panel {
+                                    showTimeline()
+                                } else {
+                                    hideChrome()
+                                }
+                            }
+                        )
+                    )
+#else
                     .onTapGesture {
                         if chromeMode == .panel {
                             showTimeline()
@@ -292,6 +363,7 @@ struct PlaybackView: View {
                             hideChrome()
                         }
                     }
+#endif
                     .accessibilityHidden(true)
             }
 #endif
@@ -303,6 +375,10 @@ struct PlaybackView: View {
                         RecordingPlaybackTimeline(
                             recording: recording,
                             elapsedSeconds: engine.elapsedSeconds,
+                            seekTargetSeconds: recordingSeekTargetSeconds,
+                            seekBoundaryFeedback: seekPreviewBoundaryFeedback,
+                            seekPreviewRate: seekPreviewRate,
+                            seekConfirmationPending: isSeekConfirmationPending,
                             isPlaying: engine.state == .playing,
                             isPaused: isUserPaused,
                             canSeek: engine.isSeekable,
@@ -323,7 +399,9 @@ struct PlaybackView: View {
                                 : nil,
                             seekTargetDate: timelineSeekTargetDate,
                             seekTargetsLiveEdge: timelineSeekTargetsLiveEdge,
-                            seekBoundaryFeedback: timelineSeekBoundaryFeedback,
+                            seekBoundaryFeedback: seekPreviewBoundaryFeedback,
+                            seekPreviewRate: seekPreviewRate,
+                            seekConfirmationPending: isSeekConfirmationPending,
                             commercialBreaks: playback.commercialBreaks,
                             liveDelaySeconds: engine.liveDelaySeconds,
                             bufferStartedAt: engine.bufferStartedAt,
@@ -413,6 +491,26 @@ struct PlaybackView: View {
 #endif
 
 #if os(tvOS)
+            if isRemoteSeekPreviewActive {
+                Button {
+                    _ = confirmRemoteSeekPreview()
+                } label: {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .ignoresSafeArea()
+                }
+                .buttonStyle(.plain)
+                .focusEffectDisabled()
+                .focused($remoteSeekConfirmationFocused)
+                .accessibilityLabel("Confirm seek")
+                .opacity(0.001)
+                .zIndex(10)
+                .task {
+                    await Task.yield()
+                    remoteSeekConfirmationFocused = true
+                }
+            }
+
             if chromeMode != .hidden, playback.pictureInPicture.isSupported {
                 Button {
                     playback.pictureInPicture.start()
@@ -451,6 +549,7 @@ struct PlaybackView: View {
             }
         }
         .task(id: presentation.id) {
+            cancelSeekPreview()
             hasStartedCurrentPresentation = false
             isUserPaused = false
             userPauseRequestPending = false
@@ -500,24 +599,35 @@ struct PlaybackView: View {
             }
         }
         .task(id: chromeActivity) {
-            guard chromeMode == .timeline, engine.state == .playing else { return }
+            guard chromeMode == .timeline,
+                  engine.state == .playing,
+                  !hasActiveSeekPreview
+            else { return }
             try? await Task.sleep(for: .seconds(5))
-            guard !Task.isCancelled, chromeMode == .timeline, engine.state == .playing else { return }
+            guard !Task.isCancelled,
+                  chromeMode == .timeline,
+                  engine.state == .playing,
+                  !hasActiveSeekPreview
+            else { return }
             hideChrome()
         }
 #if os(tvOS)
         .onAppear {
             TVRemoteCommandCenter.playerExitHandler = handlePlayerExitCommand
             TVRemoteCommandCenter.seekHoldHandler = handleRemoteSeekPress
+            TVRemoteSeekInputBridge.shared.start()
         }
 #endif
         .onDisappear {
             timelineSeekCommitTask?.cancel()
-            timelineSeekFeedbackTask?.cancel()
-            timelineSeekRepeatTask?.cancel()
+            seekPreviewTickerTask?.cancel()
+#if os(tvOS)
+            remoteSeekActivationTask?.cancel()
+#endif
 #if os(tvOS)
             TVRemoteCommandCenter.playerExitHandler = nil
             TVRemoteCommandCenter.seekHoldHandler = nil
+            TVRemoteSeekInputBridge.shared.stop()
 #endif
             // Back intentionally collapses live playback into the guide
             // header. Only pause when the player view disappears for another
@@ -531,7 +641,9 @@ struct PlaybackView: View {
             }
         }
         .televisionPlayPauseCommand {
-            toggleTimelinePlayback()
+            if !confirmSeekPreviewIfNeeded() {
+                toggleTimelinePlayback()
+            }
         }
         .platformMoveCommand { direction in
             switch direction {
@@ -702,8 +814,8 @@ struct PlaybackView: View {
 
     @discardableResult
     private func handlePlayerExitCommand() -> Bool {
-        if timelineSeekTargetDate != nil {
-            cancelTimelineSeek()
+        if hasActiveSeekPreview {
+            cancelSeekPreview()
         } else if chromeMode == .panel {
             showTimeline()
         } else if chromeMode == .timeline {
@@ -715,6 +827,7 @@ struct PlaybackView: View {
     }
 
     private func toggleTimelinePlayback() {
+        if confirmSeekPreviewIfNeeded() { return }
         let wasPlaying = engine.mediaPlayer.isPlaying
         if wasPlaying, engine.canPause {
             userPauseRequestPending = true
@@ -778,6 +891,247 @@ struct PlaybackView: View {
         chromeActivity = UUID()
     }
 
+    private var hasActiveSeekPreview: Bool {
+        var isActive = timelineSeekTargetDate != nil
+            || recordingSeekTargetSeconds != nil
+#if os(iOS)
+        isActive = isActive || isTouchSeekPreviewActive
+#endif
+#if os(tvOS)
+        isActive = isActive || isRemoteSeekPreviewActive
+#endif
+        return isActive
+    }
+
+    private func recordingAvailableDuration(at date: Date = Date()) -> TimeInterval {
+        guard let recording = presentation.recording else { return 0 }
+        let totalDuration = max(0, recording.duration)
+        if recording.state == .recording {
+            return min(totalDuration, max(0, date.timeIntervalSince(recording.start)))
+        }
+        return totalDuration
+    }
+
+    private func seekPreviewBounds(at date: Date) -> ClosedRange<TimeInterval>? {
+        if presentation.isRecording {
+            return 0...recordingAvailableDuration(at: date)
+        }
+        guard let bufferStartedAt = engine.bufferStartedAt else { return nil }
+        let lowerBound = bufferStartedAt.timeIntervalSinceReferenceDate
+        return lowerBound...date.timeIntervalSinceReferenceDate
+    }
+
+    private func currentSeekPreviewTarget(at date: Date) -> TimeInterval {
+        if presentation.isRecording {
+            return recordingSeekTargetSeconds ?? engine.elapsedSeconds
+        }
+        if timelineSeekTargetsLiveEdge {
+            return date.timeIntervalSinceReferenceDate
+        }
+        return (timelineSeekTargetDate ?? liveTimelinePlaybackDate(at: date))
+            .timeIntervalSinceReferenceDate
+    }
+
+    private func updateSeekPreviewTarget(_ target: TimeInterval, at date: Date) {
+        if presentation.isRecording {
+            recordingSeekTargetSeconds = target
+            noteActivity()
+        } else {
+            previewTimelineSeek(Date(timeIntervalSinceReferenceDate: target))
+        }
+    }
+
+    @discardableResult
+    private func advanceSeekPreview(
+        rate: Double,
+        elapsed: TimeInterval,
+        at date: Date
+    ) -> Bool {
+        guard rate != 0, let bounds = seekPreviewBounds(at: date) else { return false }
+        let current = currentSeekPreviewTarget(at: date)
+        let target = HoldSeekVelocityPolicy.advancedTarget(
+            current,
+            rate: rate,
+            elapsed: min(max(0, elapsed), 0.1),
+            lowerBound: bounds.lowerBound,
+            upperBound: bounds.upperBound
+        )
+        updateSeekPreviewTarget(target, at: date)
+
+        let boundary: TimelineSeekBoundaryFeedback?
+        if rate < 0, target <= bounds.lowerBound {
+            boundary = presentation.isRecording ? .recordingStart : .bufferStart
+        } else if rate > 0, target >= bounds.upperBound {
+            boundary = presentation.isRecording ? .recordingEnd : .liveEdge
+        } else {
+            boundary = nil
+        }
+        updateSeekPreviewBoundary(boundary)
+        return boundary != nil
+    }
+
+    @discardableResult
+    private func nudgeSeekPreview(by interval: TimeInterval) -> Bool {
+        let date = Date()
+        guard let bounds = seekPreviewBounds(at: date) else { return false }
+        let current = currentSeekPreviewTarget(at: date)
+        let target = min(max(current + interval, bounds.lowerBound), bounds.upperBound)
+        updateSeekPreviewTarget(target, at: date)
+
+        let boundary: TimelineSeekBoundaryFeedback?
+        if interval < 0, target <= bounds.lowerBound {
+            boundary = presentation.isRecording ? .recordingStart : .bufferStart
+        } else if interval > 0, target >= bounds.upperBound {
+            boundary = presentation.isRecording ? .recordingEnd : .liveEdge
+        } else {
+            boundary = nil
+        }
+        updateSeekPreviewBoundary(boundary)
+        return boundary != nil
+    }
+
+    private func updateSeekPreviewBoundary(
+        _ boundary: TimelineSeekBoundaryFeedback?
+    ) {
+        guard seekPreviewBoundaryFeedback != boundary else { return }
+        seekPreviewBoundaryFeedback = boundary
+        guard let boundary else { return }
+        AccessibilityNotification.Announcement(boundary.accessibilityAnnouncement).post()
+#if os(iOS)
+        UISelectionFeedbackGenerator().selectionChanged()
+#endif
+    }
+
+    @discardableResult
+    private func commitSeekPreview() -> Bool {
+        seekPreviewTickerTask?.cancel()
+        seekPreviewTickerTask = nil
+        seekPreviewRate = nil
+        seekPreviewBoundaryFeedback = nil
+#if os(iOS)
+        isTouchSeekPreviewActive = false
+#endif
+#if os(tvOS)
+        remoteSeekActivationTask?.cancel()
+        remoteSeekActivationTask = nil
+        remoteSeekDirection = nil
+        remoteSeekHoldActivated = false
+        isRemoteSeekPreviewActive = false
+        remoteSeekPreviewWasActiveAtPress = false
+        remoteSeekConfirmationFocused = false
+#endif
+
+        if let target = recordingSeekTargetSeconds {
+            recordingSeekTargetSeconds = nil
+            engine.seek(to: target)
+            noteActivity()
+            return true
+        }
+        guard let target = timelineSeekTargetDate else { return false }
+        commitTimelineSeek(target)
+        return true
+    }
+
+    private func cancelSeekPreview() {
+        seekPreviewTickerTask?.cancel()
+        seekPreviewTickerTask = nil
+        seekPreviewRate = nil
+        seekPreviewBoundaryFeedback = nil
+        recordingSeekTargetSeconds = nil
+#if os(iOS)
+        isTouchSeekPreviewActive = false
+        touchSeekTranslation = 0
+#endif
+#if os(tvOS)
+        remoteSeekActivationTask?.cancel()
+        remoteSeekActivationTask = nil
+        remoteSeekDirection = nil
+        remoteSeekHoldActivated = false
+        isRemoteSeekPreviewActive = false
+        remoteSeekPreviewWasActiveAtPress = false
+        remoteSeekConfirmationFocused = false
+#endif
+        cancelTimelineSeek()
+    }
+
+    private func confirmSeekPreviewIfNeeded() -> Bool {
+#if os(tvOS)
+        confirmRemoteSeekPreview()
+#else
+        false
+#endif
+    }
+
+#if os(iOS)
+    private func beginTouchSeekPreview(playerWidth: CGFloat) {
+        guard canPreviewSeek, chromeMode != .panel else { return }
+        isTouchSeekPreviewActive = true
+        touchSeekTranslation = 0
+        touchSeekPlayerWidth = max(1, playerWidth)
+        seekPreviewRate = nil
+        updateSeekPreviewBoundary(nil)
+        showTimeline()
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    private func updateTouchSeekPreview(
+        translation: CGFloat,
+        playerWidth: CGFloat
+    ) {
+        guard isTouchSeekPreviewActive else { return }
+        touchSeekTranslation = translation
+        touchSeekPlayerWidth = max(1, playerWidth)
+        let rate = HoldSeekVelocityPolicy.touchRate(
+            translation: translation,
+            playerWidth: touchSeekPlayerWidth
+        )
+        seekPreviewRate = rate == 0 ? nil : rate
+        if rate != 0, seekPreviewTickerTask == nil {
+            startTouchSeekPreviewTicker()
+        }
+    }
+
+    private func startTouchSeekPreviewTicker() {
+        seekPreviewTickerTask?.cancel()
+        seekPreviewTickerTask = Task { @MainActor in
+            let clock = ContinuousClock()
+            var previous = clock.now
+            do {
+                while !Task.isCancelled, isTouchSeekPreviewActive {
+                    try await Task.sleep(for: .milliseconds(33))
+                    let now = clock.now
+                    let elapsed = Self.seconds(previous.duration(to: now))
+                    previous = now
+                    let rate = HoldSeekVelocityPolicy.touchRate(
+                        translation: touchSeekTranslation,
+                        playerWidth: touchSeekPlayerWidth
+                    )
+                    seekPreviewRate = rate == 0 ? nil : rate
+                    advanceSeekPreview(rate: rate, elapsed: elapsed, at: Date())
+                }
+            } catch {
+                // Releasing or cancelling the gesture stops preview updates.
+            }
+        }
+    }
+
+    private func finishTouchSeekPreview(shouldCommit: Bool) {
+        guard isTouchSeekPreviewActive else { return }
+        seekPreviewTickerTask?.cancel()
+        seekPreviewTickerTask = nil
+        isTouchSeekPreviewActive = false
+        touchSeekTranslation = 0
+        seekPreviewRate = nil
+        if shouldCommit,
+           timelineSeekTargetDate != nil || recordingSeekTargetSeconds != nil {
+            _ = commitSeekPreview()
+        } else {
+            seekPreviewBoundaryFeedback = nil
+        }
+        noteActivity()
+    }
+#endif
+
     private func announcePlaybackStatus(_ status: String) {
         AccessibilityNotification.Announcement("Playback \(status)").post()
     }
@@ -821,27 +1175,11 @@ struct PlaybackView: View {
     private func updateTimelineSeekTarget(_ proposedTarget: Date, liveEdge: Date = Date()) {
         let availableStart = engine.bufferStartedAt ?? liveEdge
         let target = min(max(proposedTarget, availableStart), liveEdge)
-        timelineSeekFeedbackTask?.cancel()
-        timelineSeekFeedbackTask = nil
-        timelineSeekBoundaryFeedback = nil
         timelineSeekTargetDate = target
         timelineSeekTargetsLiveEdge = target >= liveEdge.addingTimeInterval(
             -NativeTimeshiftActionPlan.liveEdgeTolerance
         )
         noteActivity()
-    }
-
-    private func showTimelineSeekBoundaryFeedback(_ feedback: TimelineSeekBoundaryFeedback) {
-        timelineSeekFeedbackTask?.cancel()
-        timelineSeekBoundaryFeedback = feedback
-        noteActivity()
-        AccessibilityNotification.Announcement(feedback.accessibilityAnnouncement).post()
-        timelineSeekFeedbackTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(1_200))
-            guard !Task.isCancelled, timelineSeekBoundaryFeedback == feedback else { return }
-            timelineSeekBoundaryFeedback = nil
-            timelineSeekFeedbackTask = nil
-        }
     }
 
     private func scheduleTimelineSeekCommit(
@@ -868,6 +1206,7 @@ struct PlaybackView: View {
                 } else {
                     timelineSeekTargetDate = nil
                     timelineSeekTargetsLiveEdge = false
+                    noteActivity()
                     return
                 }
             }
@@ -883,6 +1222,7 @@ struct PlaybackView: View {
                     timelineSeekTargetDate = nil
                     timelineSeekTargetsLiveEdge = false
                     timelineSeekCommitTask = nil
+                    noteActivity()
                     return
                 }
             }
@@ -898,27 +1238,13 @@ struct PlaybackView: View {
     }
 
 #if os(tvOS)
-    @discardableResult
-    private func performRemoteSeek(_ operation: PlayerRemoteSeekOperation) -> Bool {
-        switch operation {
-        case .none:
-            return false
-        case let .live(interval):
-            guard stageTimelineSeek(by: interval) else {
-                if let feedback = PlayerRemoteSeekPolicy.boundaryFeedback(for: interval) {
-                    showTimelineSeekBoundaryFeedback(feedback)
-                }
-                return false
-            }
-            return true
-        case let .recording(interval):
-            if interval < 0 {
-                engine.skipBackward(by: -interval)
-                noteActivity()
-            } else {
-                skipForward(by: interval)
-            }
-            return true
+    private func performRemoteQuickSkip(_ direction: TVPlayerSeekDirection) {
+        let interval = PlayerNavigationPolicy.skipInterval
+        if direction == .backward {
+            engine.skipBackward(by: interval)
+            noteActivity()
+        } else {
+            skipForward(by: interval)
         }
     }
 
@@ -926,64 +1252,119 @@ struct PlaybackView: View {
         _ direction: TVPlayerSeekDirection,
         isPressed: Bool
     ) -> Bool {
-        guard isPressed else {
-            timelineSeekRepeatTask?.cancel()
-            timelineSeekRepeatTask = nil
-            if let delay = TimelineSeekCommitPolicy.delayAfterRemoteRelease(
-                didRepeat: timelineSeekRepeatedDuringPress
-            ), timelineSeekTargetDate != nil {
-                scheduleTimelineSeekCommit(afterMilliseconds: delay)
-            }
-            timelineSeekRepeatedDuringPress = false
-            noteActivity()
-            return true
-        }
         let interval = direction == .backward
             ? -PlayerNavigationPolicy.skipInterval
             : PlayerNavigationPolicy.skipInterval
-        let plan = PlayerRemoteSeekPolicy.plan(
-            interval: interval,
-            chromeIsHidden: chromeMode == .hidden,
-            panelIsPresented: chromeMode == .panel,
-            isRecording: presentation.isRecording,
-            isSeekable: engine.isSeekable
-        )
-        guard plan.handlesPress else { return false }
-        timelineSeekRepeatedDuringPress = false
-        if plan.revealsTimeline { showTimeline() }
-        guard performRemoteSeek(plan.operation) else { return true }
 
-        timelineSeekRepeatTask?.cancel()
-        timelineSeekRepeatTask = Task { @MainActor in
+        guard isPressed else {
+            guard remoteSeekDirection == direction else { return true }
+            remoteSeekActivationTask?.cancel()
+            remoteSeekActivationTask = nil
+            let action = RemoteSeekPreviewPolicy.releaseAction(
+                previewWasActive: remoteSeekPreviewWasActiveAtPress,
+                holdActivated: remoteSeekHoldActivated
+            )
+            remoteSeekDirection = nil
+            remoteSeekHoldActivated = false
+            remoteSeekPreviewWasActiveAtPress = false
+            switch action {
+            case .commitQuickSkip:
+                seekPreviewTickerTask?.cancel()
+                seekPreviewTickerTask = nil
+                seekPreviewRate = nil
+                performRemoteQuickSkip(direction)
+            case .nudgePreview:
+                if nudgeSeekPreview(by: interval) {
+                    _ = commitSeekPreview()
+                }
+            case .continuePreview:
+                // The ticker retains the last rate reached while the button
+                // was held. Select/Play commits, while Back still cancels.
+                break
+            }
+            noteActivity()
+            return true
+        }
+
+        guard chromeMode != .panel, canPreviewSeek else { return false }
+        remoteSeekActivationTask?.cancel()
+        remoteSeekDirection = direction
+        remoteSeekHoldActivated = false
+        remoteSeekPreviewWasActiveAtPress = isRemoteSeekPreviewActive
+        showTimeline()
+        remoteSeekActivationTask = Task { @MainActor in
             do {
                 try await Task.sleep(
-                    for: .milliseconds(PlayerRemoteSeekPolicy.initialRepeatDelayMilliseconds)
+                    for: .milliseconds(HoldSeekVelocityPolicy.activationDelayMilliseconds)
                 )
-                while !Task.isCancelled {
-                    timelineSeekRepeatedDuringPress = true
-                    guard performRemoteSeek(plan.operation) else { return }
-                    try await Task.sleep(
-                        for: .milliseconds(PlayerRemoteSeekPolicy.repeatIntervalMilliseconds)
-                    )
-                }
+                guard !Task.isCancelled, remoteSeekDirection == direction else { return }
+                remoteSeekHoldActivated = true
+                isRemoteSeekPreviewActive = true
+                nudgeSeekPreview(by: 0)
+                seekPreviewRate = HoldSeekVelocityPolicy.remoteRate(
+                    direction: direction,
+                    heldFor: 0
+                )
+                remoteSeekConfirmationFocused = true
+                startRemoteSeekPreviewTicker(direction)
             } catch {
-                // Releasing or cancelling the directional press ends repeat.
+                // A quick release keeps this as a ten-second skip or nudge.
             }
         }
         return true
+    }
+
+    private func startRemoteSeekPreviewTicker(_ direction: TVPlayerSeekDirection) {
+        seekPreviewTickerTask?.cancel()
+        seekPreviewTickerTask = Task { @MainActor in
+            let clock = ContinuousClock()
+            let started = clock.now
+            var previous = started
+            do {
+                while !Task.isCancelled {
+                    try await Task.sleep(for: .milliseconds(33))
+                    let now = clock.now
+                    let elapsed = Self.seconds(previous.duration(to: now))
+                    let heldFor = Self.seconds(started.duration(to: now))
+                    previous = now
+                    let isStillHeld = remoteSeekDirection == direction
+                        && remoteSeekHoldActivated
+                    let rate: Double
+                    if isStillHeld {
+                        rate = HoldSeekVelocityPolicy.remoteRate(
+                            direction: direction,
+                            heldFor: heldFor
+                        )
+                        seekPreviewRate = rate
+                    } else {
+                        rate = seekPreviewRate ?? HoldSeekVelocityPolicy.remoteRate(
+                            direction: direction,
+                            heldFor: 0
+                        )
+                    }
+                    if advanceSeekPreview(rate: rate, elapsed: elapsed, at: Date()) {
+                        _ = commitSeekPreview()
+                        return
+                    }
+                }
+            } catch {
+                // Confirming, cancelling, or changing direction ends this ticker.
+            }
+        }
+    }
+
+    @discardableResult
+    private func confirmRemoteSeekPreview() -> Bool {
+        guard isRemoteSeekPreviewActive else { return false }
+        return commitSeekPreview()
     }
 #endif
 
     private func cancelTimelineSeek() {
         timelineSeekCommitTask?.cancel()
         timelineSeekCommitTask = nil
-        timelineSeekRepeatTask?.cancel()
-        timelineSeekRepeatTask = nil
         timelineSeekTargetDate = nil
         timelineSeekTargetsLiveEdge = false
-        timelineSeekFeedbackTask?.cancel()
-        timelineSeekFeedbackTask = nil
-        timelineSeekBoundaryFeedback = nil
         noteActivity()
     }
 
@@ -1247,9 +1628,49 @@ private struct CommercialDetectionDebugFrame: View {
     }
 }
 
+private struct SeekPreviewFeedbackLine: View {
+    let message: String?
+    let rate: Double?
+    let confirmationPending: Bool
+
+    private var isVisible: Bool {
+        message != nil || rate != nil || confirmationPending
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Label(message ?? "Seek position", systemImage: "scope")
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            Spacer(minLength: 8)
+            if let rate, rate != 0 {
+                Label(
+                    "\(Int(abs(rate).rounded()))×",
+                    systemImage: rate < 0 ? "backward.fill" : "forward.fill"
+                )
+                .fixedSize()
+            } else if confirmationPending {
+                Text("Press Select or Play to seek")
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+        }
+        .font(.callout.weight(.semibold).monospacedDigit())
+        .foregroundStyle(AppTheme.accent)
+        .frame(maxWidth: .infinity, minHeight: 20, alignment: .leading)
+        .opacity(isVisible ? 1 : 0)
+        .accessibilityHidden(!isVisible)
+        .accessibilityElement(children: .combine)
+    }
+}
+
 private struct RecordingPlaybackTimeline: View {
     let recording: TVRecording
     let elapsedSeconds: TimeInterval
+    let seekTargetSeconds: TimeInterval?
+    let seekBoundaryFeedback: TimelineSeekBoundaryFeedback?
+    let seekPreviewRate: Double?
+    let seekConfirmationPending: Bool
     let isPlaying: Bool
     let isPaused: Bool
     let canSeek: Bool
@@ -1303,6 +1724,7 @@ private struct RecordingPlaybackTimeline: View {
                 totalDuration: totalDuration,
                 availableDuration: availableDuration,
                 elapsedSeconds: elapsedSeconds,
+                previewElapsedSeconds: seekTargetSeconds,
                 isPaused: isPaused,
                 isFocused: isFocused,
                 seek: seekTo
@@ -1331,6 +1753,14 @@ private struct RecordingPlaybackTimeline: View {
             }
             .font(.callout.monospacedDigit())
             .foregroundStyle(.white.opacity(0.76))
+
+            SeekPreviewFeedbackLine(
+                message: seekBoundaryFeedback?.label ?? seekTargetSeconds.map {
+                    "Seek to \(clock(recording.start.addingTimeInterval($0)))"
+                },
+                rate: seekPreviewRate,
+                confirmationPending: seekConfirmationPending
+            )
 
 #if !os(tvOS)
             PlaybackTransportControls(
@@ -1387,6 +1817,7 @@ private struct RecordingTimelineBar: View {
     let totalDuration: TimeInterval
     let availableDuration: TimeInterval
     let elapsedSeconds: TimeInterval
+    let previewElapsedSeconds: TimeInterval?
     let isPaused: Bool
     let isFocused: Bool
     let seek: (TimeInterval) -> Void
@@ -1396,7 +1827,9 @@ private struct RecordingTimelineBar: View {
     var body: some View {
         GeometryReader { geometry in
             let width = geometry.size.width
-            let displayedElapsed = scrubTargetSeconds ?? elapsedSeconds
+            let displayedElapsed = scrubTargetSeconds
+                ?? previewElapsedSeconds
+                ?? elapsedSeconds
             let availableWidth = width * CGFloat(availableDuration / totalDuration)
             let playhead = width * CGFloat(min(max(0, displayedElapsed / totalDuration), 1))
 
@@ -1478,6 +1911,8 @@ private struct ProgrammePlaybackTimeline: View {
     let seekTargetDate: Date?
     let seekTargetsLiveEdge: Bool
     let seekBoundaryFeedback: TimelineSeekBoundaryFeedback?
+    let seekPreviewRate: Double?
+    let seekConfirmationPending: Bool
     let commercialBreaks: [CommercialBreak]
     let liveDelaySeconds: TimeInterval
     let bufferStartedAt: Date?
@@ -1589,19 +2024,15 @@ private struct ProgrammePlaybackTimeline: View {
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(.white.opacity(0.76))
 
-                Label(
-                    seekBoundaryFeedback?.label ?? seekTargetDate.map {
+                SeekPreviewFeedbackLine(
+                    message: seekBoundaryFeedback?.label ?? seekTargetDate.map {
                         seekTargetsLiveEdge
                             ? "Go to live"
                             : seekDescription(target: $0, liveEdge: liveDate)
-                    } ?? "Seek position",
-                    systemImage: "scope"
+                    },
+                    rate: seekPreviewRate,
+                    confirmationPending: seekConfirmationPending
                 )
-                .font(.callout.weight(.semibold).monospacedDigit())
-                .foregroundStyle(AppTheme.accent)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .opacity(seekBoundaryFeedback == nil && seekTargetDate == nil ? 0 : 1)
-                .accessibilityHidden(seekBoundaryFeedback == nil && seekTargetDate == nil)
             } else {
                 Capsule().fill(.white.opacity(0.25)).frame(height: 14)
             }
@@ -2591,6 +3022,78 @@ private struct PlayerStepButton: View {
         .accessibilityLabel(systemImage == "minus" ? "Decrease delay" : "Increase delay")
     }
 }
+
+#if os(iOS)
+private struct IOSHoldSeekGestureModifier: ViewModifier {
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
+
+    let isEnabled: Bool
+    let activate: (CGFloat) -> Void
+    let updateTranslation: (CGFloat, CGFloat) -> Void
+    let finish: (Bool) -> Void
+    let tap: () -> Void
+
+    @State private var isActivated = false
+    @State private var movedOutsideDeadZone = false
+
+    func body(content: Content) -> some View {
+        GeometryReader { geometry in
+            content
+                .contentShape(Rectangle())
+                .gesture(
+                    holdThenDragGesture(playerWidth: geometry.size.width),
+                    including: isEnabled && !voiceOverEnabled ? .all : .none
+                )
+                .onTapGesture(perform: tap)
+        }
+    }
+
+    private func holdThenDragGesture(
+        playerWidth: CGFloat
+    ) -> some Gesture {
+        LongPressGesture(
+            minimumDuration: Double(HoldSeekVelocityPolicy.activationDelayMilliseconds) / 1_000,
+            maximumDistance: 22
+        )
+        .sequenced(before: DragGesture(minimumDistance: 0))
+        .onChanged { value in
+            switch value {
+            case .first(true):
+                activateIfNeeded(playerWidth: playerWidth)
+            case let .second(true, drag):
+                activateIfNeeded(playerWidth: playerWidth)
+                guard let drag else { return }
+                let translation = drag.translation.width
+                if abs(translation) > HoldSeekVelocityPolicy.touchDeadZone {
+                    movedOutsideDeadZone = true
+                }
+                updateTranslation(translation, playerWidth)
+            default:
+                break
+            }
+        }
+        .onEnded { value in
+            if case let .second(true, drag) = value, let drag {
+                let translation = drag.translation.width
+                if abs(translation) > HoldSeekVelocityPolicy.touchDeadZone {
+                    movedOutsideDeadZone = true
+                }
+                updateTranslation(translation, playerWidth)
+            }
+            finish(isActivated && movedOutsideDeadZone)
+            isActivated = false
+            movedOutsideDeadZone = false
+        }
+    }
+
+    private func activateIfNeeded(playerWidth: CGFloat) {
+        guard !isActivated else { return }
+        isActivated = true
+        movedOutsideDeadZone = false
+        activate(playerWidth)
+    }
+}
+#endif
 
 private extension View {
     @ViewBuilder
