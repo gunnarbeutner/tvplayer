@@ -199,8 +199,40 @@ struct GuideProgramMetadata: Hashable, Codable, Sendable {
               let episode = canonicalEpisodeComponent(episodeNumber)
         else { return false }
         let normalized = value.lowercased().filter { $0.isLetter || $0.isNumber }
-        return normalized == "s\(season)e\(episode)"
-            || normalized == "season\(season)episode\(episode)"
+        guard let representedEpisode =
+            canonicalEpisodePair(
+                normalized,
+                seasonPrefix: "season",
+                episodeSeparator: "episode"
+            )
+            ?? canonicalEpisodePair(
+                normalized,
+                seasonPrefix: "s",
+                episodeSeparator: "e"
+            )
+        else { return false }
+        return representedEpisode.season == season
+            && representedEpisode.episode == episode
+    }
+
+    private static func canonicalEpisodePair(
+        _ value: String,
+        seasonPrefix: String,
+        episodeSeparator: String
+    ) -> (season: String, episode: String)? {
+        guard value.hasPrefix(seasonPrefix) else { return nil }
+        let remainder = value.dropFirst(seasonPrefix.count)
+        guard let separatorRange = remainder.range(of: episodeSeparator),
+              separatorRange.lowerBound != remainder.startIndex,
+              separatorRange.upperBound != remainder.endIndex,
+              let season = canonicalEpisodeComponent(
+                  String(remainder[..<separatorRange.lowerBound])
+              ),
+              let episode = canonicalEpisodeComponent(
+                  String(remainder[separatorRange.upperBound...])
+              )
+        else { return nil }
+        return (season, episode)
     }
 
     private static func canonicalEpisodeComponent(_ value: String?) -> String? {
