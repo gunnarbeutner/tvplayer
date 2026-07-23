@@ -199,7 +199,8 @@ struct SettingsView: View {
                 SettingsActionButton(
                     title: "Add Server",
                     systemImage: "plus",
-                    style: .secondary
+                    style: .secondary,
+                    focusRequest: settings.profiles.isEmpty ? focusRequest : nil
                 ) {
                     settings.beginAddingServer()
                     showsServerEditor = true
@@ -753,6 +754,7 @@ private struct SettingsActionButton: View {
     let systemImage: String
     let style: SettingsActionButtonStyle
     var isEnabled = true
+    var focusRequest: UUID? = nil
     let action: () -> Void
 
     @FocusState private var isFocused: Bool
@@ -768,6 +770,10 @@ private struct SettingsActionButton: View {
                 action()
             }
             .accessibilityAddTraits(.isButton)
+            .onChange(of: focusRequest) { _, request in
+                guard request != nil else { return }
+                requestFocus()
+            }
 #else
         Button(action: action) {
             label
@@ -775,6 +781,14 @@ private struct SettingsActionButton: View {
         .buttonStyle(.plain)
         .disabled(!isEnabled)
 #endif
+    }
+
+    private func requestFocus() {
+        guard isEnabled else { return }
+        Task { @MainActor in
+            await Task.yield()
+            isFocused = true
+        }
     }
 
     private var label: some View {

@@ -124,7 +124,8 @@ struct RecordingsView: View {
                 systemImage: "record.circle",
                 message: "Add a TVheadend server in Settings before using recordings.",
                 actionTitle: "Open Settings",
-                action: onOpenSettings
+                action: onOpenSettings,
+                focusRequest: focusRequest
             )
         case .loading:
             ProgressView("Loading recordings…")
@@ -143,7 +144,8 @@ struct RecordingsView: View {
                 actionTitle: "Try Again",
                 action: {
                     Task { await store.load(configuration: settings.configuration, force: true) }
-                }
+                },
+                focusRequest: focusRequest
             )
         }
     }

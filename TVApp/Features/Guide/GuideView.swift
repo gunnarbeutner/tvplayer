@@ -122,7 +122,8 @@ struct GuideView: View {
                         Task {
                             await model.load(configuration: settings.configuration, force: true)
                         }
-                    }
+                    },
+                    focusRequest: focusRequest
                 )
             } else {
                 if usesCompactGuide {

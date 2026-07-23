@@ -6,19 +6,24 @@ struct PlaceholderView: View {
     let message: String
     let actionTitle: String?
     let action: (() -> Void)?
+    let focusRequest: UUID?
+
+    @FocusState private var isActionFocused: Bool
 
     init(
         title: String,
         systemImage: String,
         message: String,
         actionTitle: String? = nil,
-        action: (() -> Void)? = nil
+        action: (() -> Void)? = nil,
+        focusRequest: UUID? = nil
     ) {
         self.title = title
         self.systemImage = systemImage
         self.message = message
         self.actionTitle = actionTitle
         self.action = action
+        self.focusRequest = focusRequest
     }
 
     var body: some View {
@@ -43,7 +48,15 @@ struct PlaceholderView: View {
                     Button(actionTitle, action: action)
                         .buttonStyle(.borderedProminent)
                         .tint(AppTheme.focused)
+                        .focused($isActionFocused)
                 }
+            }
+        }
+        .onChange(of: focusRequest) { _, request in
+            guard request != nil, action != nil else { return }
+            Task { @MainActor in
+                await Task.yield()
+                isActionFocused = true
             }
         }
     }
@@ -53,6 +66,26 @@ struct TVSourceStateView: View {
     let state: GuideLoadState
     let openSettings: () -> Void
     let retry: () -> Void
+    let focusRequest: UUID?
+
+    @FocusState private var focusedAction: Action?
+
+    private enum Action: Hashable {
+        case openSettings
+        case retry
+    }
+
+    init(
+        state: GuideLoadState,
+        openSettings: @escaping () -> Void,
+        retry: @escaping () -> Void,
+        focusRequest: UUID? = nil
+    ) {
+        self.state = state
+        self.openSettings = openSettings
+        self.retry = retry
+        self.focusRequest = focusRequest
+    }
 
     private var content: (title: String, image: String, message: String) {
         switch state {
@@ -96,16 +129,25 @@ struct TVSourceStateView: View {
                     Button("Open Settings", action: openSettings)
                         .buttonStyle(.borderedProminent)
                         .tint(AppTheme.focused)
+                        .focused($focusedAction, equals: .openSettings)
 
                     if state.isFailure {
                         Button("Try Again", action: retry)
                             .buttonStyle(.bordered)
+                            .focused($focusedAction, equals: .retry)
                     }
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(60)
+        .onChange(of: focusRequest) { _, request in
+            guard request != nil, state != .loading else { return }
+            Task { @MainActor in
+                await Task.yield()
+                focusedAction = .openSettings
+            }
+        }
     }
 }
 
