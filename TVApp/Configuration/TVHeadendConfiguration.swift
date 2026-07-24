@@ -1,6 +1,8 @@
 import Foundation
 
 struct TVHeadendConfiguration: Equatable, Sendable {
+    static let cachedAddressLifetime: TimeInterval = 5 * 60
+
     let serverProfileID: String?
     let baseURL: URL?
     let username: String
@@ -11,6 +13,7 @@ struct TVHeadendConfiguration: Equatable, Sendable {
     let xmltvURL: URL?
     let resolvedAddresses: [String]
     let guideResolvedAddresses: [String]
+    let cachedAddressesObservedAt: Date?
 
     init(
         serverProfileID: String? = nil,
@@ -22,7 +25,8 @@ struct TVHeadendConfiguration: Equatable, Sendable {
         guideCacheURL: URL?,
         xmltvURL: URL?,
         resolvedAddresses: [String] = [],
-        guideResolvedAddresses: [String] = []
+        guideResolvedAddresses: [String] = [],
+        cachedAddressesObservedAt: Date? = nil
     ) {
         self.serverProfileID = serverProfileID
         self.baseURL = baseURL
@@ -34,6 +38,7 @@ struct TVHeadendConfiguration: Equatable, Sendable {
         self.xmltvURL = xmltvURL
         self.resolvedAddresses = resolvedAddresses
         self.guideResolvedAddresses = guideResolvedAddresses
+        self.cachedAddressesObservedAt = cachedAddressesObservedAt
     }
 
     var isComplete: Bool {
@@ -101,7 +106,21 @@ struct TVHeadendConfiguration: Equatable, Sendable {
 
     var htspConnectionHosts: [String] {
         guard let logicalHost = baseURL?.host else { return [] }
-        return Self.uniqueHosts([logicalHost] + resolvedAddresses)
+        return Self.uniqueHosts([logicalHost] + usableResolvedAddresses)
+    }
+
+    var usableResolvedAddresses: [String] {
+        hasFreshCachedAddresses ? resolvedAddresses : []
+    }
+
+    var usableGuideResolvedAddresses: [String] {
+        hasFreshCachedAddresses ? guideResolvedAddresses : []
+    }
+
+    private var hasFreshCachedAddresses: Bool {
+        guard let cachedAddressesObservedAt else { return false }
+        let age = Date().timeIntervalSince(cachedAddressesObservedAt)
+        return age >= -60 && age <= Self.cachedAddressLifetime
     }
 
     private static func uniqueHosts(_ hosts: [String]) -> [String] {

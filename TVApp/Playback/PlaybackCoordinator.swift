@@ -810,7 +810,8 @@ final class PlaybackCoordinator: ObservableObject {
                     networkCachingMilliseconds: 1_500,
                     profile: "recording",
                     kind: .recording(isGrowing: recording.state == .recording),
-                    expectedDurationSeconds: recording.duration
+                    expectedDurationSeconds: recording.duration,
+                    cachedAddressRoutes: CachedAddressRoutes(configuration)
                 )
                 let newPresentation = PlaybackPresentation(
                     id: intentID,
@@ -914,7 +915,11 @@ final class PlaybackCoordinator: ObservableObject {
                     .canonicalLiveStreamURL(channelID: channelID, profile: profile)
                 try Task.checkCancellation()
                 guard self.presentation?.id == presentationID else { return }
-                await self.commercialAnalyzer.start(context: commercialContext, url: url)
+                await self.commercialAnalyzer.start(
+                    context: commercialContext,
+                    url: url,
+                    cachedAddressRoutes: CachedAddressRoutes(htsp.configuration)
+                )
             } catch is CancellationError {
                 return
             } catch {

@@ -806,7 +806,8 @@ struct PlaybackView: View {
                     networkCachingMilliseconds: presentation.request.networkCachingMilliseconds,
                     profile: "recording",
                     kind: .recording(isGrowing: true),
-                    expectedDurationSeconds: recording.duration
+                    expectedDurationSeconds: recording.duration,
+                    cachedAddressRoutes: CachedAddressRoutes(settings.configuration)
                 )
             )
             if resumeAt > 0, engine.isSeekable { engine.seek(to: resumeAt) }

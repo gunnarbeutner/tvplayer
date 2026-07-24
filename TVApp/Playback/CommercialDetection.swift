@@ -1032,6 +1032,7 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
     private var channelContext: CommercialChannelContext?
     private var lastProfileSaveAt: Date?
     private(set) var channelID: String?
+    private var cachedAddressProxy: CachedAddressProxy?
 
     override init() {
         var libraryOptions = [
@@ -1052,7 +1053,11 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
         enforceSilence()
     }
 
-    func start(context: CommercialChannelContext, url: URL) async {
+    func start(
+        context: CommercialChannelContext,
+        url: URL,
+        cachedAddressRoutes: CachedAddressRoutes? = nil
+    ) async {
         let channelID = context.channelID
         stop(resetMarkers: self.channelID != channelID)
         if self.channelID != channelID {
@@ -1062,6 +1067,10 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
         }
         self.channelID = channelID
         channelContext = context
+        cachedAddressProxy = CachedAddressProxy(
+            routes: cachedAddressRoutes,
+            connectionOrder: .logicalHostFirst
+        )
         artworkTask?.cancel()
         if let iconURL = context.channelIconURL {
             artworkTask = Task { @MainActor [weak self] in
@@ -1099,8 +1108,8 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
                 : "Waiting for a trusted channel logo"
         )
         guard let media = VLCMedia(url: url) else { return }
-        if let proxy = CachedAddressProxy.shared.vlcHTTPProxyOption(for: url) {
-            media.addOption(proxy)
+        if let option = cachedAddressProxy?.vlcHTTPProxyOption(for: url) {
+            media.addOption(option)
         }
         media.addOption(":no-audio")
         media.addOption(":network-caching=300")
@@ -1126,6 +1135,7 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
         clearPendingSnapshot()
         mediaPlayer.stop()
         mediaPlayer.media = nil
+        cachedAddressProxy = nil
         diagnostics = .inactive
         if resetMarkers {
             cacheLearnedLogo()

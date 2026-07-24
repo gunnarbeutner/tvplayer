@@ -124,7 +124,8 @@ final class ServerSettingsStore: ObservableObject {
                 resolvedAddresses: migrated.resolvedAddresses,
                 guideResolvedAddresses: migrated.guideResolvedAddresses,
                 origin: .manual,
-                isEdited: true
+                isEdited: true,
+                lastSeenAt: migrated.cachedAddressesObservedAt
             )
             profiles = [profile]
             activeProfileID = id
@@ -659,7 +660,8 @@ final class ServerSettingsStore: ObservableObject {
                 ? existing?.guideResolvedAddresses ?? []
                 : [],
             origin: .manual,
-            isEdited: true
+            isEdited: true,
+            lastSeenAt: existing?.lastSeenAt
         )
         let environmentPassword = environment["TVPLAYER_TVH_PASSWORD"]
             ?? existing.flatMap { passwords[$0.id] }
@@ -724,7 +726,8 @@ final class ServerSettingsStore: ObservableObject {
                 : [],
             guideResolvedAddresses: Self.sameHost(shared?.guideCacheURL, guideCacheURL)
                 ? shared?.guideResolvedAddresses ?? []
-                : []
+                : [],
+            cachedAddressesObservedAt: shared?.cachedAddressesObservedAt
         )
     }
 

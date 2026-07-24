@@ -116,19 +116,22 @@ struct LiveStreamRequest: Equatable {
     let profile: String
     let kind: PlaybackRequestKind
     let expectedDurationSeconds: TimeInterval?
+    let cachedAddressRoutes: CachedAddressRoutes?
 
     init(
         url: URL,
         networkCachingMilliseconds: Int,
         profile: String,
         kind: PlaybackRequestKind = .live(.liveOnly(reason: nil)),
-        expectedDurationSeconds: TimeInterval? = nil
+        expectedDurationSeconds: TimeInterval? = nil,
+        cachedAddressRoutes: CachedAddressRoutes? = nil
     ) {
         self.url = url
         self.networkCachingMilliseconds = networkCachingMilliseconds
         self.profile = profile
         self.kind = kind
         self.expectedDurationSeconds = expectedDurationSeconds
+        self.cachedAddressRoutes = cachedAddressRoutes
     }
 }
 
@@ -328,6 +331,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private var hasStartedPlayback = false
     private var didLogCapabilities = false
     private var activeRequest: LiveStreamRequest?
+    private var cachedAddressProxy: CachedAddressProxy?
     private var activePreparationID: UUID?
     private var pendingSnapshotURL: URL?
 
@@ -435,6 +439,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         nativeTimeshiftSessionID = nil
         activeLivePlaybackMode = nil
         lastNativeCandidateMetrics = nil
+        cachedAddressProxy = CachedAddressProxy(
+            routes: request.cachedAddressRoutes,
+            connectionOrder: .logicalHostFirst
+        )
 
         let media: VLCMedia
         var mediaCachingMilliseconds = request.networkCachingMilliseconds
@@ -496,15 +504,15 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                         throw CancellationError()
                     }
                     logger.error("Native timeshift unavailable; using live-only HTTP: \(error.localizedDescription, privacy: .public)")
-                    media = Self.makeMedia(url: request.url)
+                    media = Self.makeMedia(url: request.url, proxy: cachedAddressProxy)
                     activeLivePlaybackMode = .liveOnly(reason: error.localizedDescription)
                 }
             case let .liveOnly(reason):
-                media = Self.makeMedia(url: request.url)
+                media = Self.makeMedia(url: request.url, proxy: cachedAddressProxy)
                 activeLivePlaybackMode = .liveOnly(reason: reason)
             }
         case .recording:
-            media = Self.makeMedia(url: request.url)
+            media = Self.makeMedia(url: request.url, proxy: cachedAddressProxy)
         }
         guard activePreparationID == preparationID, !Task.isCancelled else {
             throw CancellationError()
@@ -640,6 +648,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         nativeTimeshiftSessionID = nil
         activeLivePlaybackMode = nil
         activeRequest = nil
+        cachedAddressProxy = nil
         clearPausedFrame()
         resetPlaybackMetrics()
         setState(.idle)
@@ -1515,12 +1524,15 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         return media
     }
 
-    private static func makeMedia(url: URL) -> VLCMedia {
+    private static func makeMedia(
+        url: URL,
+        proxy: CachedAddressProxy?
+    ) -> VLCMedia {
         guard let media = VLCMedia(url: url) else {
             preconditionFailure("VLC 4 rejected the media URL")
         }
-        if let proxy = CachedAddressProxy.shared.vlcHTTPProxyOption(for: url) {
-            media.addOption(proxy)
+        if let option = proxy?.vlcHTTPProxyOption(for: url) {
+            media.addOption(option)
         }
         return media
     }

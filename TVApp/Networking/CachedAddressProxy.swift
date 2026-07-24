@@ -2,61 +2,124 @@ import Darwin
 import Foundation
 import OSLog
 
-/// A loopback HTTP proxy which resolves selected logical hosts through the
-/// last A/AAAA records observed during Bonjour discovery. URLSession and VLC
-/// continue to use the advertised URL, so Host headers, TLS SNI, certificate
-/// validation, redirects, and authentication remain scoped to that origin.
+struct CachedAddressRoutes: Equatable, Sendable {
+    fileprivate let addressesByHost: [String: [String]]
+    private let expiresAt: Date
+
+    init?(_ configuration: TVHeadendConfiguration) {
+        guard let observedAt = configuration.cachedAddressesObservedAt else { return nil }
+        var routes: [String: [String]] = [:]
+        if let host = configuration.baseURL?.host {
+            routes[Self.normalized(host), default: []]
+                .append(contentsOf: configuration.usableResolvedAddresses)
+        }
+        if let host = configuration.guideCacheURL?.host {
+            routes[Self.normalized(host), default: []]
+                .append(contentsOf: configuration.usableGuideResolvedAddresses)
+        }
+        routes = routes.compactMapValues { addresses in
+            let unique = Self.unique(addresses)
+            return unique.isEmpty ? nil : unique
+        }
+        guard !routes.isEmpty else { return nil }
+        addressesByHost = routes
+        expiresAt = observedAt.addingTimeInterval(
+            TVHeadendConfiguration.cachedAddressLifetime
+        )
+    }
+
+    fileprivate func addresses(for host: String) -> [String] {
+        guard Date() <= expiresAt else { return [] }
+        return addressesByHost[Self.normalized(host)] ?? []
+    }
+
+    private static func normalized(_ host: String) -> String {
+        host.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+    }
+
+    private static func unique(_ values: [String]) -> [String] {
+        var seen: Set<String> = []
+        return values.filter { seen.insert($0.lowercased()).inserted }
+    }
+}
+
+/// An immutable, scoped loopback proxy used only as a fallback for one
+/// configuration. The logical URL remains visible to URLSession and VLC, so
+/// Host, TLS SNI, certificate validation, redirects, and authentication keep
+/// their original origin semantics.
 final class CachedAddressProxy: @unchecked Sendable {
-    static let shared = CachedAddressProxy()
+    enum ConnectionOrder: Sendable {
+        case cachedAddressesFirst
+        case logicalHostFirst
+    }
 
     private static let logger = Logger(
         subsystem: "de.beutner.TVPlayer",
         category: "CachedAddressProxy"
     )
 
-    private let addressLock = NSLock()
-    private var addressesByHost: [String: [String]] = [:]
-    private let listenerDescriptor: Int32
-    let port: Int?
+    private final class ListenerState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var descriptor: Int32
 
-    private init() {
-        guard let listener = Self.makeListener() else {
-            listenerDescriptor = -1
-            port = nil
-            return
+        init(descriptor: Int32) {
+            self.descriptor = descriptor
         }
-        listenerDescriptor = listener.descriptor
-        port = listener.port
-        DispatchQueue.global(qos: .userInitiated).async { [self] in
-            acceptConnections()
+
+        var isStopped: Bool {
+            lock.withLock { descriptor < 0 }
+        }
+
+        func stop() {
+            let currentDescriptor = lock.withLock {
+                let current = self.descriptor
+                self.descriptor = -1
+                return current
+            }
+            guard currentDescriptor >= 0 else { return }
+            _ = Darwin.shutdown(currentDescriptor, SHUT_RDWR)
+            Darwin.close(currentDescriptor)
         }
     }
 
-    func configure(_ configuration: TVHeadendConfiguration) {
-        var addressesByLogicalHost: [String: [String]] = [:]
-        if let host = configuration.baseURL?.host {
-            addressesByLogicalHost[Self.normalized(host), default: []]
-                .append(contentsOf: configuration.resolvedAddresses)
-        }
-        if let host = configuration.guideCacheURL?.host {
-            addressesByLogicalHost[Self.normalized(host), default: []]
-                .append(contentsOf: configuration.guideResolvedAddresses)
-        }
-        for (host, addresses) in addressesByLogicalHost {
-            register(Self.unique(addresses), for: host)
-        }
-    }
+    private let routes: CachedAddressRoutes
+    private let listenerState: ListenerState
+    let port: Int
 
-    func configure(
-        _ sessionConfiguration: URLSessionConfiguration,
-        for configuration: TVHeadendConfiguration
+    init?(
+        routes: CachedAddressRoutes?,
+        connectionOrder: ConnectionOrder = .cachedAddressesFirst
     ) {
-        configure(configuration)
-        guard let port,
-              !configuration.resolvedAddresses.isEmpty
-                || !configuration.guideResolvedAddresses.isEmpty
-        else { return }
+        guard let routes, let listener = Self.makeListener() else { return nil }
+        self.routes = routes
+        port = listener.port
+        let listenerState = ListenerState(descriptor: listener.descriptor)
+        self.listenerState = listenerState
+        DispatchQueue.global(qos: .userInitiated).async {
+            Self.acceptConnections(
+                listenerDescriptor: listener.descriptor,
+                listenerState: listenerState,
+                routes: routes,
+                connectionOrder: connectionOrder
+            )
+        }
+    }
 
+    convenience init?(
+        configuration: TVHeadendConfiguration,
+        connectionOrder: ConnectionOrder = .cachedAddressesFirst
+    ) {
+        self.init(
+            routes: CachedAddressRoutes(configuration),
+            connectionOrder: connectionOrder
+        )
+    }
+
+    deinit {
+        listenerState.stop()
+    }
+
+    func configure(_ sessionConfiguration: URLSessionConfiguration) {
         var proxies = sessionConfiguration.connectionProxyDictionary ?? [:]
         proxies["HTTPEnable"] = 1
         proxies["HTTPProxy"] = "127.0.0.1"
@@ -68,40 +131,28 @@ final class CachedAddressProxy: @unchecked Sendable {
     }
 
     func vlcHTTPProxyOption(for url: URL) -> String? {
-        guard let host = url.host, !addresses(for: host).isEmpty else { return nil }
-        return port.map { ":http-proxy=http://127.0.0.1:\($0)" }
+        guard let host = url.host, !routes.addresses(for: host).isEmpty else { return nil }
+        return ":http-proxy=http://127.0.0.1:\(port)"
     }
 
-    private func register(_ addresses: [String], for host: String) {
-        addressLock.withLock {
-            let host = Self.normalized(host)
-            if addresses.isEmpty {
-                addressesByHost.removeValue(forKey: host)
-            } else {
-                addressesByHost[host] = addresses
-            }
-        }
-    }
-
-    private func addresses(for host: String) -> [String] {
-        addressLock.withLock {
-            addressesByHost[Self.normalized(host)] ?? []
-        }
-    }
-
-    private func acceptConnections() {
-        guard listenerDescriptor >= 0 else { return }
+    private static func acceptConnections(
+        listenerDescriptor: Int32,
+        listenerState: ListenerState,
+        routes: CachedAddressRoutes,
+        connectionOrder: ConnectionOrder
+    ) {
         while true {
             let client = Darwin.accept(listenerDescriptor, nil, nil)
             if client < 0 {
                 let error = errno
-                guard !Self.isFatalAcceptError(error) else {
-                    Self.logger.error(
+                if listenerState.isStopped { return }
+                guard !isFatalAcceptError(error) else {
+                    logger.error(
                         "Proxy listener stopped after accept failed with errno \(error)"
                     )
                     return
                 }
-                if Self.shouldBackOffAfterAcceptError(error) {
+                if shouldBackOffAfterAcceptError(error) {
                     // Avoid a tight retry loop while the process or system is
                     // temporarily unable to allocate another socket.
                     usleep(100_000)
@@ -109,8 +160,12 @@ final class CachedAddressProxy: @unchecked Sendable {
                 continue
             }
             Self.disableSIGPIPE(on: client)
-            DispatchQueue.global(qos: .utility).async { [self] in
-                handleHTTPProxyConnection(client)
+            DispatchQueue.global(qos: .utility).async {
+                handleHTTPProxyConnection(
+                    client,
+                    routes: routes,
+                    connectionOrder: connectionOrder
+                )
             }
         }
     }
@@ -133,7 +188,11 @@ final class CachedAddressProxy: @unchecked Sendable {
         }
     }
 
-    private func handleHTTPProxyConnection(_ client: Int32) {
+    private static func handleHTTPProxyConnection(
+        _ client: Int32,
+        routes: CachedAddressRoutes,
+        connectionOrder: ConnectionOrder
+    ) {
         defer { Darwin.close(client) }
         guard let request = Self.receiveHTTPHeader(from: client),
               let firstLineEnd = request.data.range(of: Data("\r\n".utf8)),
@@ -154,7 +213,12 @@ final class CachedAddressProxy: @unchecked Sendable {
 
         if fields[0].caseInsensitiveCompare("CONNECT") == .orderedSame {
             guard let target = Self.hostAndPort(fromAuthority: fields[1], defaultPort: 443),
-                  let upstream = connect(host: target.host, port: target.port)
+                  let upstream = connect(
+                    host: target.host,
+                    port: target.port,
+                    routes: routes,
+                    connectionOrder: connectionOrder
+                  )
             else {
                 Self.sendHTTPError(502, to: client)
                 return
@@ -175,7 +239,12 @@ final class CachedAddressProxy: @unchecked Sendable {
             return
         }
         let targetPort = url.port ?? (scheme == "https" ? 443 : 80)
-        guard let upstream = connect(host: host, port: targetPort) else {
+        guard let upstream = connect(
+            host: host,
+            port: targetPort,
+            routes: routes,
+            connectionOrder: connectionOrder
+        ) else {
             Self.sendHTTPError(502, to: client)
             return
         }
@@ -203,18 +272,38 @@ final class CachedAddressProxy: @unchecked Sendable {
         Self.tunnel(client, upstream)
     }
 
-    private func connect(host: String, port: Int) -> Int32? {
-        let cached = addresses(for: host)
-        var candidates = cached
-        if !candidates.contains(where: { $0.caseInsensitiveCompare(host) == .orderedSame }) {
-            candidates.append(host)
-        }
-        for candidate in candidates {
+    private static func connect(
+        host: String,
+        port: Int,
+        routes: CachedAddressRoutes,
+        connectionOrder: ConnectionOrder
+    ) -> Int32? {
+        for candidate in connectionCandidates(
+            host: host,
+            cachedAddresses: routes.addresses(for: host),
+            connectionOrder: connectionOrder
+        ) {
             if let descriptor = Self.connectSocket(host: candidate, port: port) {
                 return descriptor
             }
         }
         return nil
+    }
+
+    static func connectionCandidates(
+        host: String,
+        cachedAddresses: [String],
+        connectionOrder: ConnectionOrder
+    ) -> [String] {
+        let ordered: [String]
+        switch connectionOrder {
+        case .cachedAddressesFirst:
+            ordered = cachedAddresses + [host]
+        case .logicalHostFirst:
+            ordered = [host] + cachedAddresses
+        }
+        var seen: Set<String> = []
+        return ordered.filter { seen.insert($0.lowercased()).inserted }
     }
 
     private static func makeListener() -> (descriptor: Int32, port: Int)? {
@@ -311,6 +400,7 @@ final class CachedAddressProxy: @unchecked Sendable {
         var buffer = [UInt8](repeating: 0, count: 8_192)
         while data.count <= 65_536 {
             let count = Darwin.recv(descriptor, &buffer, buffer.count, 0)
+            if count < 0, errno == EINTR { continue }
             guard count > 0 else { return nil }
             data.append(buffer, count: count)
             if let range = data.range(of: marker) {
@@ -353,11 +443,15 @@ final class CachedAddressProxy: @unchecked Sendable {
             pollfd(fd: second, events: Int16(POLLIN), revents: 0),
         ]
         var buffer = [UInt8](repeating: 0, count: 65_536)
-        while Darwin.poll(&descriptors, nfds_t(descriptors.count), -1) > 0 {
+        while true {
+            let pollResult = Darwin.poll(&descriptors, nfds_t(descriptors.count), -1)
+            if pollResult < 0, errno == EINTR { continue }
+            guard pollResult > 0 else { return }
             for index in descriptors.indices where descriptors[index].revents & Int16(POLLIN) != 0 {
                 let source = descriptors[index].fd
                 let destination = descriptors[index == 0 ? 1 : 0].fd
                 let count = Darwin.recv(source, &buffer, buffer.count, 0)
+                if count < 0, errno == EINTR { continue }
                 guard count > 0,
                       sendAll(Data(buffer[0..<count]), to: destination)
                 else { return }
@@ -406,14 +500,6 @@ final class CachedAddressProxy: @unchecked Sendable {
         )
     }
 
-    private static func normalized(_ host: String) -> String {
-        host.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
-    }
-
-    private static func unique(_ values: [String]) -> [String] {
-        var seen: Set<String> = []
-        return values.filter { seen.insert($0.lowercased()).inserted }
-    }
 }
 
 private extension String {

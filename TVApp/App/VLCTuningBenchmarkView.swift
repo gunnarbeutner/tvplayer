@@ -1397,7 +1397,8 @@ final class VLCTuningBenchmarkModel: ObservableObject {
             networkCachingMilliseconds: request.networkCachingMilliseconds,
             profile: request.profile,
             kind: .live(.nativeTimeshift(tunedHTSP)),
-            expectedDurationSeconds: request.expectedDurationSeconds
+            expectedDurationSeconds: request.expectedDurationSeconds,
+            cachedAddressRoutes: request.cachedAddressRoutes
         )
     }
 

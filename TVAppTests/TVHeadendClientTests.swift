@@ -169,7 +169,9 @@ final class TVHeadendClientTests: XCTestCase {
             password: "",
             streamProfile: "pass",
             guideCacheURL: nil,
-            xmltvURL: nil
+            xmltvURL: nil,
+            resolvedAddresses: ["127.0.0.1"],
+            cachedAddressesObservedAt: Date()
         )
         weak var weakClient: TVHeadendClient?
 
@@ -198,12 +200,13 @@ final class TVHeadendClientTests: XCTestCase {
             streamProfile: "pass",
             guideCacheURL: nil,
             xmltvURL: nil,
-            resolvedAddresses: ["127.0.0.1"]
+            resolvedAddresses: ["127.0.0.1"],
+            cachedAddressesObservedAt: Date()
         )
         let sessionConfiguration = URLSessionConfiguration.ephemeral
-        let proxy = CachedAddressProxy.shared
-        proxy.configure(sessionConfiguration, for: configuration)
-        let proxyPort = try XCTUnwrap(proxy.port)
+        let proxy = try XCTUnwrap(CachedAddressProxy(configuration: configuration))
+        proxy.configure(sessionConfiguration)
+        let proxyPort = proxy.port
 
         let proxySettings = try XCTUnwrap(sessionConfiguration.connectionProxyDictionary)
         XCTAssertEqual(proxySettings["HTTPProxy"] as? String, "127.0.0.1")
@@ -224,6 +227,54 @@ final class TVHeadendClientTests: XCTestCase {
         ))
     }
 
+    func testCachedAddressProxyDoesNotRerouteAnExistingClientWhenAnotherClientUsesTheSameHost() throws {
+        let firstOrigin = try ProxyTestOriginServer(
+            bindAddress: "127.0.0.1",
+            responseBody: Data("first".utf8)
+        )
+        let secondOrigin = try ProxyTestOriginServer(
+            bindAddress: "::1",
+            port: firstOrigin.port,
+            responseBody: Data("second".utf8)
+        )
+        let logicalHost = "shared-cached-address-\(UUID().uuidString).local"
+        let firstConfiguration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://\(logicalHost):\(firstOrigin.port)")!,
+            username: "",
+            password: "",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil,
+            resolvedAddresses: ["127.0.0.1"],
+            cachedAddressesObservedAt: Date()
+        )
+        let secondConfiguration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://\(logicalHost):\(secondOrigin.port)")!,
+            username: "",
+            password: "",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil,
+            resolvedAddresses: ["::1"],
+            cachedAddressesObservedAt: Date()
+        )
+        let firstProxy = try XCTUnwrap(CachedAddressProxy(configuration: firstConfiguration))
+        let firstProxyPort = firstProxy.port
+        let secondProxy = try XCTUnwrap(CachedAddressProxy(configuration: secondConfiguration))
+        _ = secondProxy.port
+
+        let response = try Self.sendRawProxyRequest(
+            proxyPort: firstProxyPort,
+            request: "GET http://\(logicalHost):\(firstOrigin.port)/status HTTP/1.1\r\n"
+                + "Host: \(logicalHost):\(firstOrigin.port)\r\n"
+                + "Connection: close\r\n\r\n"
+        )
+
+        XCTAssertTrue(response.hasSuffix("first"))
+        XCTAssertNotNil(firstOrigin.receivedRequest)
+        XCTAssertNil(secondOrigin.receivedRequest)
+    }
+
     func testCachedAddressProxyDrainsResponseBeforeHandlingHangup() throws {
         let responseBody = Data(repeating: 0x41, count: 256 * 1_024)
         let origin = try ProxyTestOriginServer(responseBody: responseBody)
@@ -235,12 +286,13 @@ final class TVHeadendClientTests: XCTestCase {
             streamProfile: "pass",
             guideCacheURL: nil,
             xmltvURL: nil,
-            resolvedAddresses: ["127.0.0.1"]
+            resolvedAddresses: ["127.0.0.1"],
+            cachedAddressesObservedAt: Date()
         )
         let sessionConfiguration = URLSessionConfiguration.ephemeral
-        let proxy = CachedAddressProxy.shared
-        proxy.configure(sessionConfiguration, for: configuration)
-        let proxyPort = try XCTUnwrap(proxy.port)
+        let proxy = try XCTUnwrap(CachedAddressProxy(configuration: configuration))
+        proxy.configure(sessionConfiguration)
+        let proxyPort = proxy.port
 
         let response = try Self.sendRawProxyRequestData(
             proxyPort: proxyPort,
@@ -272,6 +324,59 @@ final class TVHeadendClientTests: XCTestCase {
         XCTAssertTrue(CachedAddressProxy.isFatalAcceptError(EINVAL))
         XCTAssertTrue(CachedAddressProxy.isFatalAcceptError(ENOTSOCK))
         XCTAssertTrue(CachedAddressProxy.isFatalAcceptError(EOPNOTSUPP))
+    }
+
+    func testCachedAddressProxyCanPreferCurrentNameResolutionForPlayback() {
+        XCTAssertEqual(
+            CachedAddressProxy.connectionCandidates(
+                host: "tvheadend.local",
+                cachedAddresses: ["192.168.1.20", "192.168.1.21"],
+                connectionOrder: .logicalHostFirst
+            ),
+            ["tvheadend.local", "192.168.1.20", "192.168.1.21"]
+        )
+        XCTAssertEqual(
+            CachedAddressProxy.connectionCandidates(
+                host: "tvheadend.local",
+                cachedAddresses: ["192.168.1.20", "tvheadend.local"],
+                connectionOrder: .cachedAddressesFirst
+            ),
+            ["192.168.1.20", "tvheadend.local"]
+        )
+    }
+
+    func testCachedAddressFallbackOnlyRetriesPreConnectionFailures() {
+        XCTAssertTrue(TVHeadendClient.shouldRetryUsingCachedAddress(
+            after: URLError(.cannotFindHost)
+        ))
+        XCTAssertTrue(TVHeadendClient.shouldRetryUsingCachedAddress(
+            after: URLError(.dnsLookupFailed)
+        ))
+        XCTAssertTrue(TVHeadendClient.shouldRetryUsingCachedAddress(
+            after: URLError(.cannotConnectToHost)
+        ))
+        XCTAssertFalse(TVHeadendClient.shouldRetryUsingCachedAddress(
+            after: URLError(.timedOut)
+        ))
+        XCTAssertFalse(TVHeadendClient.shouldRetryUsingCachedAddress(
+            after: URLError(.networkConnectionLost)
+        ))
+    }
+
+    func testCachedAddressRoutesExpireInsteadOfPersistingIndefinitely() {
+        let staleConfiguration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://tvheadend.local:9981")!,
+            username: "",
+            password: "",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil,
+            resolvedAddresses: ["192.168.1.20"],
+            cachedAddressesObservedAt: Date().addingTimeInterval(-301)
+        )
+
+        XCTAssertNil(CachedAddressRoutes(staleConfiguration))
+        XCTAssertEqual(staleConfiguration.htspConnectionHosts, ["tvheadend.local"])
     }
 
     func testTicketedPlaylistChannelsAreParsedCentrally() {
@@ -377,12 +482,18 @@ private final class ProxyTestOriginServer: @unchecked Sendable {
 
     var receivedRequest: String? { lock.withLock { request } }
 
-    init(responseBody: Data = Data("OK".utf8)) throws {
-        let descriptor = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+    init(
+        bindAddress: String = "127.0.0.1",
+        port: Int = 0,
+        responseBody: Data = Data("OK".utf8)
+    ) throws {
+        let family = bindAddress.contains(":") ? AF_INET6 : AF_INET
+        let descriptor = socket(family, SOCK_STREAM, IPPROTO_TCP)
         guard descriptor >= 0 else { throw ProxyTestError.socketCreationFailed }
         self.descriptor = descriptor
         self.responseBody = responseBody
         var noSignal: Int32 = 1
+        var reuseAddress: Int32 = 1
         setsockopt(
             descriptor,
             SOL_SOCKET,
@@ -390,14 +501,58 @@ private final class ProxyTestOriginServer: @unchecked Sendable {
             &noSignal,
             socklen_t(MemoryLayout.size(ofValue: noSignal))
         )
+        setsockopt(
+            descriptor,
+            SOL_SOCKET,
+            SO_REUSEADDR,
+            &reuseAddress,
+            socklen_t(MemoryLayout.size(ofValue: reuseAddress))
+        )
+        setsockopt(
+            descriptor,
+            SOL_SOCKET,
+            SO_REUSEPORT,
+            &reuseAddress,
+            socklen_t(MemoryLayout.size(ofValue: reuseAddress))
+        )
+        if family == AF_INET6 {
+            var ipv6Only: Int32 = 1
+            setsockopt(
+                descriptor,
+                IPPROTO_IPV6,
+                IPV6_V6ONLY,
+                &ipv6Only,
+                socklen_t(MemoryLayout.size(ofValue: ipv6Only))
+            )
+        }
 
-        var address = sockaddr_in()
-        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
-        let status = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        let status: Int32
+        if family == AF_INET6 {
+            var address = sockaddr_in6()
+            address.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+            address.sin6_family = sa_family_t(AF_INET6)
+            address.sin6_port = in_port_t(bigEndian: in_port_t(port))
+            guard bindAddress.withCString({
+                inet_pton(AF_INET6, $0, &address.sin6_addr)
+            }) == 1 else {
+                Darwin.close(descriptor)
+                throw ProxyTestError.bindFailed
+            }
+            status = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in6>.size))
+                }
+            }
+        } else {
+            var address = sockaddr_in()
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            address.sin_family = sa_family_t(AF_INET)
+            address.sin_port = in_port_t(bigEndian: in_port_t(port))
+            address.sin_addr = in_addr(s_addr: inet_addr(bindAddress))
+            status = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
             }
         }
         guard status == 0 else {
@@ -409,8 +564,8 @@ private final class ProxyTestOriginServer: @unchecked Sendable {
             throw ProxyTestError.listenFailed
         }
 
-        var boundAddress = sockaddr_in()
-        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        var boundAddress = sockaddr_storage()
+        var length = socklen_t(MemoryLayout<sockaddr_storage>.size)
         let nameStatus = withUnsafeMutablePointer(to: &boundAddress) { pointer in
             pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 getsockname(descriptor, $0, &length)
@@ -420,7 +575,19 @@ private final class ProxyTestOriginServer: @unchecked Sendable {
             Darwin.close(descriptor)
             throw ProxyTestError.socketNameFailed
         }
-        port = Int(in_port_t(bigEndian: boundAddress.sin_port))
+        if family == AF_INET6 {
+            self.port = withUnsafePointer(to: &boundAddress) { pointer in
+                pointer.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) {
+                    Int(in_port_t(bigEndian: $0.pointee.sin6_port))
+                }
+            }
+        } else {
+            self.port = withUnsafePointer(to: &boundAddress) { pointer in
+                pointer.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                    Int(in_port_t(bigEndian: $0.pointee.sin_port))
+                }
+            }
+        }
 
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             serveOneRequest()

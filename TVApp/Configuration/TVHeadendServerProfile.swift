@@ -67,7 +67,8 @@ struct TVHeadendServerProfile: Codable, Identifiable, Equatable, Sendable {
             guideCacheURL: guideCacheURL,
             xmltvURL: xmltvURL,
             resolvedAddresses: resolvedAddresses,
-            guideResolvedAddresses: guideResolvedAddresses
+            guideResolvedAddresses: guideResolvedAddresses,
+            cachedAddressesObservedAt: lastSeenAt
         )
     }
 

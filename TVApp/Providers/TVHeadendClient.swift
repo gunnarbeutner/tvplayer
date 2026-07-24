@@ -18,6 +18,8 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
     private let serverCapabilitiesCache = TVHeadendServerCapabilitiesCache()
     private let ticketedPlaylistCache = TVHeadendTicketedPlaylistCache()
     private let session: URLSession
+    private let cachedAddressProxy: CachedAddressProxy?
+    private let cachedAddressSession: URLSession?
 
     init(
         configuration: TVHeadendConfiguration,
@@ -28,16 +30,30 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
         sessionConfiguration.timeoutIntervalForRequest = 20
         sessionConfiguration.timeoutIntervalForResource = 45
         sessionConfiguration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        CachedAddressProxy.shared.configure(sessionConfiguration, for: configuration)
         session = URLSession(
             configuration: sessionConfiguration,
             delegate: TVHeadendHTTPAuthenticationDelegate(configuration: configuration),
             delegateQueue: nil
         )
+        let cachedAddressProxy = CachedAddressProxy(configuration: configuration)
+        self.cachedAddressProxy = cachedAddressProxy
+        if let cachedAddressProxy {
+            let fallbackConfiguration =
+                sessionConfiguration.copy() as! URLSessionConfiguration
+            cachedAddressProxy.configure(fallbackConfiguration)
+            cachedAddressSession = URLSession(
+                configuration: fallbackConfiguration,
+                delegate: TVHeadendHTTPAuthenticationDelegate(configuration: configuration),
+                delegateQueue: nil
+            )
+        } else {
+            cachedAddressSession = nil
+        }
     }
 
     deinit {
         session.invalidateAndCancel()
+        cachedAddressSession?.invalidateAndCancel()
     }
 
     func fetchGuide(for timeline: GuideTimeline) async throws -> TVProviderSnapshot {
@@ -247,7 +263,8 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
             url: url,
             networkCachingMilliseconds: networkCachingMilliseconds,
             profile: selectedProfile,
-            kind: .live(mode)
+            kind: .live(mode),
+            cachedAddressRoutes: CachedAddressRoutes(configuration)
         )
     }
 
@@ -456,7 +473,7 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
             .map { URLQueryItem(name: $0.key, value: $0.value) }
         request.httpBody = components.percentEncodedQuery?.data(using: .utf8)
 
-        let (_, response) = try await session.data(for: request)
+        let (_, response) = try await loadData(for: request)
         guard let response = response as? HTTPURLResponse else { throw TVProviderError.invalidResponse }
         guard (200..<300).contains(response.statusCode) else {
             throw TVProviderError.httpStatus(response.statusCode)
@@ -464,7 +481,7 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
     }
 
     private func fetchData(at url: URL) async throws -> Data {
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await loadData(for: URLRequest(url: url))
         guard let response = response as? HTTPURLResponse else { throw TVProviderError.invalidResponse }
         guard (200..<300).contains(response.statusCode) else {
             throw TVProviderError.httpStatus(response.statusCode)
@@ -480,7 +497,7 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
             request.setValue(cached.etag, forHTTPHeaderField: "If-None-Match")
         }
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await loadData(for: request)
         guard let response = response as? HTTPURLResponse else {
             throw TVProviderError.invalidResponse
         }
@@ -499,6 +516,34 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
             for: url
         )
         return data
+    }
+
+    private func loadData(for request: URLRequest) async throws -> (Data, URLResponse) {
+        do {
+            return try await session.data(for: request)
+        } catch {
+            guard let cachedAddressSession,
+                  Self.shouldRetryUsingCachedAddress(after: error)
+            else { throw error }
+            return try await cachedAddressSession.data(for: request)
+        }
+    }
+
+    static func shouldRetryUsingCachedAddress(after error: Error) -> Bool {
+        let error = error as NSError
+        if error.domain == NSURLErrorDomain {
+            let code = URLError.Code(rawValue: error.code)
+            switch code {
+            case .cannotFindHost, .dnsLookupFailed, .cannotConnectToHost:
+                return true
+            default:
+                break
+            }
+        }
+        if let underlying = error.userInfo[NSUnderlyingErrorKey] as? Error {
+            return shouldRetryUsingCachedAddress(after: underlying)
+        }
+        return false
     }
 
     private func endpointURL(path: String, queryItems: [URLQueryItem] = []) throws -> URL {

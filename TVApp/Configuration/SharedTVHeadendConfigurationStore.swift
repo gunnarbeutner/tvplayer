@@ -17,9 +17,10 @@ struct SharedTVHeadendConfigurationStore {
         let xmltvURL: String?
         let resolvedAddresses: [String]
         let guideResolvedAddresses: [String]
+        let cachedAddressesObservedAt: Date?
 
         init(configuration: TVHeadendConfiguration) {
-            version = 3
+            version = 4
             serverProfileID = configuration.serverProfileID
             baseURL = configuration.baseURL?.absoluteString
             username = configuration.username
@@ -30,10 +31,11 @@ struct SharedTVHeadendConfigurationStore {
             xmltvURL = configuration.xmltvURL?.absoluteString
             resolvedAddresses = configuration.resolvedAddresses
             guideResolvedAddresses = configuration.guideResolvedAddresses
+            cachedAddressesObservedAt = configuration.cachedAddressesObservedAt
         }
 
         var configuration: TVHeadendConfiguration? {
-            guard (1...3).contains(version) else { return nil }
+            guard (1...4).contains(version) else { return nil }
             return TVHeadendConfiguration(
                 serverProfileID: serverProfileID,
                 baseURL: baseURL.flatMap(URL.init(string:)),
@@ -44,14 +46,15 @@ struct SharedTVHeadendConfigurationStore {
                 guideCacheURL: guideCacheURL.flatMap(URL.init(string:)),
                 xmltvURL: xmltvURL.flatMap(URL.init(string:)),
                 resolvedAddresses: resolvedAddresses,
-                guideResolvedAddresses: guideResolvedAddresses
+                guideResolvedAddresses: guideResolvedAddresses,
+                cachedAddressesObservedAt: cachedAddressesObservedAt
             )
         }
 
         private enum CodingKeys: String, CodingKey {
             case version, serverProfileID, baseURL, username, password, streamProfile
             case htspPort, guideCacheURL, xmltvURL
-            case resolvedAddresses, guideResolvedAddresses
+            case resolvedAddresses, guideResolvedAddresses, cachedAddressesObservedAt
         }
 
         init(from decoder: Decoder) throws {
@@ -73,6 +76,10 @@ struct SharedTVHeadendConfigurationStore {
                 [String].self,
                 forKey: .guideResolvedAddresses
             ) ?? []
+            cachedAddressesObservedAt = try values.decodeIfPresent(
+                Date.self,
+                forKey: .cachedAddressesObservedAt
+            )
         }
     }
 
