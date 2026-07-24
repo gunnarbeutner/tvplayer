@@ -36,6 +36,38 @@ enum GuideGridMetrics {
     }
 }
 
+enum GuideGridRenderWindow {
+    static let initialHorizontalRange: ClosedRange<CGFloat> =
+        GuideGridMetrics.channelWidth...(
+            GuideGridMetrics.channelWidth + 5 * GuideTimeline.pointsPerHour
+        )
+
+    /// Quantizes updates to a quarter viewport and keeps half a viewport of
+    /// overscan on either side. Scroll events within the same bucket do not
+    /// rebuild the SwiftUI rows, while the overscan prevents cards appearing
+    /// at the edge during momentum scrolling.
+    static func horizontalRange(
+        contentOffsetX: CGFloat,
+        viewportWidth: CGFloat,
+        contentWidth: CGFloat
+    ) -> ClosedRange<CGFloat> {
+        guard viewportWidth > 0 else { return initialHorizontalRange }
+
+        let step = max(1, viewportWidth / 4)
+        let bucketStart = floor(max(0, contentOffsetX) / step) * step
+        let overscan = viewportWidth / 2
+        let lowerBound = max(
+            GuideGridMetrics.channelWidth,
+            bucketStart + GuideGridMetrics.channelWidth - overscan
+        )
+        let upperBound = min(
+            contentWidth,
+            bucketStart + step + viewportWidth + overscan
+        )
+        return lowerBound...max(lowerBound, upperBound)
+    }
+}
+
 enum GuideFocusScrollPosition {
     /// SwiftUI can update the representable before UIKit has assigned its
     /// final bounds. Treating that zero/tiny viewport as real would scroll the
@@ -340,6 +372,26 @@ struct GuideGridSnapshot: Sendable {
         let end = items[first...].firstIndex { $0.frame.minX > horizontalRange.upperBound }
             ?? items.endIndex
         return items[first..<end]
+    }
+
+    func renderedItems(
+        inRow row: Int,
+        intersecting horizontalRange: ClosedRange<CGFloat>,
+        retaining programID: GuideProgram.ID?
+    ) -> [Item] {
+        var rendered = Array(items(inRow: row, intersecting: horizontalRange))
+        guard let programID,
+              let location = locationByProgramID[programID],
+              location.row == row,
+              let retainedItem = rows[row][safe: location.item],
+              !rendered.contains(where: { $0.id == programID })
+        else { return rendered }
+
+        let insertionIndex = rendered.firstIndex {
+            $0.itemIndex > retainedItem.itemIndex
+        } ?? rendered.endIndex
+        rendered.insert(retainedItem, at: insertionIndex)
+        return rendered
     }
 
     func destinationProgramID(
@@ -2608,6 +2660,44 @@ private final class GuideChannelHeaderReusableView: UICollectionReusableView {
     }
 }
 #else
+@MainActor
+private final class MacGuideGridSnapshotCache {
+    private struct Key: Equatable {
+        let guideRevision: Int
+        let channelPreferencesRevision: Int
+        let timelineStart: Date
+        let timelineEnd: Date
+    }
+
+    private var key: Key?
+    private var value: GuideGridSnapshot?
+
+    func snapshot(
+        channels: [GuideChannel],
+        timeline: GuideTimeline,
+        guideRevision: Int,
+        channelPreferencesRevision: Int
+    ) -> GuideGridSnapshot {
+        let key = Key(
+            guideRevision: guideRevision,
+            channelPreferencesRevision: channelPreferencesRevision,
+            timelineStart: timeline.start,
+            timelineEnd: timeline.end
+        )
+        if self.key == key, let value {
+            return value
+        }
+        let value = GuideGridSnapshot(
+            channels: channels,
+            timeline: timeline,
+            revision: guideRevision
+        )
+        self.key = key
+        self.value = value
+        return value
+    }
+}
+
 /// Native macOS guide surface. The shared snapshot keeps programme geometry
 /// identical to the television grid, while SwiftUI provides standard pointer,
 /// scrolling, keyboard-focus, and context-menu behavior.
@@ -2634,12 +2724,16 @@ struct GuideGridView: View {
     let onFocusAcquired: () -> Void
     let onExitToNavigator: () -> Void
     @FocusState private var keyboardFocusedProgramID: GuideProgram.ID?
+    @State private var horizontalRenderRange =
+        GuideGridRenderWindow.initialHorizontalRange
+    @State private var snapshotCache = MacGuideGridSnapshotCache()
 
     private var snapshot: GuideGridSnapshot {
-        GuideGridSnapshot(
+        snapshotCache.snapshot(
             channels: channels,
             timeline: timeline,
-            revision: guideRevision
+            guideRevision: guideRevision,
+            channelPreferencesRevision: channelPreferencesRevision
         )
     }
 
@@ -2657,7 +2751,11 @@ struct GuideGridView: View {
                                 .zIndex(1)
 
                             ZStack(alignment: .topLeading) {
-                                ForEach(snapshot.rows[row]) { item in
+                                ForEach(snapshot.renderedItems(
+                                    inRow: row,
+                                    intersecting: horizontalRenderRange,
+                                    retaining: keyboardFocusedProgramID
+                                )) { item in
                                     Button {
                                         focusedProgramID = item.id
                                         onActivate(item.program)
@@ -2786,6 +2884,15 @@ struct GuideGridView: View {
             }
         }
         .background(AppTheme.background)
+        .onScrollGeometryChange(for: ClosedRange<CGFloat>.self) { geometry in
+            GuideGridRenderWindow.horizontalRange(
+                contentOffsetX: geometry.contentOffset.x,
+                viewportWidth: geometry.containerSize.width,
+                contentWidth: snapshot.contentSize.width
+            )
+        } action: { _, range in
+            horizontalRenderRange = range
+        }
         .defaultFocus($keyboardFocusedProgramID, preferredProgramID)
         .onAppear {
             let initialProgramID = focusedProgramID ?? preferredProgramID

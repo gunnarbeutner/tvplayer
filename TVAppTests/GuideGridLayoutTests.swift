@@ -722,6 +722,65 @@ final class GuideGridLayoutTests: XCTestCase {
         XCTAssertEqual(visible.map(\.id), ["program-1"])
     }
 
+    func testCollectionSnapshotRendersOnlyViewportProgrammesWhileRetainingFocus() {
+        let start = Date(timeIntervalSince1970: 0)
+        let timeline = GuideTimeline(
+            start: start,
+            end: start.addingTimeInterval(6 * 3_600)
+        )
+        let programs = (0..<6).map { index in
+            GuideProgram(
+                id: "program-\(index)",
+                channelID: "channel",
+                title: "Program \(index)",
+                subtitle: nil,
+                overview: "",
+                start: start.addingTimeInterval(Double(index) * 3_600),
+                end: start.addingTimeInterval(Double(index + 1) * 3_600)
+            )
+        }
+        let snapshot = GuideGridSnapshot(
+            channels: [channel(id: "channel", programs: programs)],
+            timeline: timeline,
+            revision: 1
+        )
+        let secondHourStart = GuideGridMetrics.channelWidth + GuideTimeline.pointsPerHour
+        let rendered = snapshot.renderedItems(
+            inRow: 0,
+            intersecting: secondHourStart...(secondHourStart + GuideTimeline.pointsPerHour - 10),
+            retaining: "program-4"
+        )
+
+        XCTAssertEqual(rendered.map(\.id), ["program-1", "program-4"])
+    }
+
+    func testHorizontalRenderWindowIsStableWithinQuarterViewportBucket() {
+        let viewportWidth: CGFloat = 1_000
+        let contentWidth: CGFloat = 10_000
+        let first = GuideGridRenderWindow.horizontalRange(
+            contentOffsetX: 1,
+            viewportWidth: viewportWidth,
+            contentWidth: contentWidth
+        )
+        let sameBucket = GuideGridRenderWindow.horizontalRange(
+            contentOffsetX: 249,
+            viewportWidth: viewportWidth,
+            contentWidth: contentWidth
+        )
+        let nextBucket = GuideGridRenderWindow.horizontalRange(
+            contentOffsetX: 250,
+            viewportWidth: viewportWidth,
+            contentWidth: contentWidth
+        )
+
+        XCTAssertEqual(first, sameBucket)
+        XCTAssertNotEqual(first, nextBucket)
+        XCTAssertTrue(
+            nextBucket.contains(250 + GuideGridMetrics.channelWidth)
+        )
+        XCTAssertTrue(nextBucket.contains(250 + viewportWidth))
+    }
+
     func testCollectionSnapshotUsesIndexedVerticalNavigation() {
         let now = Date(timeIntervalSince1970: 10_000)
         let snapshot = GuideGridSnapshot(
