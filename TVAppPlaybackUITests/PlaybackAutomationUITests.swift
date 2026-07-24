@@ -39,6 +39,18 @@ private struct PlaybackProbeSnapshot: Codable {
     let videoSizeHeight: Double
 }
 
+private struct ReplayCalibrationGeometry: CustomStringConvertible {
+    let topLeftWidth: Int
+    let topLeftHeight: Int
+    let topRightWidth: Int
+    let topRightHeight: Int
+
+    var description: String {
+        "topLeft=\(topLeftWidth)x\(topLeftHeight), "
+            + "topRight=\(topRightWidth)x\(topRightHeight)"
+    }
+}
+
 private struct GuideFocusProbeSnapshot: Codable, CustomStringConvertible {
     let version: Int
     let sampledAt: TimeInterval
@@ -175,8 +187,12 @@ final class PlaybackAutomationUITests: XCTestCase {
         _ = try waitForProbe(timeout: 5) { $0.concealed }
         let during = attachScreenshot(named: "During seek concealment")
 
+        try assertReplayCornerPixelsAreVisible(in: before)
+        try assertReplayCornerPixelsAreVisible(in: during)
         let beforeGeometry = try replayGeometry(in: before)
         let duringGeometry = try replayGeometry(in: during)
+        let beforeCalibration = try replayCalibrationGeometry(in: before)
+        let duringCalibration = try replayCalibrationGeometry(in: during)
         let geometry = try currentProbe()
         XCTAssertEqual(
             beforeGeometry.left,
@@ -197,6 +213,30 @@ final class PlaybackAutomationUITests: XCTestCase {
             duringGeometry.topLeftMarker,
             accuracy: 2,
             "The seek still must preserve the live video's vertical position."
+        )
+        XCTAssertEqual(
+            beforeCalibration.topLeftWidth,
+            duringCalibration.topLeftWidth,
+            "The held frame stretched horizontally at its top-left marker. "
+                + "live: \(beforeCalibration); held: \(duringCalibration)"
+        )
+        XCTAssertEqual(
+            beforeCalibration.topLeftHeight,
+            duringCalibration.topLeftHeight,
+            "The held frame stretched vertically at its top-left marker. "
+                + "live: \(beforeCalibration); held: \(duringCalibration)"
+        )
+        XCTAssertEqual(
+            beforeCalibration.topRightWidth,
+            duringCalibration.topRightWidth,
+            "The held frame stretched horizontally at its top-right marker. "
+                + "live: \(beforeCalibration); held: \(duringCalibration)"
+        )
+        XCTAssertEqual(
+            beforeCalibration.topRightHeight,
+            duringCalibration.topRightHeight,
+            "The held frame stretched vertically at its top-right marker. "
+                + "live: \(beforeCalibration); held: \(duringCalibration)"
         )
     }
 
@@ -509,23 +549,105 @@ final class PlaybackAutomationUITests: XCTestCase {
 
         // The replay fixture is native 1080p, so each source corner maps to
         // the corresponding screen corner without a fixture-size rescale.
-        let corners = [
-            ("top left", 0, 0),
-            ("top right", width - 1, 0),
-            ("bottom left", 0, height - 1),
-            ("bottom right", width - 1, height - 1),
+        let corners: [
+            (
+                name: String,
+                x: Int,
+                y: Int,
+                matches: (Int, Int, Int) -> Bool
+            )
+        ] = [
+            ("top left", 0, 0, { red, green, blue in
+                green >= 100 && blue >= 100
+                    && red + 50 <= min(green, blue)
+            }),
+            ("top right", width - 1, 0, { red, green, blue in
+                red >= 100 && green >= 100
+                    && blue + 50 <= min(red, green)
+            }),
+            ("bottom left", 0, height - 1, { red, green, blue in
+                green >= 100 && green >= red + 50 && green >= blue + 50
+            }),
+            ("bottom right", width - 1, height - 1, { red, green, blue in
+                red >= 100 && blue >= 100
+                    && green + 50 <= min(red, blue)
+            }),
         ]
 
-        for (name, x, y) in corners {
-            let offset = (y * width + x) * 4
-            let markerIsVisible = pixels[offset] >= 100
-                && pixels[offset + 1] >= 100
-                && pixels[offset + 2] >= 100
+        for corner in corners {
+            let offset = (corner.y * width + corner.x) * 4
+            let red = Int(pixels[offset])
+            let green = Int(pixels[offset + 1])
+            let blue = Int(pixels[offset + 2])
             XCTAssertTrue(
-                markerIsVisible,
-                "The replay test signal's \(name) corner pixel is cropped."
+                corner.matches(red, green, blue),
+                "The replay test signal's \(corner.name) corner has RGB "
+                    + "\(red),\(green),\(blue), so its unique marker is missing."
             )
         }
+    }
+
+    private func replayCalibrationGeometry(
+        in screenshot: XCUIScreenshot
+    ) throws -> ReplayCalibrationGeometry {
+        let image = try XCTUnwrap(screenshot.image.cgImage)
+        let width = image.width
+        let height = image.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let context = try XCTUnwrap(
+            CGContext(
+                data: &pixels,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )
+        )
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        func pixel(atX x: Int, y: Int) -> (red: Int, green: Int, blue: Int) {
+            let offset = (y * width + x) * 4
+            return (
+                Int(pixels[offset]),
+                Int(pixels[offset + 1]),
+                Int(pixels[offset + 2])
+            )
+        }
+
+        func isCyan(_ x: Int, _ y: Int) -> Bool {
+            let color = pixel(atX: x, y: y)
+            return color.green >= 100 && color.blue >= 100
+                && color.red + 50 <= min(color.green, color.blue)
+        }
+
+        func isYellow(_ x: Int, _ y: Int) -> Bool {
+            let color = pixel(atX: x, y: y)
+            return color.red >= 100 && color.green >= 100
+                && color.blue + 50 <= min(color.red, color.green)
+        }
+
+        let markerInset = 80
+        let topLeftWidth = (0..<width).first {
+            !isCyan($0, markerInset)
+        } ?? width
+        let topLeftHeight = (0..<height).first {
+            !isCyan(markerInset, $0)
+        } ?? height
+        let topRightWidth = (0..<width).first {
+            !isYellow(width - $0 - 1, markerInset)
+        } ?? width
+        let topRightHeight = (0..<height).first {
+            !isYellow(width - markerInset - 1, $0)
+        } ?? height
+
+        return ReplayCalibrationGeometry(
+            topLeftWidth: topLeftWidth,
+            topLeftHeight: topLeftHeight,
+            topRightWidth: topRightWidth,
+            topRightHeight: topRightHeight
+        )
     }
 
     private func waitForPlaybackChromeToHide(timeout: TimeInterval) throws {
@@ -542,6 +664,17 @@ final class PlaybackAutomationUITests: XCTestCase {
             result,
             .completed,
             "The playback chrome did not hide before checking the test signal."
+        )
+        let fadeExpectation = XCTestExpectation(
+            description: "Playback chrome fade completed"
+        )
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            fadeExpectation.fulfill()
+        }
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [fadeExpectation], timeout: 1),
+            .completed,
+            "The playback chrome fade did not complete."
         )
     }
 

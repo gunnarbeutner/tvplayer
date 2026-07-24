@@ -713,10 +713,13 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             .appending(path: "tvplayer-paused-frame-\(UUID().uuidString)")
             .appendingPathExtension("png")
         pendingSnapshotURL = snapshotURL
+        let videoSize = mediaPlayer.videoSize
+        let snapshotWidth = Int32(clamping: Int(videoSize.width.rounded()))
+        let snapshotHeight = Int32(clamping: Int(videoSize.height.rounded()))
         mediaPlayer.saveVideoSnapshot(
             at: snapshotURL.path,
-            withWidth: 1_280,
-            andHeight: 0
+            withWidth: snapshotWidth,
+            andHeight: snapshotHeight
         )
     }
 
