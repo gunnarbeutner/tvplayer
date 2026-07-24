@@ -219,6 +219,10 @@ private struct TVPlaybackAutomationSnapshot: Codable {
     let surfaceMode: String
     let surfaceWidth: Double
     let surfaceHeight: Double
+    let videoTrackWidth: Int
+    let videoTrackHeight: Int
+    let videoSizeWidth: Double
+    let videoSizeHeight: Double
 }
 
 struct TVPlaybackAutomationProbe: View {
@@ -274,6 +278,10 @@ struct TVPlaybackAutomationProbe: View {
     private func encodeSnapshot(size: CGSize) -> String {
         let output = engine.playbackOutputSnapshot
         let audio = engine.vlcAudioOutputDiagnostics
+        let selectedVideo = engine.mediaPlayer.videoTracks
+            .first(where: \.isSelected)?
+            .video
+        let videoSize = engine.mediaPlayer.videoSize
         let snapshot = TVPlaybackAutomationSnapshot(
             version: 1,
             sampledAt: ProcessInfo.processInfo.systemUptime,
@@ -307,7 +315,11 @@ struct TVPlaybackAutomationProbe: View {
                 ? "fullScreen"
                 : (showsGuidePreview ? "guidePreview" : "hidden"),
             surfaceWidth: size.width,
-            surfaceHeight: size.height
+            surfaceHeight: size.height,
+            videoTrackWidth: Int(selectedVideo?.width ?? 0),
+            videoTrackHeight: Int(selectedVideo?.height ?? 0),
+            videoSizeWidth: videoSize.width,
+            videoSizeHeight: videoSize.height
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]

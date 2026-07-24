@@ -1,4 +1,5 @@
 import XCTest
+import CoreGraphics
 
 private struct PlaybackProbeSnapshot: Codable {
     let version: Int
@@ -32,6 +33,10 @@ private struct PlaybackProbeSnapshot: Codable {
     let surfaceMode: String
     let surfaceWidth: Double
     let surfaceHeight: Double
+    let videoTrackWidth: Int
+    let videoTrackHeight: Int
+    let videoSizeWidth: Double
+    let videoSizeHeight: Double
 }
 
 private struct GuideFocusProbeSnapshot: Codable, CustomStringConvertible {
@@ -157,6 +162,44 @@ final class PlaybackAutomationUITests: XCTestCase {
         XCTAssertGreaterThan(returned.surfaceHeight, 500)
     }
 
+    func testSeekConcealmentScreenshotComparison() throws {
+        launchReplay()
+        _ = try waitForReadyPlayback(timeout: 8)
+
+        XCUIRemote.shared.press(.pageDown, forDuration: 1.2)
+        let liveProbe = try currentProbe()
+        XCTAssertFalse(liveProbe.concealed)
+        let before = attachScreenshot(named: "Before seek concealment")
+
+        XCUIRemote.shared.press(.select)
+        _ = try waitForProbe(timeout: 5) { $0.concealed }
+        let during = attachScreenshot(named: "During seek concealment")
+
+        let beforeGeometry = try replayGeometry(in: before)
+        let duringGeometry = try replayGeometry(in: during)
+        let geometry = try currentProbe()
+        XCTAssertEqual(
+            beforeGeometry.left,
+            duringGeometry.left,
+            accuracy: 1,
+            "The seek still must preserve the live video's left edge. "
+                + "track=\(geometry.videoTrackWidth)x\(geometry.videoTrackHeight) "
+                + "videoSize=\(geometry.videoSizeWidth)x\(geometry.videoSizeHeight)"
+        )
+        XCTAssertEqual(
+            beforeGeometry.right,
+            duringGeometry.right,
+            accuracy: 1,
+            "The seek still must preserve the live video's right edge."
+        )
+        XCTAssertEqual(
+            beforeGeometry.topLeftMarker,
+            duringGeometry.topLeftMarker,
+            accuracy: 2,
+            "The seek still must preserve the live video's vertical position."
+        )
+    }
+
     func testLiveTVHeadendTuneSwitchAndSeek() throws {
         let environment = ProcessInfo.processInfo.environment
         if let url = environment["TVPLAYER_LIVE_TEST_URL"], !url.isEmpty {
@@ -241,6 +284,63 @@ final class PlaybackAutomationUITests: XCTestCase {
             "TVPLAYER_PLAYBACK_REPLAY": replay ? "1" : "0",
         ]
         launchConfiguredApp()
+    }
+
+    @discardableResult
+    private func attachScreenshot(named name: String) -> XCUIScreenshot {
+        let screenshot = XCUIScreen.main.screenshot()
+        let attachment = XCTAttachment(screenshot: screenshot)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        return screenshot
+    }
+
+    private func replayGeometry(
+        in screenshot: XCUIScreenshot
+    ) throws -> (left: Int, right: Int, topLeftMarker: Int) {
+        let image = try XCTUnwrap(screenshot.image.cgImage)
+        let width = image.width
+        let height = image.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        let context = try XCTUnwrap(
+            CGContext(
+                data: &pixels,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: colorSpace,
+                bitmapInfo: bitmapInfo
+            )
+        )
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        func containsVideo(_ x: Int) -> Bool {
+            var brightness = 0
+            var sampleCount = 0
+            for y in stride(from: 0, to: height / 2, by: 4) {
+                let offset = (y * width + x) * 4
+                brightness += Int(pixels[offset])
+                    + Int(pixels[offset + 1])
+                    + Int(pixels[offset + 2])
+                sampleCount += 3
+            }
+            return brightness / max(1, sampleCount) > 8
+        }
+
+        let left = (0..<width).first(where: containsVideo) ?? width
+        let rightEdge = (0..<width).reversed().first(where: containsVideo) ?? -1
+        let markerX = min(10, width - 1)
+        let topLeftMarker = (0..<(height / 4)).first { y in
+            let offset = (y * width + markerX) * 4
+            return Int(pixels[offset])
+                + Int(pixels[offset + 1])
+                + Int(pixels[offset + 2]) < 180
+        } ?? height
+        return (left, max(0, width - rightEdge - 1), topLeftMarker)
     }
 
     private func launchConfiguredApp() {

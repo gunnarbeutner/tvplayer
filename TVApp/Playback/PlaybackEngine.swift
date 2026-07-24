@@ -2487,15 +2487,28 @@ private final class VLCVideoContainerView: UIView {
         // one renderer attached and resize it as this persistent surface moves
         // between the guide preview and full-screen playback. Reassigning the
         // drawable here creates an additional renderer on every transition.
-        subview.frame = bounds
         subview.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        if subview !== concealmentView { bringSubviewToFront(concealmentView) }
+        if subview !== concealmentView {
+            resizeVideoSubview(subview)
+            bringSubviewToFront(concealmentView)
+        }
     }
 
     private func resizeVideoSubviews() {
-        for subview in subviews where subview !== concealmentView && subview.frame != bounds {
-            subview.frame = bounds
+        for subview in subviews where subview !== concealmentView {
+            resizeVideoSubview(subview)
         }
+    }
+
+    private func resizeVideoSubview(_ subview: UIView) {
+        subview.transform = .identity
+        subview.bounds = CGRect(origin: .zero, size: bounds.size)
+        subview.center = CGPoint(x: bounds.midX, y: bounds.midY)
+#if os(tvOS)
+        guard let mediaPlayer else { return }
+        let scale = codedVideoPaddingScale(mediaPlayer)
+        subview.transform = CGAffineTransform(scaleX: scale, y: 1)
+#endif
     }
 
     func updateAttachment(
@@ -2575,6 +2588,26 @@ private final class VLCVideoContainerView: UIView {
             inside: bounds
         )
         concealmentView.contentMode = .scaleToFill
+    }
+
+    private func codedVideoPaddingScale(_ mediaPlayer: VLCMediaPlayer) -> CGFloat {
+        guard let video = mediaPlayer.videoTracks.first(where: \.isSelected)?.video,
+              video.height > 0,
+              let aspectRatio = vlcDisplayAspectRatio(mediaPlayer)
+        else { return 1 }
+        let drawableAspectRatio = bounds.width / bounds.height
+        guard abs(drawableAspectRatio - aspectRatio) / aspectRatio < 0.01
+        else { return 1 }
+
+        // VLC 4's tvOS vout fits H.264's macroblock-aligned coded height
+        // (for example 368 or 1088) even though the track API reports the
+        // visible height (360 or 1080). Uniformly zoom past those non-visible
+        // rows so the visible picture uses the complete 16:9 drawable. The
+        // vout already maps the visible rows to the drawable's full height,
+        // so only its incorrectly narrowed horizontal geometry needs repair.
+        let visibleHeight = UInt64(video.height)
+        let codedHeight = ((visibleHeight + 15) / 16) * 16
+        return CGFloat(codedHeight) / CGFloat(visibleHeight)
     }
 
     func detachIfOwned() {
