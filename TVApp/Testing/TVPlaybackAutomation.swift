@@ -2,11 +2,44 @@ import Foundation
 import SwiftUI
 
 enum TVGuideAutomation {
+    private struct Fixture: Decodable {
+        let version: Int
+        let anchorDate: TimeInterval
+        let channels: [FixtureChannel]
+    }
+
+    private struct FixtureChannel: Decodable {
+        let id: String
+        let number: Int
+        let name: String
+        let monogram: String
+        let programs: [FixtureProgram]
+    }
+
+    private struct FixtureProgram: Decodable {
+        let id: String
+        let title: String
+        let subtitle: String?
+        let overview: String
+        let startOffset: TimeInterval
+        let endOffset: TimeInterval
+    }
+
     static let launchArgument = "--guide-ui-testing"
+    static let realDataLaunchArgument = "--guide-real-data-ui-testing"
     static let probeIdentifier = "tvplayer.guide.automation.probe"
     static let preferencesSuiteName = "de.beutner.TVPlayer.guide-ui-testing"
 
     static var isEnabled: Bool {
+#if DEBUG && os(tvOS)
+        ProcessInfo.processInfo.arguments.contains(launchArgument)
+            || ProcessInfo.processInfo.arguments.contains(realDataLaunchArgument)
+#else
+        false
+#endif
+    }
+
+    static var usesFixture: Bool {
 #if DEBUG && os(tvOS)
         ProcessInfo.processInfo.arguments.contains(launchArgument)
 #else
@@ -15,46 +48,45 @@ enum TVGuideAutomation {
     }
 
     static func guideSnapshot(at date: Date) -> TVProviderSnapshot? {
-        guard isEnabled else { return nil }
-        let channels = (1...40).map { ordinal in
-            let channelID = String(format: "guide-test-channel-%02d", ordinal)
-            let currentEnd = date.addingTimeInterval(
-                1_200 + TimeInterval(ordinal % 6) * 600
-            )
-            let programs = [
-                GuideProgram(
-                    id: String(format: "guide-test-current-%02d", ordinal),
-                    channelID: channelID,
-                    title: "Guide Test Current \(ordinal)",
-                    subtitle: "Deterministic focus fixture",
-                    overview: "Current programme for guide focus automation.",
-                    start: date.addingTimeInterval(-7_200),
-                    end: currentEnd
-                ),
-                GuideProgram(
-                    id: String(format: "guide-test-future-%02d", ordinal),
-                    channelID: channelID,
-                    title: "Guide Test Future \(ordinal)",
-                    subtitle: nil,
-                    overview: "Future programme for horizontal navigation.",
-                    start: currentEnd,
-                    end: date.addingTimeInterval(26 * 3_600)
-                ),
-            ]
-            return GuideChannel(
-                id: channelID,
-                number: ordinal,
-                name: "Guide Test Channel \(ordinal)",
-                monogram: "G\(ordinal)",
-                tint: GuideChannelAppearance.tint(for: channelID),
+        guard usesFixture,
+              let fixture = loadFixture(),
+              fixture.version == 1,
+              fixture.anchorDate > 0
+        else { return nil }
+        let channels = fixture.channels.map { channel in
+            GuideChannel(
+                id: channel.id,
+                number: channel.number,
+                name: channel.name,
+                monogram: channel.monogram,
+                tint: GuideChannelAppearance.tint(for: channel.id),
                 iconURL: nil,
-                programs: programs
+                programs: channel.programs.map { program in
+                    GuideProgram(
+                        id: program.id,
+                        channelID: channel.id,
+                        title: program.title,
+                        subtitle: program.subtitle,
+                        overview: program.overview,
+                        start: date.addingTimeInterval(program.startOffset),
+                        end: date.addingTimeInterval(program.endOffset)
+                    )
+                }
             )
         }
         return TVProviderSnapshot(
             channels: channels,
             serverName: "Guide Focus Automation"
         )
+    }
+
+    private static func loadFixture() -> Fixture? {
+        guard let url = Bundle.main.url(
+            forResource: "guide-focus-fixture",
+            withExtension: "json"
+        ), let data = try? Data(contentsOf: url)
+        else { return nil }
+        return try? JSONDecoder().decode(Fixture.self, from: data)
     }
 }
 

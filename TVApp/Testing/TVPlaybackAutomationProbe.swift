@@ -7,10 +7,12 @@ private struct TVGuideAutomationSnapshot: Codable {
     let version: Int
     let sampledAt: TimeInterval
     let focusedProgramID: String?
+    let focusedProgramChannelID: String?
     let focusedChannelID: String?
     let programMarkerIDs: [String]
     let channelMarkerIDs: [String]
     let displayedChannelIDs: [String]
+    let focusableChannelIDs: [String]
     let favoriteChannelIDs: [String]
     let channelRestorationPending: Bool
     let markerOverlapCount: Int
@@ -24,9 +26,11 @@ final class TVGuideAutomationFocusRecorder: ObservableObject {
     @Published private(set) var revision = 0
     private var focusedProgramID: String?
     private var focusedChannelID: String?
+    private var programChannelByID: [String: String] = [:]
     private var programMarkerIDs: Set<String> = []
     private var channelMarkerIDs: Set<String> = []
     private var displayedChannelIDs: [String] = []
+    private var focusableChannelIDs: [String] = []
     private var favoriteChannelIDs: Set<String> = []
     private var channelRestorationPending = false
     private var markerOverlapCount = 0
@@ -48,10 +52,12 @@ final class TVGuideAutomationFocusRecorder: ObservableObject {
 
     func updateProgram(
         id: String,
+        channelID: String,
         isFocused: Bool,
         presentsMarker: Bool
     ) {
         guard TVGuideAutomation.isEnabled else { return }
+        programChannelByID[id] = channelID
         if isFocused {
             focusedProgramID = id
         } else if focusedProgramID == id {
@@ -69,6 +75,7 @@ final class TVGuideAutomationFocusRecorder: ObservableObject {
     func removeProgram(id: String) {
         guard TVGuideAutomation.isEnabled else { return }
         if focusedProgramID == id { focusedProgramID = nil }
+        programChannelByID.removeValue(forKey: id)
         programMarkerIDs.remove(id)
         evaluateViolations()
         publish()
@@ -95,6 +102,12 @@ final class TVGuideAutomationFocusRecorder: ObservableObject {
         publish()
     }
 
+    func updateFocusOrder(channelIDs: [String]) {
+        guard TVGuideAutomation.isEnabled else { return }
+        focusableChannelIDs = channelIDs
+        publish()
+    }
+
     func beginChannelRestoration(channelID: String) {
         guard TVGuideAutomation.isEnabled else { return }
         channelRestorationPending = true
@@ -112,13 +125,17 @@ final class TVGuideAutomationFocusRecorder: ObservableObject {
 
     var encodedSnapshot: String {
         let snapshot = TVGuideAutomationSnapshot(
-            version: 1,
+            version: 2,
             sampledAt: ProcessInfo.processInfo.systemUptime,
             focusedProgramID: focusedProgramID,
+            focusedProgramChannelID: focusedProgramID.flatMap {
+                programChannelByID[$0]
+            },
             focusedChannelID: focusedChannelID,
             programMarkerIDs: programMarkerIDs.sorted(),
             channelMarkerIDs: channelMarkerIDs.sorted(),
             displayedChannelIDs: displayedChannelIDs,
+            focusableChannelIDs: focusableChannelIDs,
             favoriteChannelIDs: favoriteChannelIDs.sorted(),
             channelRestorationPending: channelRestorationPending,
             markerOverlapCount: markerOverlapCount,

@@ -291,21 +291,6 @@ final class GuideGridLayoutTests: XCTestCase {
         XCTAssertEqual(offset, currentOffset)
     }
 
-    func testHeldDirectionalInputStopsRestartingScrollAnimations() {
-        XCTAssertTrue(GuideDirectionalScrollPolicy.animatesScroll(
-            previousInputAt: nil,
-            inputAt: 10
-        ))
-        XCTAssertFalse(GuideDirectionalScrollPolicy.animatesScroll(
-            previousInputAt: 10,
-            inputAt: 10.1
-        ))
-        XCTAssertTrue(GuideDirectionalScrollPolicy.animatesScroll(
-            previousInputAt: 10,
-            inputAt: 10 + GuideDirectionalScrollPolicy.repeatInterval + 0.01
-        ))
-    }
-
     func testInitialFocusPresentationUsesPendingTargetBeforeUIKitFocusArrives() {
         XCTAssertEqual(
             GuideFocusPresentation.selectionProgramID(

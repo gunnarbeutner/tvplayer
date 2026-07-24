@@ -38,10 +38,12 @@ private struct GuideFocusProbeSnapshot: Codable, CustomStringConvertible {
     let version: Int
     let sampledAt: TimeInterval
     let focusedProgramID: String?
+    let focusedProgramChannelID: String?
     let focusedChannelID: String?
     let programMarkerIDs: [String]
     let channelMarkerIDs: [String]
     let displayedChannelIDs: [String]
+    let focusableChannelIDs: [String]
     let favoriteChannelIDs: [String]
     let channelRestorationPending: Bool
     let markerOverlapCount: Int
@@ -49,6 +51,7 @@ private struct GuideFocusProbeSnapshot: Codable, CustomStringConvertible {
 
     var description: String {
         "program=\(String(describing: focusedProgramID)) "
+            + "programChannel=\(String(describing: focusedProgramChannelID)) "
             + "channel=\(String(describing: focusedChannelID)) "
             + "programMarkers=\(programMarkerIDs) "
             + "channelMarkers=\(channelMarkerIDs) "
@@ -386,15 +389,19 @@ final class GuideFocusAutomationUITests: XCTestCase {
         continueAfterFailure = false
         samples = []
         app = XCUIApplication()
-        app.launchArguments = ["--guide-ui-testing"]
-        app.launchEnvironment = [
-            "TVPLAYER_TVH_URL": "http://guide-ui.invalid",
-            "TVPLAYER_TVH_USERNAME": "guide",
-            "TVPLAYER_TVH_PASSWORD": "guide",
-            "TVPLAYER_TVH_PROFILE": "pass",
-            "TVPLAYER_TVH_HTSP_PORT": "9982",
-            "TVPLAYER_TRANSIENT_ENVIRONMENT_PROFILE": "1",
-        ]
+        if name.contains("RealGuideData") {
+            app.launchArguments = ["--guide-real-data-ui-testing"]
+        } else {
+            app.launchArguments = ["--guide-ui-testing"]
+            app.launchEnvironment = [
+                "TVPLAYER_TVH_URL": "http://guide-ui.invalid",
+                "TVPLAYER_TVH_USERNAME": "guide",
+                "TVPLAYER_TVH_PASSWORD": "guide",
+                "TVPLAYER_TVH_PROFILE": "pass",
+                "TVPLAYER_TVH_HTSP_PORT": "9982",
+                "TVPLAYER_TRANSIENT_ENVIRONMENT_PROFILE": "1",
+            ]
+        }
         app.launch()
         probeElement = app.descendants(matching: .any)[probeIdentifier]
         XCTAssertTrue(
@@ -426,11 +433,10 @@ final class GuideFocusAutomationUITests: XCTestCase {
         _ = try waitForProgram(programID)
 
         for _ in 0..<4 {
-            XCUIRemote.shared.press(.left)
-            _ = try waitForChannel(channelID)
+            let returnProgramID = try moveFocusToChannel(channelID)
 
             XCUIRemote.shared.press(.right)
-            _ = try waitForProgram(programID)
+            _ = try waitForProgram(returnProgramID)
         }
 
         try assertNoMarkerViolations()
@@ -459,12 +465,90 @@ final class GuideFocusAutomationUITests: XCTestCase {
             ordinal
         )
 
-        XCUIRemote.shared.press(.left)
-        _ = try waitForChannel(channelID)
+        let returnProgramID = try moveFocusToChannel(channelID)
         XCUIRemote.shared.press(.right)
-        _ = try waitForProgram(programID)
+        _ = try waitForProgram(returnProgramID)
 
         try assertNoMarkerViolations()
+    }
+
+    func testEveryShortVerticalPressMovesExactlyOneProgram() throws {
+        let initial = try waitForProbe(timeout: 12) {
+            $0.focusedProgramChannelID == "guide-test-channel-01"
+                && $0.programMarkerIDs == [$0.focusedProgramID!]
+                && $0.displayedChannelIDs.count == 67
+                && $0.focusableChannelIDs.count >= 60
+        }
+        let focusableChannelIDs = initial.focusableChannelIDs
+        XCTAssertEqual(focusableChannelIDs.first, "guide-test-channel-01")
+
+        // Exercise discrete remote clicks independently from the held-button
+        // path. Waiting after every click prevents a later repeat from hiding
+        // a dropped single-step transition. Traverse the complete anonymized
+        // real guide in both directions twice.
+        for _ in 0..<2 {
+            for channelID in focusableChannelIDs.dropFirst() {
+                XCUIRemote.shared.press(.down)
+                _ = try waitForProgramOnChannel(channelID, timeout: 2)
+            }
+            for channelID in focusableChannelIDs.dropLast().reversed() {
+                XCUIRemote.shared.press(.up)
+                _ = try waitForProgramOnChannel(channelID, timeout: 2)
+            }
+        }
+
+        try assertNoMarkerViolations()
+    }
+
+    func testRealGuideDataEveryShortVerticalPressMovesExactlyOneProgram() throws {
+#if targetEnvironment(simulator)
+        throw XCTSkip("Requires the configured physical Apple TV guide data.")
+#else
+        let initial = try waitForProbe(timeout: 20) {
+            $0.focusedProgramID != nil
+                && $0.focusedProgramChannelID != nil
+                && $0.programMarkerIDs == [$0.focusedProgramID!]
+                && $0.focusableChannelIDs.count >= 3
+        }
+        let channelID = try XCTUnwrap(initial.focusedProgramChannelID)
+        let startIndex = try XCTUnwrap(
+            initial.focusableChannelIDs.firstIndex(of: channelID)
+        )
+
+        let step: Int
+        let availableSteps: Int
+        if initial.focusableChannelIDs.count - startIndex - 1 >= 2 {
+            step = 1
+            availableSteps = initial.focusableChannelIDs.count - startIndex - 1
+        } else {
+            step = -1
+            availableSteps = startIndex
+        }
+        let traversalLength = min(12, availableSteps)
+        XCTAssertGreaterThanOrEqual(traversalLength, 2)
+
+        let outwardIndices = (1...traversalLength).map {
+            startIndex + $0 * step
+        }
+        for index in outwardIndices {
+            XCUIRemote.shared.press(step > 0 ? .down : .up)
+            _ = try waitForProgramOnChannel(
+                initial.focusableChannelIDs[index],
+                timeout: 3
+            )
+        }
+        for index in outwardIndices.dropLast().reversed() {
+            XCUIRemote.shared.press(step > 0 ? .up : .down)
+            _ = try waitForProgramOnChannel(
+                initial.focusableChannelIDs[index],
+                timeout: 3
+            )
+        }
+        XCUIRemote.shared.press(step > 0 ? .up : .down)
+        _ = try waitForProgramOnChannel(channelID, timeout: 3)
+
+        try assertNoMarkerViolations()
+#endif
     }
 
     func testFavoriteReorderKeepsChannelFocusAndNeverShowsProgramMarker() throws {
@@ -477,9 +561,7 @@ final class GuideFocusAutomationUITests: XCTestCase {
         }
 
         let channelID = "guide-test-channel-12"
-        let programID = "guide-test-current-12"
-        XCUIRemote.shared.press(.left)
-        _ = try waitForChannel(channelID)
+        _ = try moveFocusToChannel(channelID)
 
         XCUIRemote.shared.press(.select)
         _ = try waitForProbe(timeout: 8) {
@@ -504,8 +586,44 @@ final class GuideFocusAutomationUITests: XCTestCase {
         try assertNoMarkerViolations()
 
         XCUIRemote.shared.press(.right)
-        _ = try waitForProgram(programID)
+        _ = try waitForProgramOnChannel(channelID, timeout: 8)
         try assertNoMarkerViolations()
+    }
+
+    /// The complete guide fixture deliberately retains the real historical
+    /// programmes inside the one-hour look-back window. Walk across every
+    /// one with independent clicks instead of assuming the current programme
+    /// is always the first item in its row.
+    private func moveFocusToChannel(
+        _ channelID: String,
+        maximumProgramMoves: Int = 64
+    ) throws -> String {
+        var programID = try XCTUnwrap(currentProbe().focusedProgramID)
+
+        for _ in 0...maximumProgramMoves {
+            XCUIRemote.shared.press(.left)
+            let next = try waitForProbe(timeout: 2) {
+                if $0.focusedChannelID == channelID {
+                    return $0.focusedProgramID == nil
+                        && $0.programMarkerIDs.isEmpty
+                        && $0.channelMarkerIDs == [channelID]
+                        && !$0.channelRestorationPending
+                }
+                return $0.focusedProgramID != nil
+                    && $0.focusedProgramID != programID
+                    && $0.focusedProgramChannelID == channelID
+                    && $0.programMarkerIDs == [$0.focusedProgramID!]
+                    && $0.channelMarkerIDs.isEmpty
+                    && !$0.channelRestorationPending
+            }
+            if next.focusedChannelID == channelID {
+                return programID
+            }
+            programID = try XCTUnwrap(next.focusedProgramID)
+        }
+
+        XCTFail("Channel focus was not reached after \(maximumProgramMoves + 1) Left presses.")
+        throw CocoaError(.coderReadCorrupt)
     }
 
     private func waitForProgram(
@@ -521,15 +639,16 @@ final class GuideFocusAutomationUITests: XCTestCase {
         }
     }
 
-    private func waitForChannel(
+    private func waitForProgramOnChannel(
         _ channelID: String,
-        timeout: TimeInterval = 8
+        timeout: TimeInterval
     ) throws -> GuideFocusProbeSnapshot {
         try waitForProbe(timeout: timeout) {
-            $0.focusedProgramID == nil
-                && $0.focusedChannelID == channelID
-                && $0.programMarkerIDs.isEmpty
-                && $0.channelMarkerIDs == [channelID]
+            $0.focusedProgramID != nil
+                && $0.focusedProgramChannelID == channelID
+                && $0.focusedChannelID == nil
+                && $0.programMarkerIDs == [$0.focusedProgramID!]
+                && $0.channelMarkerIDs.isEmpty
                 && !$0.channelRestorationPending
         }
     }

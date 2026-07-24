@@ -124,7 +124,21 @@ struct RootTabView: View {
         )
         let settings = ServerSettingsStore()
         let configuration = settings.configuration
-        let cachedSnapshot = if configuration.isComplete {
+        let startupDate = Date()
+        let cachedSnapshot = if let automationSnapshot =
+            TVGuideAutomation.guideSnapshot(at: startupDate) {
+            PersistedGuideSnapshot(
+                serverIdentifier: configuration.guideSnapshotIdentifier,
+                channelPreferencesIdentifier: configuration.channelPreferencesIdentifier,
+                serverName: automationSnapshot.serverName,
+                savedAt: startupDate,
+                guideCoverageEnd: automationSnapshot.channels.lazy
+                    .flatMap(\.programs)
+                    .map(\.end)
+                    .max(),
+                channels: automationSnapshot.channels
+            )
+        } else if configuration.isComplete {
             GuideSnapshotStore.loadSynchronously(serverIdentifier: configuration.guideSnapshotIdentifier)
                 ?? GuideSnapshotStore.loadSynchronously(
                     serverIdentifier: configuration.legacyGuideSnapshotIdentifier
@@ -135,7 +149,7 @@ struct RootTabView: View {
 
         _settings = StateObject(wrappedValue: settings)
         let channelPreferences: ChannelPreferencesStore
-        if TVGuideAutomation.isEnabled,
+        if TVGuideAutomation.usesFixture,
            let automationDefaults = UserDefaults(
                 suiteName: TVGuideAutomation.preferencesSuiteName
            ) {
@@ -163,7 +177,6 @@ struct RootTabView: View {
                 .compactMap(\.iconURL)
             ChannelLogoImageCache.shared.warmMemoryFromDisk(for: initialLogoURLs)
 
-            let startupDate = Date()
             let startupTimeline = GuideTimeline.surrounding(startupDate)
             let initialPrograms = (favoriteChannels + otherChannels).first?.programs.filter {
                 $0.end > startupTimeline.start && $0.start < startupTimeline.end

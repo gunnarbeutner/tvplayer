@@ -26,6 +26,7 @@ targetTemplates:
           - Resources/TVApp-iOS.entitlements
           - Resources/TVApp-macOS.entitlements
           - Resources/playback-replay.jsonl
+          - Resources/guide-focus-fixture.json
       - path: LICENSES/LGPL-2.1.txt
         buildPhase: resources
       - path: LICENSE
@@ -60,6 +61,8 @@ targets:
     sources:
       - path: TVAppTVOSPlayback
       - path: TVApp/Resources/playback-replay.jsonl
+        buildPhase: resources
+      - path: TVApp/Resources/guide-focus-fixture.json
         buildPhase: resources
     info:
       path: TVApp/Resources/Info-tvOS.plist
@@ -98,7 +101,7 @@ targets:
         HEADER_SEARCH_PATHS: "$(inherited) $(BUILT_PRODUCTS_DIR)/VLCKit.framework/Headers"
       configs:
         Release:
-          EXCLUDED_SOURCE_FILE_NAMES: playback-replay.jsonl
+          EXCLUDED_SOURCE_FILE_NAMES: playback-replay.jsonl guide-focus-fixture.json
     scheme:
       testTargets:
         - TVAppTests

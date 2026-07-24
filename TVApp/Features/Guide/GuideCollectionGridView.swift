@@ -119,18 +119,6 @@ enum GuideFocusScrollPosition {
     }
 }
 
-enum GuideDirectionalScrollPolicy {
-    static let repeatInterval: TimeInterval = 0.3
-
-    static func animatesScroll(
-        previousInputAt: TimeInterval?,
-        inputAt: TimeInterval
-    ) -> Bool {
-        guard let previousInputAt else { return true }
-        return inputAt - previousInputAt > repeatInterval
-    }
-}
-
 enum GuideFocusPresentation {
     static func selectionProgramID(
         requested: GuideProgram.ID?,
@@ -820,7 +808,6 @@ private final class GuideCollectionView: UICollectionView,
     private var channelIDAwaitingSnapshotFocus: GuideChannel.ID?
     private var channelReturnProgramIDAwaitingSnapshotFocus: GuideProgram.ID?
     private var navigationSignpostID: OSSignpostID?
-    private var lastDirectionalInputAt: TimeInterval?
 #if os(tvOS)
     private var pageCommandObserver: NSObjectProtocol?
 #endif
@@ -937,7 +924,6 @@ private final class GuideCollectionView: UICollectionView,
         focusRequestAwaitingStableLayout = nil
         requestFocus(
             on: request.programID,
-            animated: false,
             retriesRemaining: request.retriesRemaining,
             directly: request.directly
         )
@@ -1059,7 +1045,6 @@ private final class GuideCollectionView: UICollectionView,
             // because it sits outside this collection view's subtree.
             requestFocus(
                 on: focusRestoreTarget,
-                animated: false,
                 retriesRemaining: 8,
                 directly: true
             )
@@ -1068,7 +1053,7 @@ private final class GuideCollectionView: UICollectionView,
                   focusedProgramID != previousRequestedFocusedProgramID,
                   focusedProgramID != currentlyFocusedProgramID,
                   guideSnapshot?.indexPath(for: focusedProgramID) != nil {
-            requestFocus(on: focusedProgramID, animated: false, retriesRemaining: 4)
+            requestFocus(on: focusedProgramID, retriesRemaining: 4)
         }
     }
 
@@ -1112,7 +1097,7 @@ private final class GuideCollectionView: UICollectionView,
             Self.distance(from: reference, to: $0.program)
                 < Self.distance(from: reference, to: $1.program)
         }) else { return }
-        requestFocus(on: target.id, animated: true, retriesRemaining: 6, directly: true)
+        requestFocus(on: target.id, retriesRemaining: 6, directly: true)
     }
 
     private static func distance(from date: Date, to program: GuideProgram) -> TimeInterval {
@@ -1175,6 +1160,13 @@ private final class GuideCollectionView: UICollectionView,
         guideSnapshot = snapshot
         guideLayout.snapshot = snapshot
         guideLayout.now = currentNow
+#if DEBUG && os(tvOS)
+        TVGuideAutomationFocusRecorder.shared.updateFocusOrder(
+            channelIDs: zip(snapshot.channels, snapshot.rows).compactMap {
+                $0.1.isEmpty ? nil : $0.0.id
+            }
+        )
+#endif
         UIView.performWithoutAnimation {
             reloadData()
             layoutIfNeeded()
@@ -1202,7 +1194,7 @@ private final class GuideCollectionView: UICollectionView,
 
         let focusID = requestedFocusedProgramID ?? preferredProgramID
         if let focusID, snapshot.indexPath(for: focusID) != nil {
-            requestFocus(on: focusID, animated: false, retriesRemaining: 4)
+            requestFocus(on: focusID, retriesRemaining: 4)
         }
     }
 
@@ -1249,7 +1241,6 @@ private final class GuideCollectionView: UICollectionView,
 
     private func requestFocus(
         on programID: GuideProgram.ID,
-        animated: Bool,
         retriesRemaining: Int,
         directly: Bool = false
     ) {
@@ -1271,13 +1262,16 @@ private final class GuideCollectionView: UICollectionView,
         focusedChannelID = nil
         focusedChannelReturnProgramID = nil
         updateFocusAvailability()
-        // Custom layouts only materialize items returned by the visible
-        // attributes query. If the destination is outside that window, move
-        // there synchronously before asking the focus system for its cell;
-        // otherwise every retry can expire while the cell still does not
-        // exist (most visibly when navigating horizontally).
-        let destinationIsRealized = cellForItem(at: indexPath) != nil
-        guard reveal(item: item, animated: animated && destinationIsRealized) else {
+        // Explicit focus requests need stable presentation geometry. The
+        // custom layout realizes cells beyond the viewport, so a destination
+        // can exist while its reveal animation is still moving it. tvOS may
+        // ignore that focus request or leave the grid without a focused item.
+        guard let targetOffset = GuideFocusScrollPosition.targetOffset(
+            itemFrame: item.frame,
+            currentOffset: contentOffset,
+            viewportSize: bounds.size,
+            contentSize: contentSize
+        ) else {
             // UIKit will lay out the collection before its first visible
             // frame. Resume there instead of waiting for a timer, so the
             // correct focus appearance is present in that frame too.
@@ -1301,13 +1295,24 @@ private final class GuideCollectionView: UICollectionView,
             setNeedsLayout()
             return
         }
+        if targetOffset != contentOffset {
+            setContentOffset(targetOffset, animated: false)
+        }
         focusRequestAwaitingStableLayout = nil
         layoutIfNeeded()
         if directly,
            let targetCell = cellForItem(at: indexPath),
            let focusSystem = UIFocusSystem.focusSystem(for: targetCell) {
-            focusSystem.requestFocusUpdate(to: targetCell)
-            focusSystem.updateFocusIfNeeded()
+            // A direct UIFocusSystem request can be ignored when a custom
+            // collection layout has just materialized or repositioned the
+            // target. First invalidate this focus environment so its exact
+            // pending cell is consulted through preferredFocusEnvironments.
+            setNeedsFocusUpdate()
+            updateFocusIfNeeded()
+            if !targetCell.isFocused {
+                focusSystem.requestFocusUpdate(to: targetCell)
+                focusSystem.updateFocusIfNeeded()
+            }
         } else {
             setNeedsFocusUpdate()
             updateFocusIfNeeded()
@@ -1341,7 +1346,6 @@ private final class GuideCollectionView: UICollectionView,
                 guard !Task.isCancelled else { return }
                 self?.requestFocus(
                     on: programID,
-                    animated: false,
                     retriesRemaining: retriesRemaining - 1,
                     directly: directly
                 )
@@ -1413,20 +1417,12 @@ private final class GuideCollectionView: UICollectionView,
             "direction=%{public}s",
             directionName
         )
-
         // UIKit's own geometric focus resolution is unreliable once a card
         // spans an irregular width (e.g. a long programme): its candidate can
         // land on the wrong neighbour. Always resolve the destination from
         // the indexed snapshot instead of delegating to a native focus move.
-        let inputAt = ProcessInfo.processInfo.systemUptime
-        let animatesScroll = GuideDirectionalScrollPolicy.animatesScroll(
-            previousInputAt: lastDirectionalInputAt,
-            inputAt: inputAt
-        )
-        lastDirectionalInputAt = inputAt
         requestFocus(
             on: destination,
-            animated: animatesScroll,
             retriesRemaining: 8,
             directly: true
         )
@@ -1597,7 +1593,6 @@ private final class GuideCollectionView: UICollectionView,
             else { return }
             self.requestFocus(
                 on: destination,
-                animated: true,
                 retriesRemaining: 8,
                 directly: true
             )
@@ -1676,7 +1671,6 @@ private final class GuideCollectionView: UICollectionView,
                       let item = snapshot.item(at: indexPath)
                 else { return }
                 _ = self.reveal(item: item, animated: false)
-                self.lastDirectionalInputAt = nil
             } catch {
                 // A newer focus update superseded this correction.
             }
@@ -1887,7 +1881,6 @@ private final class GuideCollectionView: UICollectionView,
                     onMoveRight: { [weak self] programID in
                         self?.requestFocus(
                             on: programID,
-                            animated: true,
                             retriesRemaining: 8,
                             directly: true
                         )
@@ -2220,6 +2213,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
 #if DEBUG && os(tvOS)
         TVGuideAutomationFocusRecorder.shared.updateProgram(
             id: item.id,
+            channelID: item.program.channelID,
             isFocused: isFocused,
             presentsMarker: presentsFocus
         )
