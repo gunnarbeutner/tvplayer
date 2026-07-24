@@ -280,6 +280,34 @@ final class PlaybackAutomationUITests: XCTestCase {
         try exerciseRapidBidirectionalSeekBurst(startingWith: current)
     }
 
+    func testHeldDirectionalSeekCanResumeWithSelectAndPlay() throws {
+        launchReplay()
+        var current = try waitForReadyPlayback(timeout: 8)
+        current = try assertContinuousPlayback(from: current, duration: 6)
+
+        let cases: [
+            (
+                direction: XCUIRemote.Button,
+                resume: XCUIRemote.Button,
+                description: String
+            )
+        ] = [
+            (.left, .select, "Left then Select"),
+            (.left, .playPause, "Left then Play"),
+            (.right, .select, "Right then Select"),
+            (.right, .playPause, "Right then Play"),
+        ]
+
+        for testCase in cases {
+            current = try exerciseHeldSeekResume(
+                direction: testCase.direction,
+                resumeButton: testCase.resume,
+                description: testCase.description,
+                startingWith: current
+            )
+        }
+    }
+
     func testLiveRapidBidirectionalSeekBurstRetainsConnectionAndAudio() throws {
         launchUsingStoredConfiguration()
         guard let current = try waitForProbeIfAvailable(timeout: 20, where: Self.isReady)
@@ -318,6 +346,51 @@ final class PlaybackAutomationUITests: XCTestCase {
         XCTAssertEqual(settled.recoveryCount, recoveryCount)
         XCTAssertGreaterThanOrEqual(settled.timeshiftWindowSeconds, minimumRetainedWindow)
         _ = try assertContinuousPlayback(from: settled, duration: 5)
+    }
+
+    private func exerciseHeldSeekResume(
+        direction: XCUIRemote.Button,
+        resumeButton: XCUIRemote.Button,
+        description: String,
+        startingWith baseline: PlaybackProbeSnapshot
+    ) throws -> PlaybackProbeSnapshot {
+        XCUIRemote.shared.press(direction, forDuration: 1.2)
+
+        let confirmation = app.buttons["Confirm seek"]
+        XCTAssertTrue(
+            confirmation.waitForExistence(timeout: 2),
+            "\(description) did not leave the held seek awaiting confirmation."
+        )
+
+        XCUIRemote.shared.press(resumeButton)
+        _ = try waitForProbe(timeout: 3) {
+            $0.concealed
+                || $0.navigationState != baseline.navigationState
+                || abs($0.liveDelaySeconds - baseline.liveDelaySeconds) > 1
+                || $0.displayedPictures < baseline.displayedPictures
+                || $0.playedAudioBuffers < baseline.playedAudioBuffers
+        }
+        let resumed = try waitForProbe(timeout: 8) {
+            Self.isReady($0)
+                && $0.isPlaying
+                && $0.engineState == "playing"
+                && !$0.concealed
+        }
+        XCTAssertFalse(
+            confirmation.exists,
+            "\(description) left the held seek confirmation active."
+        )
+        XCTAssertEqual(
+            resumed.presentationID,
+            baseline.presentationID,
+            "\(description) replaced the playback connection."
+        )
+        XCTAssertEqual(
+            resumed.recoveryCount,
+            baseline.recoveryCount,
+            "\(description) triggered playback recovery."
+        )
+        return try assertContinuousPlayback(from: resumed, duration: 2)
     }
 
     private func exerciseRepeatedBidirectionalSeeking(

@@ -509,7 +509,7 @@ struct PlaybackView: View {
 #if os(tvOS)
             if isRemoteSeekPreviewActive {
                 Button {
-                    _ = confirmRemoteSeekPreview()
+                    confirmSeekFromFocusedRemoteButton()
                 } label: {
                     Color.clear
                         .contentShape(Rectangle())
@@ -630,6 +630,8 @@ struct PlaybackView: View {
 #if os(tvOS)
         .onAppear {
             TVRemoteCommandCenter.playerExitHandler = handlePlayerExitCommand
+            TVRemoteCommandCenter.playerPlayPauseHandler =
+                handlePlayerPlayPauseCommand
             TVRemoteCommandCenter.seekHoldHandler = handleRemoteSeekPress
             // Playback UI automation installs a UIKit press recognizer which
             // forwards the same begin/end transitions. Listening through
@@ -661,6 +663,7 @@ struct PlaybackView: View {
 #endif
 #if os(tvOS)
             TVRemoteCommandCenter.playerExitHandler = nil
+            TVRemoteCommandCenter.playerPlayPauseHandler = nil
             TVRemoteCommandCenter.seekHoldHandler = nil
             TVRemoteSeekInputBridge.shared.stop()
 #endif
@@ -676,9 +679,11 @@ struct PlaybackView: View {
             }
         }
         .televisionPlayPauseCommand {
-            if !confirmSeekPreviewIfNeeded() {
+#if os(tvOS)
+            if !handlePlayerPlayPauseCommand() {
                 toggleTimelinePlayback()
             }
+#endif
         }
         .platformMoveCommand { direction in
             switch direction {
@@ -1421,6 +1426,27 @@ struct PlaybackView: View {
     private func confirmRemoteSeekPreview() -> Bool {
         guard isRemoteSeekPreviewActive else { return false }
         return commitSeekPreview()
+    }
+
+    private func confirmSeekFromFocusedRemoteButton() {
+        guard confirmRemoteSeekPreview() else { return }
+
+        // A focused tvOS Button treats Play/Pause as a primary action and the
+        // same physical press then also reaches onPlayPauseCommand. Suppress
+        // only that duplicate delivery so confirming a held seek cannot
+        // immediately pause playback again.
+        TVRemoteCommandCenter.ignoreDuplicatePlayPauseCommands()
+    }
+
+    private func handlePlayerPlayPauseCommand() -> Bool {
+        if TVRemoteCommandCenter.ignoresDuplicatePlayPauseCommand {
+            return true
+        }
+        if confirmRemoteSeekPreview() {
+            TVRemoteCommandCenter.ignoreDuplicatePlayPauseCommands()
+            return true
+        }
+        return false
     }
 #endif
 

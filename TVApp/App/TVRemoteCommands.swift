@@ -28,9 +28,21 @@ extension Notification.Name {
 enum TVRemoteCommandCenter {
     static var exitHandler: (() -> Bool)?
     static var playerExitHandler: (() -> Bool)?
+    static var playerPlayPauseHandler: (() -> Bool)?
     static var pageHandler: ((TVPageDirection) -> Bool)?
     static var playPauseHandler: (() -> Bool)?
     static var seekHoldHandler: ((TVPlayerSeekDirection, Bool) -> Bool)?
+
+    private static var ignoresPlayPauseCommandsUntil: TimeInterval = 0
+
+    static var ignoresDuplicatePlayPauseCommand: Bool {
+        ProcessInfo.processInfo.systemUptime < ignoresPlayPauseCommandsUntil
+    }
+
+    static func ignoreDuplicatePlayPauseCommands() {
+        ignoresPlayPauseCommandsUntil =
+            ProcessInfo.processInfo.systemUptime + 0.4
+    }
 }
 
 /// Receives physical Siri Remote and keyboard button transitions directly.

@@ -124,6 +124,14 @@ final class NowPlayingCoordinator {
             guard let self, let playback = self.playback else {
                 return .noActionableNowPlayingItem
             }
+#if os(tvOS)
+            if TVRemoteCommandCenter.playerPlayPauseHandler?() == true {
+                return .success
+            }
+            if TVRemoteCommandCenter.ignoresDuplicatePlayPauseCommand {
+                return .success
+            }
+#endif
             if self.ownsTransportCommands(playback) {
                 playback.engine.play()
                 return .success
@@ -134,6 +142,14 @@ final class NowPlayingCoordinator {
             guard let self, let playback = self.playback else {
                 return .noActionableNowPlayingItem
             }
+#if os(tvOS)
+            if TVRemoteCommandCenter.playerPlayPauseHandler?() == true {
+                return .success
+            }
+            if TVRemoteCommandCenter.ignoresDuplicatePlayPauseCommand {
+                return .success
+            }
+#endif
             if self.ownsTransportCommands(playback) {
                 guard playback.engine.canPause else { return .commandFailed }
                 playback.engine.pause()
@@ -145,6 +161,14 @@ final class NowPlayingCoordinator {
             guard let self, let playback = self.playback else {
                 return .noActionableNowPlayingItem
             }
+#if os(tvOS)
+            if TVRemoteCommandCenter.playerPlayPauseHandler?() == true {
+                return .success
+            }
+            if TVRemoteCommandCenter.ignoresDuplicatePlayPauseCommand {
+                return .success
+            }
+#endif
             if self.ownsTransportCommands(playback) {
                 playback.engine.togglePlayPause()
                 return .success
