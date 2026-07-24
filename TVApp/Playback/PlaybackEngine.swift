@@ -334,6 +334,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private var cachedAddressProxy: CachedAddressProxy?
     private var activePreparationID: UUID?
     private var pendingSnapshotURL: URL?
+    private var pendingRecordingSeek: PendingRecordingSeek?
+    private var pendingRecordingSeekTimeoutTask: Task<Void, Never>?
 
     override init() {
         let collectsPlaybackDiagnostics =
@@ -429,6 +431,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         recoveryReason = nil
         recoveryAttempt = 0
         clearPausedFrame()
+        cancelPendingRecordingSeek()
         setState(.preparing)
         logger.info("Preparing stream from \(request.url.host ?? "unknown host", privacy: .public)")
 
@@ -628,6 +631,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         pipelineRecoveryID = nil
         recoveryReason = nil
         recoveryAttempt = 0
+        cancelPendingRecordingSeek()
         closeActiveNativeVLCReader()
         mediaPlayer.stop()
 #if !os(macOS)
@@ -791,8 +795,48 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         guard isSeekable else { return }
         let upperBound = durationSeconds ?? seconds
         let target = min(max(0, seconds), upperBound)
-        mediaPlayer.time = VLCTime(number: NSNumber(value: target * 1_000))
-        refreshPlaybackInformation()
+        let now = Date()
+        if case .recording = activeRequest?.kind {
+            pendingRecordingSeek = PendingRecordingSeek(
+                targetSeconds: target,
+                requestedAt: now
+            )
+            elapsedSeconds = target
+            armPendingRecordingSeekTimeout()
+        }
+
+        let command = RecordingSeekPolicy.command(
+            for: activeRequest?.kind ?? .recording(isGrowing: true),
+            targetSeconds: target,
+            durationSeconds: durationSeconds
+        )
+        switch command {
+        case let .absoluteTime(milliseconds):
+            mediaPlayer.time = VLCTime(
+                number: NSNumber(value: milliseconds)
+            )
+        case let .normalizedPosition(position):
+            mediaPlayer.position = position
+        }
+    }
+
+    private func armPendingRecordingSeekTimeout() {
+        pendingRecordingSeekTimeoutTask?.cancel()
+        pendingRecordingSeekTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(
+                for: .seconds(PendingRecordingSeek.timeoutSeconds)
+            )
+            guard !Task.isCancelled, let self,
+                  self.pendingRecordingSeek != nil
+            else { return }
+            self.refreshPlaybackInformation()
+        }
+    }
+
+    private func cancelPendingRecordingSeek() {
+        pendingRecordingSeek = nil
+        pendingRecordingSeekTimeoutTask?.cancel()
+        pendingRecordingSeekTimeoutTask = nil
     }
 
     func returnToLive() {
@@ -890,7 +934,32 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 
         if updatedSeekable, !isLive {
             let updatedElapsed = max(0, TimeInterval(mediaPlayer.time.intValue) / 1_000)
-            if abs(updatedElapsed - elapsedSeconds) >= 0.2 { elapsedSeconds = updatedElapsed }
+            if let pendingRecordingSeek {
+                switch pendingRecordingSeek.resolution(
+                    observedSeconds: updatedElapsed,
+                    at: date
+                ) {
+                case let .pending(displayedSeconds):
+                    if abs(displayedSeconds - elapsedSeconds) >= 0.2 {
+                        elapsedSeconds = displayedSeconds
+                    }
+                case let .landed(displayedSeconds):
+                    cancelPendingRecordingSeek()
+                    if abs(displayedSeconds - elapsedSeconds) >= 0.2 {
+                        elapsedSeconds = displayedSeconds
+                    }
+                case let .timedOut(displayedSeconds):
+                    logger.error(
+                        "Recording seek to \(pendingRecordingSeek.targetSeconds, privacy: .public)s did not land"
+                    )
+                    cancelPendingRecordingSeek()
+                    if abs(displayedSeconds - elapsedSeconds) >= 0.2 {
+                        elapsedSeconds = displayedSeconds
+                    }
+                }
+            } else if abs(updatedElapsed - elapsedSeconds) >= 0.2 {
+                elapsedSeconds = updatedElapsed
+            }
 
             let rawLength = mediaPlayer.media?.length.value?.doubleValue ?? 0
             let mediaDuration: TimeInterval? = rawLength > 0 ? rawLength / 1_000 : nil

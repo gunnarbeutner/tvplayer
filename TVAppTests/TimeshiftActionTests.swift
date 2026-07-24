@@ -624,6 +624,55 @@ final class TimeshiftActionTests: XCTestCase {
         )
     }
 
+    func testCompletedRecordingSeekUsesNormalizedPosition() {
+        XCTAssertEqual(
+            RecordingSeekPolicy.command(
+                for: .recording(isGrowing: false),
+                targetSeconds: 45,
+                durationSeconds: 180
+            ),
+            .normalizedPosition(0.25)
+        )
+    }
+
+    func testGrowingRecordingSeekKeepsAbsoluteTime() {
+        XCTAssertEqual(
+            RecordingSeekPolicy.command(
+                for: .recording(isGrowing: true),
+                targetSeconds: 45,
+                durationSeconds: 180
+            ),
+            .absoluteTime(milliseconds: 45_000)
+        )
+    }
+
+    func testPendingRecordingSeekKeepsRequestedTimeUntilVLCActuallyLands() {
+        let requestedAt = Date(timeIntervalSinceReferenceDate: 1_000)
+        let pending = PendingRecordingSeek(targetSeconds: 45, requestedAt: requestedAt)
+
+        XCTAssertEqual(
+            pending.resolution(
+                observedSeconds: 10,
+                at: requestedAt.addingTimeInterval(0.5)
+            ),
+            .pending(displayedSeconds: 45)
+        )
+        XCTAssertEqual(
+            pending.resolution(
+                observedSeconds: 44.25,
+                at: requestedAt.addingTimeInterval(0.75)
+            ),
+            .landed(displayedSeconds: 44.25)
+        )
+        XCTAssertEqual(
+            pending.resolution(
+                observedSeconds: 10,
+                at: requestedAt.addingTimeInterval(2.5)
+            ),
+            .timedOut(displayedSeconds: 10)
+        )
+    }
+
     func testLiveOnlyHTTPDoesNotExposeTimeshiftActions() {
         XCTAssertFalse(
             PlaybackCapabilityPolicy.isSeekable(

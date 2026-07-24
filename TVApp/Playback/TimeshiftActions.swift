@@ -151,6 +151,58 @@ enum PlaybackCapabilityPolicy {
     }
 }
 
+enum RecordingSeekCommand: Equatable {
+    case absoluteTime(milliseconds: Int)
+    case normalizedPosition(Double)
+}
+
+enum RecordingSeekPolicy {
+    static func command(
+        for kind: PlaybackRequestKind,
+        targetSeconds: TimeInterval,
+        durationSeconds: TimeInterval?
+    ) -> RecordingSeekCommand {
+        if case .recording(isGrowing: false) = kind,
+           let durationSeconds,
+           durationSeconds.isFinite,
+           durationSeconds > 0 {
+            return .normalizedPosition(
+                min(max(0, targetSeconds / durationSeconds), 1)
+            )
+        }
+        return .absoluteTime(
+            milliseconds: Int((max(0, targetSeconds) * 1_000).rounded())
+        )
+    }
+}
+
+enum PendingRecordingSeekResolution: Equatable {
+    case pending(displayedSeconds: TimeInterval)
+    case landed(displayedSeconds: TimeInterval)
+    case timedOut(displayedSeconds: TimeInterval)
+}
+
+struct PendingRecordingSeek: Equatable {
+    static let landingToleranceSeconds: TimeInterval = 1.5
+    static let timeoutSeconds: TimeInterval = 2
+
+    let targetSeconds: TimeInterval
+    let requestedAt: Date
+
+    func resolution(
+        observedSeconds: TimeInterval,
+        at date: Date
+    ) -> PendingRecordingSeekResolution {
+        if abs(observedSeconds - targetSeconds) <= Self.landingToleranceSeconds {
+            return .landed(displayedSeconds: observedSeconds)
+        }
+        if date.timeIntervalSince(requestedAt) >= Self.timeoutSeconds {
+            return .timedOut(displayedSeconds: observedSeconds)
+        }
+        return .pending(displayedSeconds: targetSeconds)
+    }
+}
+
 struct PlaybackOutputCounters: Equatable {
     let displayedPictures: Int
     let playedAudioBuffers: Int
