@@ -267,6 +267,30 @@ final class GuideGridLayoutTests: XCTestCase {
         XCTAssertEqual(stableOffset.y, 0)
     }
 
+    func testChannelFocusRevealScrollsReorderedHeaderIntoTheRealizedWindow() throws {
+        let offset = try XCTUnwrap(GuideFocusScrollPosition.channelHeaderTargetOffset(
+            section: 5,
+            currentOffset: CGPoint(x: 720, y: 1_175),
+            viewportSize: CGSize(width: 1_920, height: 600),
+            contentSize: CGSize(width: 4_000, height: 2_000)
+        ))
+
+        XCTAssertEqual(offset.x, 720)
+        XCTAssertEqual(offset.y, CGFloat(5) * GuideGridMetrics.rowHeight)
+    }
+
+    func testChannelFocusRevealKeepsVisibleHeaderStationary() throws {
+        let currentOffset = CGPoint(x: 720, y: 300)
+        let offset = try XCTUnwrap(GuideFocusScrollPosition.channelHeaderTargetOffset(
+            section: 5,
+            currentOffset: currentOffset,
+            viewportSize: CGSize(width: 1_920, height: 600),
+            contentSize: CGSize(width: 4_000, height: 2_000)
+        ))
+
+        XCTAssertEqual(offset, currentOffset)
+    }
+
     func testHeldDirectionalInputStopsRestartingScrollAnimations() {
         XCTAssertTrue(GuideDirectionalScrollPolicy.animatesScroll(
             previousInputAt: nil,
@@ -291,6 +315,12 @@ final class GuideGridLayoutTests: XCTestCase {
             ),
             "favorite-current-show"
         )
+        XCTAssertNil(GuideFocusPresentation.selectionProgramID(
+            requested: "favorite-current-show",
+            pending: nil,
+            preferred: "fallback-show",
+            isChannelFocusActive: true
+        ))
         XCTAssertTrue(GuideFocusPresentation.showsPendingFocus(
             programID: "favorite-current-show",
             pendingProgramID: "favorite-current-show",
@@ -300,6 +330,11 @@ final class GuideGridLayoutTests: XCTestCase {
             programID: "favorite-current-show",
             pendingProgramID: "favorite-current-show",
             currentlyFocusedProgramID: "previous-show"
+        ))
+        XCTAssertFalse(GuideFocusPresentation.presentsProgramFocus(
+            isUIKitFocused: true,
+            showsPendingFocus: false,
+            isChannelFocusActive: true
         ))
     }
 

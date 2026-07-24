@@ -80,6 +80,39 @@ enum GuideFocusScrollPosition {
         return target
     }
 
+    static func channelHeaderTargetOffset(
+        section: Int,
+        currentOffset: CGPoint,
+        viewportSize: CGSize,
+        contentSize: CGSize
+    ) -> CGPoint? {
+        guard hasStableViewport(viewportSize) else { return nil }
+
+        let headerFrame = CGRect(
+            x: currentOffset.x,
+            y: GuideGridMetrics.headerHeight
+                + CGFloat(section) * GuideGridMetrics.rowHeight
+                + GuideGridMetrics.rowInset,
+            width: GuideGridMetrics.channelWidth,
+            height: GuideGridMetrics.cardHeight
+        )
+        var target = currentOffset
+        let visibleTop = target.y + GuideGridMetrics.headerHeight
+        let visibleBottom = target.y + viewportSize.height
+        if headerFrame.minY < visibleTop {
+            target.y = max(
+                0,
+                headerFrame.minY - GuideGridMetrics.headerHeight - GuideGridMetrics.rowInset
+            )
+        } else if headerFrame.maxY > visibleBottom {
+            target.y = min(
+                max(0, contentSize.height - viewportSize.height),
+                headerFrame.maxY - viewportSize.height + GuideGridMetrics.rowInset
+            )
+        }
+        return target
+    }
+
     static func hasStableViewport(_ viewportSize: CGSize) -> Bool {
         viewportSize.width > 0
             && viewportSize.height >= GuideGridMetrics.headerHeight + GuideGridMetrics.rowHeight
@@ -102,9 +135,11 @@ enum GuideFocusPresentation {
     static func selectionProgramID(
         requested: GuideProgram.ID?,
         pending: GuideProgram.ID?,
-        preferred: GuideProgram.ID?
+        preferred: GuideProgram.ID?,
+        isChannelFocusActive: Bool = false
     ) -> GuideProgram.ID? {
-        pending ?? requested ?? preferred
+        guard !isChannelFocusActive else { return nil }
+        return pending ?? requested ?? preferred
     }
 
     static func showsPendingFocus(
@@ -113,6 +148,14 @@ enum GuideFocusPresentation {
         currentlyFocusedProgramID: GuideProgram.ID?
     ) -> Bool {
         currentlyFocusedProgramID == nil && programID == pendingProgramID
+    }
+
+    static func presentsProgramFocus(
+        isUIKitFocused: Bool,
+        showsPendingFocus: Bool,
+        isChannelFocusActive: Bool
+    ) -> Bool {
+        !isChannelFocusActive && (isUIKitFocused || showsPendingFocus)
     }
 }
 
@@ -975,7 +1018,7 @@ private final class GuideCollectionView: UICollectionView,
                 retriesRemaining: 8,
                 directly: true
             )
-        } else if focusedChannelID == nil,
+        } else if !isChannelFocusActive,
                   let focusedProgramID,
                   focusedProgramID != previousRequestedFocusedProgramID,
                   focusedProgramID != currentlyFocusedProgramID,
@@ -1123,6 +1166,20 @@ private final class GuideCollectionView: UICollectionView,
             .compactMap { $0 as? GuideProgrammeCollectionCell }
             .first(where: \.isFocused)?
             .programID
+    }
+
+    private var currentlyFocusedChannelID: GuideChannel.ID? {
+        visibleSupplementaryViews(ofKind: GuideCollectionElementKind.channelHeader)
+            .lazy
+            .compactMap { $0 as? GuideChannelHeaderReusableView }
+            .first(where: \.isFocused)?
+            .representedChannelID
+    }
+
+    private var isChannelFocusActive: Bool {
+        pendingChannelProgramID != nil
+            || focusedChannelID != nil
+            || currentlyFocusedChannelID != nil
     }
 
     private func currentProgramID(for channelID: GuideChannel.ID) -> GuideProgram.ID? {
@@ -1338,6 +1395,14 @@ private final class GuideCollectionView: UICollectionView,
         guard let section = guideSnapshot?.channels.firstIndex(where: { $0.id == channelID })
         else { return }
         let headerIndexPath = IndexPath(item: 0, section: section)
+        guard revealChannelHeader(at: section) else {
+            scheduleChannelFocusRetry(
+                channelID,
+                returningTo: programID,
+                retriesRemaining: retriesRemaining
+            )
+            return
+        }
         layoutIfNeeded()
         guard let header = supplementaryView(
             forElementKind: GuideCollectionElementKind.channelHeader,
@@ -1364,11 +1429,29 @@ private final class GuideCollectionView: UICollectionView,
         updateFocusIfNeeded()
         focusSystem.requestFocusUpdate(to: header)
         focusSystem.updateFocusIfNeeded()
+        guard !header.isFocused else {
+            channelFocusRetryTask?.cancel()
+            channelFocusRetryTask = nil
+            return
+        }
         scheduleChannelFocusRetry(
             channelID,
             returningTo: programID,
             retriesRemaining: retriesRemaining
         )
+    }
+
+    private func revealChannelHeader(at section: Int) -> Bool {
+        guard let target = GuideFocusScrollPosition.channelHeaderTargetOffset(
+            section: section,
+            currentOffset: contentOffset,
+            viewportSize: bounds.size,
+            contentSize: contentSize
+        ) else { return false }
+        if target != contentOffset {
+            setContentOffset(target, animated: false)
+        }
+        return true
     }
 
     private func scheduleChannelFocusRetry(
@@ -1461,6 +1544,7 @@ private final class GuideCollectionView: UICollectionView,
 
     private func allowsFocus(on programID: GuideProgram.ID) -> Bool {
         guard isGuideEnabled else { return false }
+        guard !isChannelFocusActive else { return false }
         guard let pendingFocusProgramID else { return true }
         return pendingFocusProgramID == programID
     }
@@ -1531,7 +1615,8 @@ private final class GuideCollectionView: UICollectionView,
         let selectionProgramID = GuideFocusPresentation.selectionProgramID(
             requested: requestedFocusedProgramID,
             pending: pendingFocusProgramID,
-            preferred: preferredProgramID
+            preferred: preferredProgramID,
+            isChannelFocusActive: isChannelFocusActive
         )
         for case let cell as GuideProgrammeCollectionCell in visibleCells {
             cell.updateFocusState(
@@ -1541,7 +1626,8 @@ private final class GuideCollectionView: UICollectionView,
                     programID: cell.programID,
                     pendingProgramID: pendingFocusProgramID,
                     currentlyFocusedProgramID: currentProgramID
-                )
+                ),
+                isChannelFocusActive: isChannelFocusActive
             )
         }
         if !isGuideEnabled, currentlyFocusedProgramID != nil {
@@ -1554,7 +1640,8 @@ private final class GuideCollectionView: UICollectionView,
         let selectionProgramID = GuideFocusPresentation.selectionProgramID(
             requested: requestedFocusedProgramID,
             pending: pendingFocusProgramID,
-            preferred: preferredProgramID
+            preferred: preferredProgramID,
+            isChannelFocusActive: isChannelFocusActive
         )
         cell.configure(
             item: item,
@@ -1567,6 +1654,7 @@ private final class GuideCollectionView: UICollectionView,
                 pendingProgramID: pendingFocusProgramID,
                 currentlyFocusedProgramID: currentProgramID
             ),
+            isChannelFocusActive: isChannelFocusActive,
             isFocusAllowed: allowsFocus(on: item.id),
             leadingOcclusion: leadingOcclusion(for: item),
             onFocused: { [weak self] in self?.didFocus(programID: item.id) },
@@ -1623,7 +1711,7 @@ private final class GuideCollectionView: UICollectionView,
         // UICollectionView may retain its last selected programme while focus is
         // on a supplementary channel header. Do not let a Select press intended
         // for that header activate the stale programme selection.
-        guard focusedChannelID == nil else {
+        guard !isChannelFocusActive else {
             collectionView.deselectItem(at: indexPath, animated: false)
             return
         }
@@ -1677,7 +1765,6 @@ private final class GuideCollectionView: UICollectionView,
                     },
                     onFocused: { [weak self, weak view] returnProgramID in
                         guard let self else { return }
-
                         // A favourite toggle rebuilds and reorders the guide
                         // snapshot. Its focus restoration is only needed until
                         // a channel header actually acquires focus. Keeping the
@@ -1686,8 +1773,12 @@ private final class GuideCollectionView: UICollectionView,
                         // focus back to the channel they just toggled.
                         self.channelFocusRetryTask?.cancel()
                         self.channelFocusRetryTask = nil
+                        self.focusRetryTask?.cancel()
+                        self.focusRetryTask = nil
                         self.channelIDAwaitingSnapshotFocus = nil
                         self.channelReturnProgramIDAwaitingSnapshotFocus = nil
+                        self.pendingFocusProgramID = nil
+                        self.focusRequestAwaitingStableLayout = nil
                         self.pendingChannelProgramID = nil
                         self.focusedChannelID = channel.id
                         let selectedProgramID = self.currentProgramID(for: channel.id)
@@ -1757,6 +1848,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
     private var isPlaying = false
     private var isHeaderSelection = false
     private var showsPendingFocusAppearance = false
+    private var isChannelFocusActive = false
     private var leadingOcclusion: CGFloat = 0
     private var consumedDirectionalPressTypes: Set<Int> = []
     private var onFocused: () -> Void = {}
@@ -1808,6 +1900,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
         isPlaying = false
         isHeaderSelection = false
         showsPendingFocusAppearance = false
+        isChannelFocusActive = false
         onFocused = {}
         onActivate = {}
         onPlay = {}
@@ -1822,6 +1915,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
         isPlaying: Bool,
         isHeaderSelection: Bool,
         showsPendingFocusAppearance: Bool,
+        isChannelFocusActive: Bool,
         isFocusAllowed: Bool,
         leadingOcclusion: CGFloat,
         onFocused: @escaping () -> Void,
@@ -1835,6 +1929,7 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
         self.isPlaying = isPlaying
         self.isHeaderSelection = isHeaderSelection
         self.showsPendingFocusAppearance = showsPendingFocusAppearance
+        self.isChannelFocusActive = isChannelFocusActive
         self.isFocusAllowed = isFocusAllowed
         self.leadingOcclusion = leadingOcclusion
         self.onFocused = onFocused
@@ -1851,13 +1946,16 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
     func updateFocusState(
         isFocusAllowed: Bool,
         isHeaderSelection: Bool,
-        showsPendingFocusAppearance: Bool
+        showsPendingFocusAppearance: Bool,
+        isChannelFocusActive: Bool
     ) {
         let appearanceChanged = self.isHeaderSelection != isHeaderSelection
             || self.showsPendingFocusAppearance != showsPendingFocusAppearance
+            || self.isChannelFocusActive != isChannelFocusActive
         self.isFocusAllowed = isFocusAllowed
         self.isHeaderSelection = isHeaderSelection
         self.showsPendingFocusAppearance = showsPendingFocusAppearance
+        self.isChannelFocusActive = isChannelFocusActive
         if appearanceChanged { updateAppearance(animated: false) }
     }
 
@@ -1971,7 +2069,11 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
     private func updateAppearance(animated: Bool) {
         guard let item else { return }
         let phase = item.program.phase(at: now)
-        let presentsFocus = isFocused || showsPendingFocusAppearance
+        let presentsFocus = GuideFocusPresentation.presentsProgramFocus(
+            isUIKitFocused: isFocused,
+            showsPendingFocus: showsPendingFocusAppearance,
+            isChannelFocusActive: isChannelFocusActive
+        )
         let background: UIColor
         if presentsFocus {
             background = UIColor(AppTheme.focused)
