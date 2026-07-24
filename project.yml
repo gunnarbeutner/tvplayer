@@ -25,6 +25,7 @@ targetTemplates:
           - Resources/TVApp.entitlements
           - Resources/TVApp-iOS.entitlements
           - Resources/TVApp-macOS.entitlements
+          - Resources/playback-replay.jsonl
       - path: LICENSES/LGPL-2.1.txt
         buildPhase: resources
       - path: LICENSE
@@ -58,6 +59,8 @@ targets:
         embed: true
     sources:
       - path: TVAppTVOSPlayback
+      - path: TVApp/Resources/playback-replay.jsonl
+        buildPhase: resources
     info:
       path: TVApp/Resources/Info-tvOS.plist
       properties:
@@ -67,6 +70,7 @@ targets:
           - _tvplayer._tcp
           - _tvplayer-guide._tcp
         NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
         GCSupportedGameControllers:
           - ProfileName: DirectionalGamepad
@@ -92,9 +96,13 @@ targets:
         CODE_SIGN_ENTITLEMENTS: TVApp/Resources/TVApp.entitlements
         SWIFT_OBJC_BRIDGING_HEADER: TVAppTVOSPlayback/TVApp-Bridging-Header.h
         HEADER_SEARCH_PATHS: "$(inherited) $(BUILT_PRODUCTS_DIR)/VLCKit.framework/Headers"
+      configs:
+        Release:
+          EXCLUDED_SOURCE_FILE_NAMES: playback-replay.jsonl
     scheme:
       testTargets:
         - TVAppTests
+        - TVAppPlaybackUITests
 
   TVAppTopShelf:
     type: app-extension
@@ -132,6 +140,7 @@ targets:
           - _tvplayer._tcp
           - _tvplayer-guide._tcp
         NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
@@ -172,6 +181,7 @@ targets:
           - _tvplayer._tcp
           - _tvplayer-guide._tcp
         NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
     settings:
       base:
@@ -191,6 +201,19 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer.tests
+
+  TVAppPlaybackUITests:
+    type: bundle.ui-testing
+    platform: tvOS
+    sources:
+      - path: TVAppPlaybackUITests
+    dependencies:
+      - target: TVApp
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: true
+        PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer.playback-ui-tests
+        TEST_TARGET_NAME: TVApp
 
   TVAppTests-iOS:
     templates:

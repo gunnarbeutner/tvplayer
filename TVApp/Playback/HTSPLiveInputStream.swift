@@ -368,11 +368,13 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     ) async throws -> HTSPLiveInputStream {
         let hosts = configuration.htspConnectionHosts
         guard !hosts.isEmpty else { throw HTSPError.invalidHost }
-        let connectionFactory: HTSPConnectionFactory = suppliedFactory ?? {
+        let automationFactory = TVPlaybackAutomation.connectionFactory(channelID: channelID)
+        let effectiveSuppliedFactory = suppliedFactory ?? automationFactory
+        let connectionFactory: HTSPConnectionFactory = effectiveSuppliedFactory ?? {
             try HTSPConnection.openSynchronously(hosts: hosts, port: configuration.htspPort)
         }
         let preconnected: (any HTSPConnectionTransport)?
-        if suppliedFactory == nil {
+        if effectiveSuppliedFactory == nil {
             preconnected = await HTSPConnectionPrewarmer.shared.takeConnection(
                 configuration: configuration
             )

@@ -212,6 +212,14 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
         networkCachingMilliseconds: Int = 1_500
     ) async throws -> LiveStreamRequest {
         let selectedProfile = profile ?? configuration.streamProfile
+        if let replay = TVPlaybackAutomation.livePlaybackRequest(
+            channelID: channelID,
+            configuration: configuration,
+            profile: selectedProfile,
+            networkCachingMilliseconds: networkCachingMilliseconds
+        ) {
+            return replay
+        }
         async let pendingURL = canonicalLiveStreamURL(
             channelID: channelID,
             profile: selectedProfile

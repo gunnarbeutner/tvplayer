@@ -316,7 +316,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private var isPrimingPausedSeekFrame = false
     private var concealsSeekAfterPausedFrameCapture = false
     private var navigationShouldResume = true
-    private var isReplacingPipelineForTimeshiftSeek = false
+    private var isReplacingVLCPipeline = false
+#if os(iOS)
+    private var foregroundVideoRecoveryTask: Task<Void, Never>?
+#endif
     private var pauseRequested = false
     private var preferredAudioLanguageCode: String?
     private var subtitlePreference: SubtitlePreference = .off
@@ -331,10 +334,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private var pendingSnapshotURL: URL?
 
     override init() {
-        let runsTimeshiftBenchmark = ProcessInfo.processInfo.arguments.contains(
-            "--vlc-timeshift-benchmark"
-        )
-        let timeshiftAudioLogger = runsTimeshiftBenchmark
+        let collectsPlaybackDiagnostics =
+            ProcessInfo.processInfo.arguments.contains("--vlc-timeshift-benchmark")
+            || TVPlaybackAutomation.isEnabled
+        let timeshiftAudioLogger = collectsPlaybackDiagnostics
             ? VLCTimeshiftAudioLogger()
             : nil
         var libraryOptions = ["--no-snapshot-preview"]
@@ -345,7 +348,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         // never enters that legacy renderer.
         libraryOptions.append("--vout=samplebufferdisplay")
 #endif
-        if !runsTimeshiftBenchmark { libraryOptions.append("--quiet") }
+        if !collectsPlaybackDiagnostics { libraryOptions.append("--quiet") }
         let library = VLCLibrary(options: libraryOptions)
         if let timeshiftAudioLogger { library.loggers = [timeshiftAudioLogger] }
         self.timeshiftAudioLogger = timeshiftAudioLogger
@@ -417,6 +420,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         defer {
             if activePreparationID == preparationID { activePreparationID = nil }
         }
+#if os(iOS)
+        foregroundVideoRecoveryTask?.cancel()
+        foregroundVideoRecoveryTask = nil
+#endif
         cancelPostSeekOutputGate()
         pipelineRecoveryTask?.cancel()
         pipelineRecoveryTask = nil
@@ -613,6 +620,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     func stop() {
         activePreparationID = nil
         lastNativePipelineDiagnostic = nil
+#if os(iOS)
+        foregroundVideoRecoveryTask?.cancel()
+        foregroundVideoRecoveryTask = nil
+#endif
         cancelPostSeekOutputGate()
         pipelineRecoveryTask?.cancel()
         pipelineRecoveryTask = nil
@@ -643,6 +654,53 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         resetPlaybackMetrics()
         setState(.idle)
     }
+
+#if os(iOS)
+    /// Recreates VLC's local decoder/output pipeline after iOS has suspended
+    /// video rendering. The disposable VLC reader is replaced while the
+    /// long-lived HTSP subscription—and therefore its timeshift buffer and
+    /// current delivery position—remain alive.
+    func recoverVideoOutputAfterForegrounding() {
+        guard foregroundVideoRecoveryTask == nil,
+              pipelineRecoveryTask == nil,
+              !isReplacingVLCPipeline,
+              !pauseRequested,
+              activeRequest?.kind.isLive == true,
+              let stream = nativeInputStream,
+              !stream.healthSnapshot.isNavigating
+        else { return }
+
+        foregroundVideoRecoveryTask = Task { @MainActor [weak self] in
+            // Let SwiftUI apply the matching drawable reattachment before VLC
+            // creates the replacement video output.
+            await Task.yield()
+            guard let self, !Task.isCancelled else { return }
+
+            self.anchorLivePlaybackPositionIfNeeded()
+            self.publishLivePlaybackMarker()
+            self.isReplacingVLCPipeline = true
+            let didReplace = await self.replaceLocalVLCPipeline()
+
+            guard !Task.isCancelled else {
+                self.isReplacingVLCPipeline = false
+                self.foregroundVideoRecoveryTask = nil
+                return
+            }
+            if didReplace {
+                self.resumeLocalPlaybackAfterTimeshiftNavigation()
+                self.logger.info(
+                    "Recreated VLC video output after returning to the foreground"
+                )
+            } else {
+                self.isReplacingVLCPipeline = false
+                self.logger.error(
+                    "Could not recreate VLC video output after returning to the foreground"
+                )
+            }
+            self.foregroundVideoRecoveryTask = nil
+        }
+    }
+#endif
 
     func mediaPlayerSnapshot(_ notification: Notification) {
         guard let snapshotURL = pendingSnapshotURL else { return }
@@ -1049,11 +1107,12 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         let isOpening = playerState == .opening
         let isPlaying = playerState == .playing
         let isStopped = playerState == .stopped || playerState == .stopping
-        if isReplacingPipelineForTimeshiftSeek {
+        if isReplacingVLCPipeline {
             if isOpening || isPlaying {
-                isReplacingPipelineForTimeshiftSeek = false
+                isReplacingVLCPipeline = false
             } else if isStopped || playerState == .error {
-                // The obsolete reader is expected to end when a seek begins.
+                // The obsolete reader is expected to end during a local
+                // pipeline replacement.
                 // Its terminal callback must not reset the long-lived session.
                 refreshPlaybackInformation()
                 return
@@ -1136,10 +1195,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                     )
 #endif
                     self.applyNavigationLanding(navigation)
-                    navigationSucceeded = await self.replaceVLCPipelineAfterTimeshiftNavigation()
+                    navigationSucceeded = await self.replaceLocalVLCPipeline()
                 case let .failure(error):
                     navigationSucceeded = false
-                    self.isReplacingPipelineForTimeshiftSeek = false
+                    self.isReplacingVLCPipeline = false
                     self.timeshiftNavigationDebugState = "server navigation failed: \(error.localizedDescription)"
                     self.cancelPostSeekOutputGate()
                     self.logger.error(
@@ -1573,7 +1632,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         lastMetricsUpdate = Date()
     }
 
-    private func replaceVLCPipelineAfterTimeshiftNavigation() async -> Bool {
+    private func replaceLocalVLCPipeline() async -> Bool {
         guard let stream = nativeInputStream, activeRequest != nil else { return false }
 #if DEBUG
         let replacementStartedAt = ProcessInfo.processInfo.systemUptime
@@ -1627,7 +1686,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             output: PlaybackOutputCounters(displayedPictures: 0, playedAudioBuffers: 0),
             at: Date()
         )
-        logger.info("Recreated VLC pipeline at the selected timeshift position")
+        logger.info("Recreated VLC pipeline while preserving the HTSP session")
         return true
     }
 
@@ -1797,7 +1856,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 
     private func cancelPostSeekOutputGate() {
-        isReplacingPipelineForTimeshiftSeek = false
+        isReplacingVLCPipeline = false
         isPrimingPausedSeekFrame = false
         concealsSeekAfterPausedFrameCapture = false
         postSeekOutputGate.cancel()
@@ -1891,7 +1950,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 #if DEBUG
             beginTimeshiftSeekPhaseTrace()
 #endif
-            isReplacingPipelineForTimeshiftSeek = true
+            isReplacingVLCPipeline = true
             let hasCurrentPausedFrame = preservesCurrentPausedFrame && pausedFrame != nil
             if hasCurrentPausedFrame, postSeekOutputGate.concealImmediately() {
                 concealPlaybackOutput()
@@ -2291,6 +2350,7 @@ private final class VLCVideoContainerView: UIView {
     private var fadesLeadingEdge: Bool
     private var leadingFadeInset: CGFloat
     private var attachedBoundsSize = CGSize.zero
+    private var requiresReattachment = false
     private let leadingFadeMask = CAGradientLayer()
     private let concealmentView = UIImageView()
 
@@ -2332,7 +2392,7 @@ private final class VLCVideoContainerView: UIView {
         if window == nil {
             detachIfOwned()
         } else if isActive {
-            attachIfVisible()
+            attachIfVisible(force: requiresReattachment)
         }
     }
 
@@ -2376,6 +2436,7 @@ private final class VLCVideoContainerView: UIView {
         concealmentImage: PlatformImage?
     ) {
         let mustReattach = revision != attachmentRevision
+        requiresReattachment = requiresReattachment || mustReattach
         attachmentRevision = revision
         self.isActive = isActive
         if self.fadesLeadingEdge != fadesLeadingEdge || self.leadingFadeInset != leadingFadeInset {
@@ -2391,7 +2452,7 @@ private final class VLCVideoContainerView: UIView {
             detachIfOwned()
             return
         }
-        attachIfVisible(force: mustReattach)
+        attachIfVisible(force: requiresReattachment)
     }
 
     private func updateLeadingFadeMask() {
@@ -2418,6 +2479,7 @@ private final class VLCVideoContainerView: UIView {
         // surfaces. Normal layout changes keep the existing renderer alive.
         mediaPlayer.drawable = nil
         mediaPlayer.drawable = self
+        requiresReattachment = false
         configureVideoSizing(mediaPlayer)
     }
 

@@ -17,6 +17,11 @@ extension Notification.Name {
     static let tvGuidePageCommand = Notification.Name("TVPlayer.GuidePageCommand")
     static let tvChannelsPageCommand = Notification.Name("TVPlayer.ChannelsPageCommand")
     static let tvRecordingsPageCommand = Notification.Name("TVPlayer.RecordingsPageCommand")
+#if DEBUG
+    static let tvPlaybackAutomationSeekPress = Notification.Name(
+        "TVPlayer.PlaybackAutomationSeekPress"
+    )
+#endif
 }
 
 @MainActor

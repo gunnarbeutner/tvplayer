@@ -49,7 +49,11 @@ final class GuideViewModel: ObservableObject {
         configuration: TVHeadendConfiguration? = nil,
         cachedSnapshot: PersistedGuideSnapshot? = nil,
         fetchGuide: @escaping GuideFetch = { configuration, timeline, channelUpdate in
-            try await TVHeadendClient(configuration: configuration).fetchGuide(
+            if let replay = TVPlaybackAutomation.guideSnapshot(at: Date()) {
+                channelUpdate?(replay.channels)
+                return replay
+            }
+            return try await TVHeadendClient(configuration: configuration).fetchGuide(
                 for: timeline,
                 channelUpdate: channelUpdate
             )

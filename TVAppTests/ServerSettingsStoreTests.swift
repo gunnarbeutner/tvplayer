@@ -291,6 +291,40 @@ final class ServerSettingsStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testTransientEnvironmentProfileDoesNotReplacePersistedSelection() throws {
+        var store = makeStore()
+        store.handleDiscoveryEvent(.upsert(service(
+            id: "real",
+            name: "Real TVHeadend",
+            host: "real.test"
+        )))
+        let realProfileID = try XCTUnwrap(store.activeProfileID)
+
+        store = ServerSettingsStore(
+            defaults: defaults,
+            keychain: keychain,
+            sharedConfiguration: nil,
+            environment: [
+                "TVPLAYER_TVH_URL": "http://playback-replay.invalid",
+                "TVPLAYER_TVH_USERNAME": "replay",
+                "TVPLAYER_TVH_PASSWORD": "replay",
+                ServerSettingsStore.transientEnvironmentProfileKey: "1",
+            ],
+            startsDiscovery: false,
+            automaticallyTestsConnections: false
+        )
+        XCTAssertEqual(store.activeProfileID, ServerSettingsStore.environmentProfileID)
+        XCTAssertEqual(store.configuration.baseURL?.host, "playback-replay.invalid")
+
+        store = makeStore()
+        XCTAssertEqual(store.activeProfileID, realProfileID)
+        XCTAssertEqual(store.configuration.baseURL?.host, "real.test")
+        XCTAssertFalse(store.profiles.contains {
+            $0.id == ServerSettingsStore.environmentProfileID
+        })
+    }
+
+    @MainActor
     func testConnectionResultIsDiscardedWhenTheSameProfileDraftChanges() async throws {
         let requestStarted = expectation(description: "Connection test started")
         var continuation: CheckedContinuation<TVHeadendServerInfo, Never>?

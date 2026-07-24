@@ -320,6 +320,16 @@ struct RootTabView: View {
                         }
                     }
             }
+
+#if DEBUG && os(tvOS)
+            if TVPlaybackAutomation.isEnabled {
+                TVPlaybackAutomationProbe(
+                    playback: playback,
+                    showsGuidePreview: showsGuideLivePreview
+                )
+                .zIndex(100)
+            }
+#endif
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.easeOut(duration: 0.18), value: playback.launchPresentation?.id)
@@ -1192,9 +1202,12 @@ private struct PersistentPlaybackSurface: View {
     @ObservedObject var engine: VLCPlaybackEngine
     let isPresented: Bool
     let showsGuidePreview: Bool
+    @State private var videoAttachmentRevision = 0
 #if os(iOS)
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @State private var wasBackgrounded = false
 #endif
 
     private var guidePreviewHeight: CGFloat {
@@ -1246,6 +1259,7 @@ private struct PersistentPlaybackSurface: View {
                 } else {
                     VLCVideoSurface(
                         mediaPlayer: engine.mediaPlayer,
+                        attachmentRevision: videoAttachmentRevision,
                         fadesLeadingEdge: showsGuidePreview,
                         leadingFadeInset: showsGuidePreview ? guideLeadingCrop : 0,
                         isOutputConcealed: isPresented && engine.isPlaybackOutputConcealed,
@@ -1255,6 +1269,7 @@ private struct PersistentPlaybackSurface: View {
 #else
                 VLCVideoSurface(
                     mediaPlayer: engine.mediaPlayer,
+                    attachmentRevision: videoAttachmentRevision,
                     fadesLeadingEdge: showsGuidePreview,
                     leadingFadeInset: showsGuidePreview ? guideLeadingCrop : 0,
                     isOutputConcealed: isPresented && engine.isPlaybackOutputConcealed,
@@ -1284,5 +1299,26 @@ private struct PersistentPlaybackSurface: View {
         .ignoresSafeArea(.container, edges: ignoredSafeAreaEdges)
         .opacity(isPresented || showsGuidePreview ? 1 : 0)
         .allowsHitTesting(false)
+#if os(iOS)
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .background:
+                wasBackgrounded = true
+            case .active:
+                guard wasBackgrounded else { return }
+                wasBackgrounded = false
+                // iOS can discard VLC's active video renderer while allowing
+                // its background audio pipeline to continue. Rebinding the
+                // persistent drawable recreates video output without seeking
+                // or disturbing the timeshift position.
+                videoAttachmentRevision &+= 1
+                engine.recoverVideoOutputAfterForegrounding()
+            case .inactive:
+                break
+            @unknown default:
+                break
+            }
+        }
+#endif
     }
 }

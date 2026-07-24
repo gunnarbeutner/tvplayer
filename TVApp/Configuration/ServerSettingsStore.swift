@@ -36,6 +36,7 @@ final class ServerSettingsStore: ObservableObject {
 
     static let storageKey = "tvheadend.serverProfiles.v1"
     static let environmentProfileID = "environment-server"
+    static let transientEnvironmentProfileKey = "TVPLAYER_TRANSIENT_ENVIRONMENT_PROFILE"
 
     @Published private(set) var profiles: [TVHeadendServerProfile] = []
     @Published private(set) var activeProfileID: String?
@@ -59,6 +60,7 @@ final class ServerSettingsStore: ObservableObject {
     private let defaults: UserDefaults
     private let keychain: any PasswordStoring
     private let sharedConfiguration: SharedTVHeadendConfigurationStore?
+    private let usesTransientEnvironmentProfile: Bool
     private let automaticallyTestsConnections: Bool
     private let serverInfoLoader: ServerInfoLoader
     private let timeshiftProbe: TimeshiftProbe
@@ -66,6 +68,7 @@ final class ServerSettingsStore: ObservableObject {
     private var discovery: TVHeadendDiscovery?
     private var latestDiscoveryByProfileID: [String: DiscoveredTVHeadendService] = [:]
     private var profileIDByServiceIdentity: [String: String] = [:]
+    private var activeProfileIDBeforeTransientEnvironment: String?
     private var isLoadingDraft = false
     private var connectionTestGeneration = 0
 
@@ -86,6 +89,8 @@ final class ServerSettingsStore: ObservableObject {
         self.defaults = defaults
         self.keychain = keychain
         self.sharedConfiguration = sharedConfiguration
+        usesTransientEnvironmentProfile =
+            environment[Self.transientEnvironmentProfileKey] == "1"
         self.automaticallyTestsConnections = automaticallyTestsConnections
         self.serverInfoLoader = serverInfoLoader
         self.timeshiftProbe = timeshiftProbe
@@ -127,6 +132,14 @@ final class ServerSettingsStore: ObservableObject {
             try? keychain.write(migrated.password, account: Self.passwordAccount(for: id))
         }
 
+        if usesTransientEnvironmentProfile {
+            let removedActiveProfile = activeProfileID == Self.environmentProfileID
+            profiles.removeAll { $0.id == Self.environmentProfileID }
+            if removedActiveProfile {
+                activeProfileID = profiles.first?.id
+            }
+            activeProfileIDBeforeTransientEnvironment = activeProfileID
+        }
         applyEnvironmentProfile(environment)
 
         editingProfileID = activeProfileID
@@ -594,7 +607,17 @@ final class ServerSettingsStore: ObservableObject {
     }
 
     private func persist() {
-        let payload = StoredPayload(profiles: profiles, activeProfileID: activeProfileID)
+        let persistedProfiles = usesTransientEnvironmentProfile
+            ? profiles.filter { $0.id != Self.environmentProfileID }
+            : profiles
+        let persistedActiveProfileID =
+            usesTransientEnvironmentProfile && activeProfileID == Self.environmentProfileID
+            ? activeProfileIDBeforeTransientEnvironment
+            : activeProfileID
+        let payload = StoredPayload(
+            profiles: persistedProfiles,
+            activeProfileID: persistedActiveProfileID
+        )
         if let data = try? JSONEncoder().encode(payload) {
             defaults.set(data, forKey: Self.storageKey)
         }
@@ -602,6 +625,7 @@ final class ServerSettingsStore: ObservableObject {
 
     private func syncSharedConfiguration() {
 #if os(tvOS)
+        guard !usesTransientEnvironmentProfile else { return }
         guard configuration.baseURL != nil else { return }
         try? sharedConfiguration?.write(configuration)
 #endif

@@ -621,6 +621,19 @@ struct PlaybackView: View {
             TVRemoteCommandCenter.seekHoldHandler = handleRemoteSeekPress
             TVRemoteSeekInputBridge.shared.start()
         }
+#if DEBUG
+        .onReceive(
+            NotificationCenter.default.publisher(for: .tvPlaybackAutomationSeekPress)
+        ) { notification in
+            guard let rawDirection = notification.userInfo?["direction"] as? String,
+                  let isPressed = notification.userInfo?["pressed"] as? Bool
+            else { return }
+            let direction: TVPlayerSeekDirection = rawDirection == "backward"
+                ? .backward
+                : .forward
+            _ = handleRemoteSeekPress(direction, isPressed: isPressed)
+        }
+#endif
 #endif
         .onDisappear {
             timelineSeekCommitTask?.cancel()
