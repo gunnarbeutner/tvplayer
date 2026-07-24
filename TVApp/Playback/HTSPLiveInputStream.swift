@@ -693,13 +693,18 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
     func seek(by seconds: TimeInterval) {
         guard seconds != 0, !condition.withLock({ recovering }) else { return }
-        beginNavigation()
         controlQueue.async { [weak self] in
             guard let self else { return }
             self.pendingLiveCommand = false
-            if let target = self.seekCoordinator.requestRelative(seconds: seconds) {
+            let navigationWasPending = self.seekCoordinator.hasPendingNavigation
+            let target = self.seekCoordinator.requestRelative(seconds: seconds)
+            if !navigationWasPending,
+               target != nil || self.seekCoordinator.hasPendingNavigation {
+                self.beginNavigation()
+            }
+            if let target {
                 self.sendSeekWhenPaused(to: target)
-            } else if self.seekCoordinator.inFlightTarget == nil {
+            } else if self.seekCoordinator.isWaitingForTimeline {
                 self.schedulePendingNavigationTimeout()
             }
         }
@@ -707,7 +712,6 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
     func returnToLive() {
         guard !condition.withLock({ recovering }) else { return }
-        beginNavigation()
         controlQueue.async { [weak self] in
             guard let self else { return }
             // Prefer an absolute seek to the known live-edge timestamp. Some
@@ -716,9 +720,15 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             // timeshift buffer. A rejected absolute live-edge seek is still
             // retried with subscriptionLive by recoverRejectedLiveEdgeSeek().
             self.pendingLiveCommand = false
-            if let target = self.seekCoordinator.requestLiveEdge() {
+            let navigationWasPending = self.seekCoordinator.hasPendingNavigation
+            let target = self.seekCoordinator.requestLiveEdge()
+            if !navigationWasPending,
+               target != nil || self.seekCoordinator.hasPendingNavigation {
+                self.beginNavigation()
+            }
+            if let target {
                 self.sendSeekWhenPaused(to: target)
-            } else if self.seekCoordinator.inFlightTarget == nil {
+            } else if self.seekCoordinator.isWaitingForTimeline {
                 self.schedulePendingNavigationTimeout()
             }
         }
@@ -1428,6 +1438,10 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             postSeekTailInterleaver = tailInterleaver
             hasInitialTuneTailInterleaver = false
             buffer.append(transportData)
+            // ReadyPostSeekDelivery now owns the completed navigation result.
+            // Keeping it in the tracker leaves isNavigatingTimeshift true
+            // forever and causes later Play and seek commands to be rejected.
+            postSeekBuffer.cancel()
             condition.broadcast()
             return true
         }

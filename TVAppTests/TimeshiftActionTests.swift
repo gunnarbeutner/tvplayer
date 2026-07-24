@@ -190,6 +190,22 @@ final class TimeshiftActionTests: XCTestCase {
         XCTAssertEqual(sink.commands, [.pause, .seek(-15)])
     }
 
+    func testCoalescedSkipBackwardDoesNotPauseTheServerAgain() {
+        let (controller, sink) = makeController()
+
+        controller.performCoalescedNavigation(.skipBackward(15))
+
+        XCTAssertEqual(sink.commands, [.seek(-15)])
+    }
+
+    func testCoalescedReturnToLiveDoesNotPauseTheServerAgain() {
+        let (controller, sink) = makeController()
+
+        controller.performCoalescedNavigation(.returnToLive)
+
+        XCTAssertEqual(sink.commands, [.returnToLive])
+    }
+
     func testSkipPausesLocalPlaybackBeforeSendingServerCommands() {
         let (controller, sink) = makeController()
         var appliedEffect: NativeTimeshiftLocalPlaybackEffect?
@@ -1281,6 +1297,27 @@ final class TimeshiftActionTests: XCTestCase {
         )
     }
 
+    func testAbsoluteSeekAcceptsServerEarliestPositionAfterCorrectionMakesNoProgress() {
+        var coordinator = HTSPAbsoluteSeekCoordinator()
+        _ = coordinator.update(
+            metrics: timeshiftMetrics(start: 0, end: 120, delay: 30),
+            updateCurrentPosition: true
+        )
+
+        XCTAssertEqual(coordinator.requestRelative(seconds: -15), 75_000_000)
+        XCTAssertEqual(coordinator.complete(landingTime: 76_000_000), .seek(74_000_000))
+        XCTAssertEqual(
+            coordinator.complete(landingTime: 76_000_000),
+            .buffer(
+                HTSPNavigationResult(
+                    landingTime: 76_000_000,
+                    bufferStartTime: 0,
+                    liveEdgeTime: 120_000_000
+                )
+            )
+        )
+    }
+
     func testAbsoluteSeekAcceptsLandingWithinToleranceAfterTarget() {
         var coordinator = HTSPAbsoluteSeekCoordinator()
         _ = coordinator.update(
@@ -1361,6 +1398,21 @@ final class TimeshiftActionTests: XCTestCase {
                 )
             )
         )
+    }
+
+    func testDuplicateLiveEdgeRequestAfterLandingIsIdempotent() {
+        var coordinator = HTSPAbsoluteSeekCoordinator()
+        _ = coordinator.update(
+            metrics: timeshiftMetrics(start: 0, end: 120, delay: 20),
+            updateCurrentPosition: true
+        )
+        XCTAssertEqual(coordinator.requestLiveEdge(), 120_000_000)
+        _ = coordinator.complete(landingTime: 120_000_000)
+
+        XCTAssertNil(coordinator.requestLiveEdge())
+        XCTAssertNil(coordinator.inFlightTarget)
+        XCTAssertFalse(coordinator.hasPendingNavigation)
+        XCTAssertFalse(coordinator.isWaitingForTimeline)
     }
 
     func testAbsoluteLiveEdgeRejectionFallsBackToTheLiveCommandOnlyOnce() {

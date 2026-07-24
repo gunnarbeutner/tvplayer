@@ -46,6 +46,13 @@ try {
     "lavfi",
     "-i",
     "sine=frequency=440:sample_rate=48000",
+    "-vf",
+    [
+      "drawbox=x=0:y=0:w=1:h=1:color=white:t=fill",
+      "drawbox=x=iw-1:y=0:w=1:h=1:color=white:t=fill",
+      "drawbox=x=0:y=ih-1:w=1:h=1:color=white:t=fill",
+      "drawbox=x=iw-1:y=ih-1:w=1:h=1:color=white:t=fill",
+    ].join(","),
     "-t",
     "16",
     "-c:v",

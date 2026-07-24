@@ -332,7 +332,8 @@ private final class HTSPReplayConnection: HTSPConnectionTransport, @unchecked Se
     }
 
     private func land(at requestedTime: Int64) {
-        let target = min(max(Self.timelineStart, requestedTime), liveEdge)
+        let bufferStart = liveEdge - Self.timeshiftPeriod * 1_000_000
+        let target = min(max(bufferStart, requestedTime), liveEdge)
         let relative = positiveModulo(target - Self.timelineStart, fixtureDuration)
         let keyframeIndex = packets.indices
             .filter { packets[$0].frameType == Character("I").asciiValue }

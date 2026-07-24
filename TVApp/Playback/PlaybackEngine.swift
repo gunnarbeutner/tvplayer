@@ -32,6 +32,12 @@ enum PlaybackRecoveryReason: Equatable {
     }
 }
 
+private enum NativePipelineReplacementState {
+    case inactive
+    case awaitingNavigation
+    case installed
+}
+
 private enum VLCPlaybackPreparationError: LocalizedError {
     case stopTimedOut
 
@@ -320,7 +326,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private var isPrimingPausedSeekFrame = false
     private var concealsSeekAfterPausedFrameCapture = false
     private var navigationShouldResume = true
-    private var isReplacingVLCPipeline = false
+    private var nativePipelineReplacementState: NativePipelineReplacementState = .inactive
+    private var isReplacingVLCPipeline: Bool {
+        nativePipelineReplacementState != .inactive
+    }
     private var pauseRequested = false
     private var preferredAudioLanguageCode: String?
     private var subtitlePreference: SubtitlePreference = .off
@@ -755,12 +764,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         guard recoveryReason == nil else { return false }
 
         if let nativeTimeshiftActions {
-            rememberNavigationPlaybackIntent()
-            nativeTimeshiftActions.perform(
+            performNativeTimeshiftNavigation(
                 .skipForward(seconds, liveDelay: liveDelaySeconds),
-                beforeServerCommands: { [self] effect in
-                    applyNativeTimeshiftLocalEffect(effect)
-                }
+                using: nativeTimeshiftActions
             )
             return false
         }
@@ -777,12 +783,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         refreshPlaybackInformation()
         guard recoveryReason == nil else { return }
         if let nativeTimeshiftActions {
-            rememberNavigationPlaybackIntent()
-            nativeTimeshiftActions.perform(
+            performNativeTimeshiftNavigation(
                 .skipBackward(seconds),
-                beforeServerCommands: { [self] effect in
-                    applyNativeTimeshiftLocalEffect(effect)
-                }
+                using: nativeTimeshiftActions
             )
             return
         }
@@ -841,12 +844,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 
     func returnToLive() {
         guard recoveryReason == nil, let nativeTimeshiftActions else { return }
-        rememberNavigationPlaybackIntent()
-        nativeTimeshiftActions.perform(
+        performNativeTimeshiftNavigation(
             .returnToLive,
-            beforeServerCommands: { [self] effect in
-                applyNativeTimeshiftLocalEffect(effect)
-            }
+            using: nativeTimeshiftActions
         )
     }
 
@@ -1152,9 +1152,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         let isPlaying = playerState == .playing
         let isStopped = playerState == .stopped || playerState == .stopping
         if isReplacingVLCPipeline {
-            if isOpening || isPlaying {
-                isReplacingVLCPipeline = false
-            } else if isStopped || playerState == .error {
+            if isStopped || playerState == .error {
                 // The obsolete reader is expected to end during a local
                 // pipeline replacement.
                 // Its terminal callback must not reset the long-lived session.
@@ -1242,7 +1240,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                     navigationSucceeded = await self.replaceLocalVLCPipeline()
                 case let .failure(error):
                     navigationSucceeded = false
-                    self.isReplacingVLCPipeline = false
+                    self.nativePipelineReplacementState = .inactive
                     self.timeshiftNavigationDebugState = "server navigation failed: \(error.localizedDescription)"
                     self.cancelPostSeekOutputGate()
                     self.logger.error(
@@ -1316,14 +1314,34 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 
     private func rememberNavigationPlaybackIntent() {
-        guard nativeInputStream?.isNavigatingTimeshift != true else {
-            timeshiftNavigationDebugState = "ignored new intent while already navigating"
-            return
-        }
         navigationShouldResume = !pauseRequested
         timeshiftNavigationDebugState = navigationShouldResume
             ? "navigation requested; will resume"
             : "navigation requested; will remain paused"
+    }
+
+    private func performNativeTimeshiftNavigation(
+        _ action: NativeTimeshiftAction,
+        using controller: NativeTimeshiftActionController
+    ) {
+        if nativeInputStream?.isNavigatingTimeshift == true || isReplacingVLCPipeline {
+            // The HTSP coordinator coalesces relative seeks to one final
+            // absolute target. Do not restart concealment or clear its staged
+            // packet batch for each additional remote event. The stream is
+            // already paused, so another pause would race the normal-speed
+            // transition which finishes the in-flight seek.
+            timeshiftNavigationDebugState = "coalesced new intent while navigating"
+            controller.performCoalescedNavigation(action)
+            return
+        }
+
+        rememberNavigationPlaybackIntent()
+        controller.perform(
+            action,
+            beforeServerCommands: { [self] effect in
+                applyNativeTimeshiftLocalEffect(effect)
+            }
+        )
     }
 
     private func handleNativeLifecycleEvent(_ event: HTSPStreamLifecycleEvent) {
@@ -1714,6 +1732,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         let cachingMilliseconds = stream.tuningPolicy.vlcCacheMilliseconds
         addCachingOptions(to: media, milliseconds: cachingMilliseconds)
         mediaPlayer.media = media
+        nativePipelineReplacementState = .installed
         postSeekOutputGate.markPipelineRecreated()
 #if DEBUG
         let installedAt = ProcessInfo.processInfo.systemUptime
@@ -1801,6 +1820,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         traceTimeshiftSeekOutput(output, at: date)
 #endif
         guard postSeekOutputGate.observe(output, at: date) else { return }
+        // Opening/playing callbacks do not identify which VLCMedia emitted
+        // them. Keep obsolete-reader terminal callbacks suppressed until the
+        // replacement has proven stable output.
+        nativePipelineReplacementState = .inactive
         if isPrimingPausedSeekFrame {
             isPrimingPausedSeekFrame = false
             mediaPlayer.rate = 1
@@ -1903,7 +1926,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 
     private func cancelPostSeekOutputGate() {
-        isReplacingVLCPipeline = false
+        nativePipelineReplacementState = .inactive
         isPrimingPausedSeekFrame = false
         concealsSeekAfterPausedFrameCapture = false
         postSeekOutputGate.cancel()
@@ -1997,7 +2020,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 #if DEBUG
             beginTimeshiftSeekPhaseTrace()
 #endif
-            isReplacingVLCPipeline = true
+            nativePipelineReplacementState = .awaitingNavigation
             let hasCurrentPausedFrame = preservesCurrentPausedFrame && pausedFrame != nil
             if hasCurrentPausedFrame, postSeekOutputGate.concealImmediately() {
                 concealPlaybackOutput()

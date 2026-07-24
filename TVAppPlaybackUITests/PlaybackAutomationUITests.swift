@@ -200,6 +200,127 @@ final class PlaybackAutomationUITests: XCTestCase {
         )
     }
 
+    func testReplayTestSignalDisplaysAllFourCornerPixels() throws {
+        launchReplay()
+        _ = try waitForReadyPlayback(timeout: 8)
+        try waitForPlaybackChromeToHide(timeout: 8)
+
+        let screenshot = attachScreenshot(named: "Replay test signal corners")
+        try assertReplayCornerPixelsAreVisible(in: screenshot)
+    }
+
+    func testRepeatedBidirectionalTimeshiftSeekingRetainsConnectionAndAudio() throws {
+        launchReplay()
+        let current = try waitForReadyPlayback(timeout: 8)
+        try exerciseRepeatedBidirectionalSeeking(startingWith: current)
+    }
+
+    func testLiveRepeatedBidirectionalTimeshiftSeekingRetainsConnectionAndAudio() throws {
+        launchUsingStoredConfiguration()
+        guard let current = try waitForProbeIfAvailable(timeout: 20, where: Self.isReady)
+        else {
+            throw XCTSkip("No configured live playback became ready in the simulator.")
+        }
+        try exerciseRepeatedBidirectionalSeeking(startingWith: current)
+    }
+
+    func testReplayRapidBidirectionalSeekBurstRetainsConnectionAndAudio() throws {
+        launchReplay()
+        let current = try waitForReadyPlayback(timeout: 8)
+        try exerciseRapidBidirectionalSeekBurst(startingWith: current)
+    }
+
+    func testLiveRapidBidirectionalSeekBurstRetainsConnectionAndAudio() throws {
+        launchUsingStoredConfiguration()
+        guard let current = try waitForProbeIfAvailable(timeout: 20, where: Self.isReady)
+        else {
+            throw XCTSkip("No configured live playback became ready in the simulator.")
+        }
+        try exerciseRapidBidirectionalSeekBurst(startingWith: current)
+    }
+
+    private func exerciseRapidBidirectionalSeekBurst(
+        startingWith initial: PlaybackProbeSnapshot
+    ) throws {
+        var current = initial
+        current = try assertContinuousPlayback(from: current, duration: 12)
+
+        let presentationID = current.presentationID
+        let recoveryCount = current.recoveryCount
+        let minimumRetainedWindow = max(1, current.timeshiftWindowSeconds - 2)
+        for index in 0..<20 {
+            XCUIRemote.shared.press(index.isMultiple(of: 2) ? .left : .right)
+        }
+
+        guard let settled = try waitForProbeIfAvailable(timeout: 15, where: {
+            Self.isReady($0) && !$0.concealed
+        }) else {
+            let stuck = try currentProbe()
+            XCUIRemote.shared.press(.playPause)
+            let latest = try samplePlayback(for: 5, startingWith: stuck)
+            XCTFail(
+                "Rapid seek burst did not settle before Play. "
+                    + postPlayDiagnostic(stuck: stuck, latest: latest)
+            )
+            throw CocoaError(.coderReadCorrupt)
+        }
+        XCTAssertEqual(settled.presentationID, presentationID)
+        XCTAssertEqual(settled.recoveryCount, recoveryCount)
+        XCTAssertGreaterThanOrEqual(settled.timeshiftWindowSeconds, minimumRetainedWindow)
+        _ = try assertContinuousPlayback(from: settled, duration: 5)
+    }
+
+    private func exerciseRepeatedBidirectionalSeeking(
+        startingWith initial: PlaybackProbeSnapshot
+    ) throws {
+        var current = initial
+        current = try assertContinuousPlayback(from: current, duration: 12)
+
+        let presentationID = current.presentationID
+        let recoveryCount = current.recoveryCount
+        let minimumRetainedWindow = max(1, current.timeshiftWindowSeconds - 2)
+        var nonLiveSeekDurations: [TimeInterval] = []
+
+        for cycle in 1...8 {
+            current = try performStressSeek(
+                .left,
+                from: current,
+                cycle: cycle,
+                direction: "backward",
+                presentationID: presentationID,
+                recoveryCount: recoveryCount,
+                minimumRetainedWindow: minimumRetainedWindow,
+                recordDuration: { nonLiveSeekDurations.append($0) }
+            )
+            current = try performStressSeek(
+                .right,
+                from: current,
+                cycle: cycle,
+                direction: "forward",
+                presentationID: presentationID,
+                recoveryCount: recoveryCount,
+                minimumRetainedWindow: minimumRetainedWindow,
+                recordDuration: nil
+            )
+        }
+
+        let averageNonLiveSeekDuration =
+            nonLiveSeekDurations.reduce(0, +) / Double(nonLiveSeekDurations.count)
+        print(
+            String(
+                format: "NON_LIVE_SEEK_AVERAGE %.3fs (%d samples)",
+                averageNonLiveSeekDuration,
+                nonLiveSeekDurations.count
+            )
+        )
+        XCTAssertLessThan(
+            averageNonLiveSeekDuration,
+            2,
+            "Non-live seeks averaged \(averageNonLiveSeekDuration)s."
+        )
+        _ = try assertContinuousPlayback(from: current, duration: 5)
+    }
+
     func testLiveTVHeadendTuneSwitchAndSeek() throws {
         let environment = ProcessInfo.processInfo.environment
         if let url = environment["TVPLAYER_LIVE_TEST_URL"], !url.isEmpty {
@@ -273,6 +394,9 @@ final class PlaybackAutomationUITests: XCTestCase {
         replay: Bool
     ) {
         app.launchArguments = ["--playback-ui-testing"]
+        if replay {
+            app.launchArguments.append("--vlc-timeshift-benchmark")
+        }
         app.launchEnvironment = [
             "TVPLAYER_TVH_URL": url,
             "TVPLAYER_TVH_USERNAME": username,
@@ -343,6 +467,70 @@ final class PlaybackAutomationUITests: XCTestCase {
         return (left, max(0, width - rightEdge - 1), topLeftMarker)
     }
 
+    private func assertReplayCornerPixelsAreVisible(
+        in screenshot: XCUIScreenshot
+    ) throws {
+        let image = try XCTUnwrap(screenshot.image.cgImage)
+        let width = image.width
+        let height = image.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let context = try XCTUnwrap(
+            CGContext(
+                data: &pixels,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )
+        )
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        // The one-source-pixel marker is 3×3 pixels on a 1080p display and
+        // 6×6 on a 4K display. Search a similarly scaled patch so capture
+        // filtering cannot hide it, while staying clear of the test pattern.
+        let patchSize = max(4, min(width, height) / 180)
+        let corners = [
+            ("top left", 0, 0),
+            ("top right", width - patchSize, 0),
+            ("bottom left", 0, height - patchSize),
+            ("bottom right", width - patchSize, height - patchSize),
+        ]
+
+        for (name, originX, originY) in corners {
+            let markerIsVisible = (originY..<(originY + patchSize)).contains { y in
+                (originX..<(originX + patchSize)).contains { x in
+                    let offset = (y * width + x) * 4
+                    return pixels[offset] >= 180
+                        && pixels[offset + 1] >= 180
+                        && pixels[offset + 2] >= 180
+                }
+            }
+            XCTAssertTrue(
+                markerIsVisible,
+                "The replay test signal's \(name) corner pixel is cropped."
+            )
+        }
+    }
+
+    private func waitForPlaybackChromeToHide(timeout: TimeInterval) throws {
+        let timeline = app.descendants(matching: .any)[
+            "tvplayer.playback.chrome.timeline"
+        ]
+        guard timeline.exists else { return }
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: timeline
+        )
+        let result = XCTWaiter.wait(for: [expectation], timeout: timeout)
+        XCTAssertEqual(
+            result,
+            .completed,
+            "The playback chrome did not hide before checking the test signal."
+        )
+    }
+
     private func launchConfiguredApp() {
         app.launch()
         probeElement = app.descendants(matching: .any)[probeIdentifier]
@@ -377,6 +565,7 @@ final class PlaybackAutomationUITests: XCTestCase {
         duration: TimeInterval
     ) throws -> PlaybackProbeSnapshot {
         var previous = baseline
+        var clockBaseline = baseline
         let deadline = ProcessInfo.processInfo.systemUptime + duration
         var lastVideoAdvance = baseline.sampledAt
         var lastAudioAdvance = baseline.sampledAt
@@ -384,16 +573,23 @@ final class PlaybackAutomationUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.25)
             let current = try currentProbe()
             samples.append(current)
-            if current.displayedPictures < previous.displayedPictures
-                || current.playedAudioBuffers < previous.playedAudioBuffers {
+            let enteredNewPipelineEpoch =
+                current.displayedPictures < previous.displayedPictures
+                    || current.playedAudioBuffers < previous.playedAudioBuffers
+            if enteredNewPipelineEpoch {
                 lastVideoAdvance = current.sampledAt
                 lastAudioAdvance = current.sampledAt
+                clockBaseline = current
             } else {
                 if current.displayedPictures > previous.displayedPictures {
                     lastVideoAdvance = current.sampledAt
                 }
                 if current.playedAudioBuffers > previous.playedAudioBuffers {
                     lastAudioAdvance = current.sampledAt
+                }
+                if clockBaseline.playbackTimeMilliseconds == nil,
+                   current.playbackTimeMilliseconds != nil {
+                    clockBaseline = current
                 }
             }
             XCTAssertLessThan(
@@ -415,16 +611,107 @@ final class PlaybackAutomationUITests: XCTestCase {
             previous = current
         }
 
-        if let start = baseline.playbackTimeMilliseconds,
+        if let start = clockBaseline.playbackTimeMilliseconds,
            let end = previous.playbackTimeMilliseconds,
            end >= start,
-           previous.sampledAt > baseline.sampledAt {
-            let sampledDuration = previous.sampledAt - baseline.sampledAt
+           previous.sampledAt - clockBaseline.sampledAt >= 3 {
+            let sampledDuration = previous.sampledAt - clockBaseline.sampledAt
             let clockSlope = Double(end - start) / (sampledDuration * 1_000)
-            XCTAssertGreaterThan(clockSlope, 0.9, "Playback clock advanced too slowly.")
-            XCTAssertLessThan(clockSlope, 1.1, "Playback clock advanced too quickly.")
+            // VLC exposes this clock in coarse, approximately one-second
+            // steps. Account for one step of quantization over short samples.
+            let tolerance = max(0.1, 1 / sampledDuration)
+            XCTAssertGreaterThan(
+                clockSlope,
+                1 - tolerance,
+                "Playback clock advanced too slowly."
+            )
+            XCTAssertLessThan(
+                clockSlope,
+                1 + tolerance,
+                "Playback clock advanced too quickly."
+            )
         }
         return previous
+    }
+
+    private func performStressSeek(
+        _ button: XCUIRemote.Button,
+        from baseline: PlaybackProbeSnapshot,
+        cycle: Int,
+        direction: String,
+        presentationID: String?,
+        recoveryCount: Int,
+        minimumRetainedWindow: TimeInterval,
+        recordDuration: ((TimeInterval) -> Void)?
+    ) throws -> PlaybackProbeSnapshot {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        XCUIRemote.shared.press(button)
+        _ = try waitForProbe(timeout: 3) {
+            $0.concealed
+                || $0.navigationState != baseline.navigationState
+                || abs($0.liveDelaySeconds - baseline.liveDelaySeconds) > 1
+                || $0.displayedPictures < baseline.displayedPictures
+                || $0.playedAudioBuffers < baseline.playedAudioBuffers
+        }
+        guard let settled = try waitForProbeIfAvailable(timeout: 8, where: {
+            Self.isReady($0) && !$0.concealed
+        }) else {
+            let stuck = try currentProbe()
+            XCUIRemote.shared.press(.playPause)
+            let latest = try samplePlayback(for: 5, startingWith: stuck)
+            XCTFail(
+                "Seek cycle \(cycle) \(direction) did not settle before Play. "
+                    + postPlayDiagnostic(stuck: stuck, latest: latest)
+            )
+            throw CocoaError(.coderReadCorrupt)
+        }
+        recordDuration?(
+            ProcessInfo.processInfo.systemUptime - startedAt
+        )
+        XCTAssertEqual(
+            settled.presentationID,
+            presentationID,
+            "Seek cycle \(cycle) \(direction) replaced the playback connection."
+        )
+        XCTAssertEqual(
+            settled.recoveryCount,
+            recoveryCount,
+            "Seek cycle \(cycle) \(direction) triggered playback recovery."
+        )
+        XCTAssertGreaterThanOrEqual(
+            settled.timeshiftWindowSeconds,
+            minimumRetainedWindow,
+            "Seek cycle \(cycle) \(direction) discarded the timeshift buffer."
+        )
+        return try assertContinuousPlayback(from: settled, duration: 1)
+    }
+
+    private func samplePlayback(
+        for duration: TimeInterval,
+        startingWith initial: PlaybackProbeSnapshot
+    ) throws -> PlaybackProbeSnapshot {
+        var latest = initial
+        let deadline = ProcessInfo.processInfo.systemUptime + duration
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            Thread.sleep(forTimeInterval: 0.25)
+            latest = try currentProbe()
+            samples.append(latest)
+        }
+        return latest
+    }
+
+    private func postPlayDiagnostic(
+        stuck: PlaybackProbeSnapshot,
+        latest: PlaybackProbeSnapshot
+    ) -> String {
+        "stuckState=\(stuck.engineState)/\(stuck.navigationState) "
+            + "videoAfterPlay=\(latest.displayedPictures > stuck.displayedPictures) "
+            + "audioAfterPlay=\(latest.playedAudioBuffers > stuck.playedAudioBuffers) "
+            + "windowBefore=\(stuck.timeshiftWindowSeconds) "
+            + "windowAfter=\(latest.timeshiftWindowSeconds) "
+            + "recoveryBefore=\(stuck.recoveryCount) "
+            + "recoveryAfter=\(latest.recoveryCount) "
+            + "latestState=\(latest.engineState)/\(latest.navigationState)"
     }
 
     private func waitForProbe(

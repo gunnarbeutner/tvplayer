@@ -117,7 +117,19 @@ final class NativeTimeshiftActionController {
     ) -> NativeTimeshiftLocalPlaybackEffect {
         let plan = NativeTimeshiftActionPlan.make(for: action)
         beforeServerCommands?(plan.localPlaybackEffect)
-        for command in plan.serverCommands {
+        perform(plan.serverCommands)
+        return plan.localPlaybackEffect
+    }
+
+    func performCoalescedNavigation(_ action: NativeTimeshiftAction) {
+        let commands = NativeTimeshiftActionPlan.make(for: action).serverCommands.filter {
+            $0 != .pause
+        }
+        perform(commands)
+    }
+
+    private func perform(_ commands: [NativeTimeshiftServerCommand]) {
+        for command in commands {
             switch command {
             case .play:
                 sink.play()
@@ -129,7 +141,6 @@ final class NativeTimeshiftActionController {
                 sink.returnToLive()
             }
         }
-        return plan.localPlaybackEffect
     }
 }
 
@@ -1107,12 +1118,21 @@ struct HTSPAbsoluteSeekCoordinator {
     private var pendingLiveEdge = false
     private var earlierSeekBackoff = Self.initialEarlierSeekBackoff
     private var earlierCorrectionInFlight = false
+    private var currentPositionIsLiveEdge = false
 
     var isTargetingLiveEdge: Bool {
         if pendingLiveEdge { return true }
         guard let liveEdgeTime,
               let target = desiredTarget ?? inFlightTarget else { return false }
         return target >= liveEdgeTime - Self.landingTolerance
+    }
+
+    var hasPendingNavigation: Bool {
+        inFlightTarget != nil || pendingLiveEdge || pendingRelativeDelta != 0
+    }
+
+    var isWaitingForTimeline: Bool {
+        inFlightTarget == nil && (pendingLiveEdge || pendingRelativeDelta != 0)
     }
 
     mutating func update(
@@ -1124,6 +1144,8 @@ struct HTSPAbsoluteSeekCoordinator {
 
         if updateCurrentPosition, let playheadTime = metrics.playheadTime {
             currentTime = clamp(playheadTime)
+            currentPositionIsLiveEdge =
+                metrics.liveDelay <= TimeInterval(Self.landingTolerance) / 1_000_000
             if inFlightTarget == nil { desiredTarget = currentTime }
         }
 
@@ -1144,6 +1166,7 @@ struct HTSPAbsoluteSeekCoordinator {
         let delta = Int64((seconds * 1_000_000).rounded())
         guard delta != 0 else { return nil }
         pendingLiveEdge = false
+        currentPositionIsLiveEdge = false
 
         if let base = desiredTarget ?? inFlightTarget ?? currentTime {
             desiredTarget = clamp(base + delta)
@@ -1157,6 +1180,10 @@ struct HTSPAbsoluteSeekCoordinator {
         pendingRelativeDelta = 0
         pendingLiveEdge = true
         guard let liveEdgeTime else { return nil }
+        if inFlightTarget == nil, currentPositionIsLiveEdge {
+            pendingLiveEdge = false
+            return nil
+        }
         desiredTarget = liveEdgeTime
         pendingLiveEdge = false
         return startIfPossible()
@@ -1173,6 +1200,11 @@ struct HTSPAbsoluteSeekCoordinator {
         inFlightTarget = nil
         earlierCorrectionInFlight = false
         pendingLiveEdge = false
+        let correctionReachedRequestedPosition =
+            completedEarlierCorrection
+                && desiredTarget.map {
+                    serverLandingTime <= $0 + Self.landingTolerance
+                } == true
 
         if !satisfiedLiveEdge,
            !completedEarlierCorrection,
@@ -1183,6 +1215,7 @@ struct HTSPAbsoluteSeekCoordinator {
         }
 
         if !satisfiedLiveEdge,
+           !completedEarlierCorrection,
            let desiredTarget,
            serverLandingTime > desiredTarget + Self.landingTolerance {
             let earlierTarget = clamp(desiredTarget - earlierSeekBackoff)
@@ -1195,10 +1228,15 @@ struct HTSPAbsoluteSeekCoordinator {
         }
 
         let exactLandingTime = satisfiedLiveEdge
+            || (completedEarlierCorrection && !correctionReachedRequestedPosition)
             ? serverLandingTime
             : clamp(desiredTarget ?? serverLandingTime)
         currentTime = exactLandingTime
         desiredTarget = exactLandingTime
+        currentPositionIsLiveEdge = satisfiedLiveEdge
+            || liveEdgeTime.map {
+                exactLandingTime >= $0 - Self.landingTolerance
+            } == true
         earlierSeekBackoff = Self.initialEarlierSeekBackoff
         earlierCorrectionInFlight = false
         return .buffer(

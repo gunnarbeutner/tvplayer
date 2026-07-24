@@ -617,7 +617,13 @@ struct PlaybackView: View {
         .onAppear {
             TVRemoteCommandCenter.playerExitHandler = handlePlayerExitCommand
             TVRemoteCommandCenter.seekHoldHandler = handleRemoteSeekPress
-            TVRemoteSeekInputBridge.shared.start()
+            // Playback UI automation installs a UIKit press recognizer which
+            // forwards the same begin/end transitions. Listening through
+            // GameController as well can turn one XCUIRemote press into two
+            // sequential quick skips and two VLC pipeline replacements.
+            if !TVPlaybackAutomation.isEnabled {
+                TVRemoteSeekInputBridge.shared.start()
+            }
         }
 #if DEBUG
         .onReceive(
