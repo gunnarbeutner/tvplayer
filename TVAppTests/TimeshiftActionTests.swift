@@ -167,6 +167,7 @@ final class TimeshiftActionTests: XCTestCase {
 
     func testTimelineSeekCommitPolicyCoalescesTaps() {
         XCTAssertEqual(TimelineSeekCommitPolicy.coalescingDelayMilliseconds, 250)
+        XCTAssertEqual(NativeTimeshiftActionPlan.preferredLiveDelay, 2)
     }
 
     func testPlayStartsNativeTimeshift() {
@@ -237,24 +238,24 @@ final class TimeshiftActionTests: XCTestCase {
         XCTAssertEqual(sink.commands, [.pause, .seek(15)])
     }
 
-    func testSkipForwardAtLiveEdgePausesAndReturnsLiveUntilAcknowledged() {
+    func testSkipForwardAtLiveEdgeLeavesPreferredSafetyDelay() {
         let (controller, sink) = makeController()
 
         XCTAssertEqual(
             controller.perform(.skipForward(15, liveDelay: 15.25)),
             .pauseUntilNavigationCompletes
         )
-        XCTAssertEqual(sink.commands, [.pause, .returnToLive])
+        XCTAssertEqual(sink.commands, [.pause, .seek(13.25)])
     }
 
-    func testSkipForwardBeforeFirstStatusReturnsToLive() {
+    func testSkipForwardAtPreferredLiveDelayDoesNothing() {
         let (controller, sink) = makeController()
 
         XCTAssertEqual(
-            controller.perform(.skipForward(15, liveDelay: 0)),
-            .pauseUntilNavigationCompletes
+            controller.perform(.skipForward(15, liveDelay: 2)),
+            .none
         )
-        XCTAssertEqual(sink.commands, [.pause, .returnToLive])
+        XCTAssertEqual(sink.commands, [])
     }
 
     func testSkipForwardIgnoresNonPositiveDistance() {

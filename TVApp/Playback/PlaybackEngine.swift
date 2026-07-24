@@ -850,6 +850,15 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         )
     }
 
+    func seekToPreferredLivePosition() {
+        refreshPlaybackInformation()
+        guard recoveryReason == nil, let nativeTimeshiftActions else { return }
+        performNativeTimeshiftNavigation(
+            .skipForward(liveDelaySeconds, liveDelay: liveDelaySeconds),
+            using: nativeTimeshiftActions
+        )
+    }
+
     func selectAudioTrack(_ id: Int) {
         mediaPlayer.selectTrack(at: id, type: .audio)
         selectedAudioTrackID = id

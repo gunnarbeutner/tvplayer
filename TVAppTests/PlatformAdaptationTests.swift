@@ -261,6 +261,25 @@ final class PlatformAdaptationTests: XCTestCase {
         )
     }
 
+    func testLiveTimelineUserSeekStopsBeforeTheActualLiveEdge() {
+        let liveEdge = Date(timeIntervalSinceReferenceDate: 20_000)
+        let bufferStart = liveEdge.addingTimeInterval(-120)
+        let preferredLivePosition = liveEdge.addingTimeInterval(-2)
+
+        XCTAssertEqual(
+            LiveTimelinePosition.userSeekableLiveEdge(at: liveEdge),
+            preferredLivePosition
+        )
+        XCTAssertEqual(
+            LiveTimelinePosition.clampedUserSeekDate(
+                liveEdge,
+                liveEdge: liveEdge,
+                bufferStartedAt: bufferStart
+            ),
+            preferredLivePosition
+        )
+    }
+
 #if os(macOS)
     func testMacOSPlayerPlaybackShortcuts() {
         XCTAssertEqual(

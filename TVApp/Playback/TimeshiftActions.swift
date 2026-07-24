@@ -24,6 +24,9 @@ enum NativeTimeshiftServerCommand: Equatable {
 
 struct NativeTimeshiftActionPlan: Equatable {
     static let liveEdgeTolerance: TimeInterval = 0.25
+    // Leave enough media after the requested position for the 1.5-second
+    // post-seek reserve plus the 0.5-second fast-backfill margin.
+    static let preferredLiveDelay: TimeInterval = 2
 
     let serverCommands: [NativeTimeshiftServerCommand]
     let localPlaybackEffect: NativeTimeshiftLocalPlaybackEffect
@@ -49,11 +52,13 @@ struct NativeTimeshiftActionPlan: Equatable {
             guard seconds > 0 else {
                 return NativeTimeshiftActionPlan(serverCommands: [], localPlaybackEffect: .none)
             }
-            let reachesLiveEdge = seconds >= max(0, liveDelay - liveEdgeTolerance)
+            let availableDistance = max(0, liveDelay - preferredLiveDelay)
+            let distance = min(seconds, availableDistance)
+            guard distance > liveEdgeTolerance else {
+                return NativeTimeshiftActionPlan(serverCommands: [], localPlaybackEffect: .none)
+            }
             return NativeTimeshiftActionPlan(
-                serverCommands: reachesLiveEdge
-                    ? [.pause, .returnToLive]
-                    : [.pause, .seek(seconds)],
+                serverCommands: [.pause, .seek(distance)],
                 localPlaybackEffect: .pauseUntilNavigationCompletes
             )
 

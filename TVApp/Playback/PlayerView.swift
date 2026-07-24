@@ -150,12 +150,26 @@ enum TimelineScrubbing {
 }
 
 enum LiveTimelinePosition {
+    static func userSeekableLiveEdge(at liveEdge: Date) -> Date {
+        liveEdge.addingTimeInterval(-NativeTimeshiftActionPlan.preferredLiveDelay)
+    }
+
     static func clampedDate(
         _ proposedDate: Date,
         liveEdge: Date,
         bufferStartedAt: Date?
     ) -> Date {
         min(max(proposedDate, bufferStartedAt ?? .distantPast), liveEdge)
+    }
+
+    static func clampedUserSeekDate(
+        _ proposedDate: Date,
+        liveEdge: Date,
+        bufferStartedAt: Date?
+    ) -> Date {
+        let selectableLiveEdge = userSeekableLiveEdge(at: liveEdge)
+        let availableStart = min(bufferStartedAt ?? selectableLiveEdge, selectableLiveEdge)
+        return min(max(proposedDate, availableStart), selectableLiveEdge)
     }
 }
 
@@ -1188,11 +1202,15 @@ struct PlaybackView: View {
     private func stageTimelineSeek(by seconds: TimeInterval) -> Bool {
         guard !presentation.isRecording, engine.isSeekable, seconds != 0 else { return false }
         let liveEdge = Date()
+        let selectableLiveEdge = LiveTimelinePosition.userSeekableLiveEdge(at: liveEdge)
         let current = timelineSeekTargetsLiveEdge
-            ? liveEdge
+            ? selectableLiveEdge
             : (timelineSeekTargetDate ?? liveTimelinePlaybackDate(at: liveEdge))
-        let availableStart = engine.bufferStartedAt ?? liveEdge
-        let target = min(max(current.addingTimeInterval(seconds), availableStart), liveEdge)
+        let target = LiveTimelinePosition.clampedUserSeekDate(
+            current.addingTimeInterval(seconds),
+            liveEdge: liveEdge,
+            bufferStartedAt: engine.bufferStartedAt
+        )
         guard abs(target.timeIntervalSince(current)) > NativeTimeshiftActionPlan.liveEdgeTolerance else {
             return false
         }
@@ -1215,10 +1233,14 @@ struct PlaybackView: View {
     }
 
     private func updateTimelineSeekTarget(_ proposedTarget: Date, liveEdge: Date = Date()) {
-        let availableStart = engine.bufferStartedAt ?? liveEdge
-        let target = min(max(proposedTarget, availableStart), liveEdge)
+        let selectableLiveEdge = LiveTimelinePosition.userSeekableLiveEdge(at: liveEdge)
+        let target = LiveTimelinePosition.clampedUserSeekDate(
+            proposedTarget,
+            liveEdge: liveEdge,
+            bufferStartedAt: engine.bufferStartedAt
+        )
         timelineSeekTargetDate = target
-        timelineSeekTargetsLiveEdge = target >= liveEdge.addingTimeInterval(
+        timelineSeekTargetsLiveEdge = target >= selectableLiveEdge.addingTimeInterval(
             -NativeTimeshiftActionPlan.liveEdgeTolerance
         )
         noteActivity()
@@ -1238,7 +1260,7 @@ struct PlaybackView: View {
 
             engine.refreshPlaybackInformation()
             if targetsLiveEdge {
-                engine.returnToLive()
+                engine.seekToPreferredLivePosition()
             } else {
                 let delta = target.timeIntervalSince(liveTimelinePlaybackDate())
                 if delta < -NativeTimeshiftActionPlan.liveEdgeTolerance {
@@ -1413,7 +1435,7 @@ struct PlaybackView: View {
     private func returnToLive() async {
         guard !presentation.isRecording else { return }
         if engine.activeLivePlaybackMode == .tvHeadend {
-            engine.returnToLive()
+            engine.seekToPreferredLivePosition()
             return
         }
         do {
@@ -1991,8 +2013,9 @@ private struct ProgrammePlaybackTimeline: View {
     }
 
     private func timeline(at liveDate: Date) -> some View {
+        let selectableLiveEdge = LiveTimelinePosition.userSeekableLiveEdge(at: liveDate)
         let proposedPlaybackDate = seekTargetsLiveEdge
-            ? liveDate
+            ? selectableLiveEdge
             : (seekTargetDate ?? pausedPlaybackDate
                 ?? liveDate.addingTimeInterval(-liveDelaySeconds))
         let playbackDate = LiveTimelinePosition.clampedDate(
@@ -2038,11 +2061,15 @@ private struct ProgrammePlaybackTimeline: View {
             }
 
             if let program {
+                let availableEnd = min(program.end, selectableLiveEdge)
                 TimelineBar(
                     program: program,
                     playbackDate: playbackDate,
-                    availableStart: max(program.start, bufferStartedAt ?? liveDate),
-                    availableEnd: min(program.end, liveDate),
+                    availableStart: min(
+                        max(program.start, bufferStartedAt ?? availableEnd),
+                        availableEnd
+                    ),
+                    availableEnd: availableEnd,
                     commercialBreaks: commercialBreaks,
                     isPaused: isPaused,
                     isFocused: isFocused,
@@ -2089,7 +2116,8 @@ private struct ProgrammePlaybackTimeline: View {
                 seekForward: { seekForward(PlayerNavigationPolicy.skipInterval) },
                 showsGoLive: canSeek
                     && liveDate.timeIntervalSince(playbackDate)
-                        > NativeTimeshiftActionPlan.liveEdgeTolerance,
+                        > NativeTimeshiftActionPlan.preferredLiveDelay
+                            + NativeTimeshiftActionPlan.liveEdgeTolerance,
                 goLive: returnToLive,
                 togglePlayback: togglePlayback,
                 showPanel: showPanel
