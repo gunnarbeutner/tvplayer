@@ -30,6 +30,19 @@ final class RecordingTopShelfArtworkPolicyTests: XCTestCase {
             RecordingTopShelfArtworkPolicy.selectedFilename(
                 guideArtwork: nil,
                 cachedFrame: nil,
+                channelLogo: nil,
+                fallback: "fallback.jpg"
+            ),
+            "fallback.jpg"
+        )
+    }
+
+    func testChannelLogoDoesNotReplaceComposedFallback() {
+        XCTAssertEqual(
+            RecordingTopShelfArtworkPolicy.selectedFilename(
+                guideArtwork: nil,
+                cachedFrame: nil,
+                channelLogo: "channel-logo.png",
                 fallback: "fallback.jpg"
             ),
             "fallback.jpg"
@@ -51,6 +64,31 @@ final class RecordingTopShelfArtworkPolicyTests: XCTestCase {
         XCTAssertTrue(completed.contains("completed"))
     }
 
+    func testFrameCacheChangesWhenAChannelLogoBecomesAvailable() {
+        let withoutLogo = RecordingTopShelfArtworkPolicy.frameCacheIdentifier(
+            recordingID: "recording-id",
+            state: .completed,
+            channelLogoIdentifier: nil
+        )
+        let withLogo = RecordingTopShelfArtworkPolicy.frameCacheIdentifier(
+            recordingID: "recording-id",
+            state: .completed,
+            channelLogoIdentifier: "channel-logo.png"
+        )
+
+        XCTAssertNotEqual(withoutLogo, withLogo)
+    }
+
+    func testChannelLogoIsRetainedAsSourceArtwork() {
+        XCTAssertEqual(
+            RecordingTopShelfArtworkPolicy.referencedFilenames(
+                selected: "recording-frame.jpg",
+                channelLogo: "channel-logo.png"
+            ),
+            ["recording-frame.jpg", "channel-logo.png"]
+        )
+    }
+
     func testGrowingRecordingsUseAnEarlierFrame() {
         let growing = RecordingTopShelfArtworkPolicy.snapshotPosition(for: .recording)
         let completed = RecordingTopShelfArtworkPolicy.snapshotPosition(for: .completed)
@@ -58,6 +96,122 @@ final class RecordingTopShelfArtworkPolicyTests: XCTestCase {
         XCTAssertEqual(growing, 0.05)
         XCTAssertEqual(completed, 0.20)
         XCTAssertLessThan(growing, completed)
+    }
+
+    func testGrowingRecordingUsesTimeWithinTheBytesAlreadyWritten() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let recording = TVRecording(
+            id: "growing-recording",
+            eventID: nil,
+            title: "Example Show",
+            subtitle: nil,
+            overview: "",
+            channelID: "channel",
+            channelName: "Example Channel",
+            start: now.addingTimeInterval(-60),
+            end: now.addingTimeInterval(3_540),
+            state: .recording,
+            statusText: nil,
+            warningText: nil,
+            fileSize: 1_000,
+            errorCount: 0,
+            dataErrorCount: 0,
+            autorecID: nil,
+            streamPath: "/recording"
+        )
+
+        let target = RecordingTopShelfArtworkPolicy.thumbnailSeekTarget(
+            for: recording,
+            now: now
+        )
+
+        XCTAssertEqual(target, .time(milliseconds: 48_000))
+    }
+
+    func testRecordingThumbnailOverlayIncludesIdentityAndState() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let program = GuideProgram(
+            id: "programme",
+            channelID: "channel",
+            title: "Example Show",
+            subtitle: "Guide subtitle",
+            overview: "",
+            start: start,
+            end: start.addingTimeInterval(3_600),
+            metadata: GuideProgramMetadata(
+                seasonNumber: "4",
+                episodeNumber: "8"
+            )
+        )
+        let recording = TVRecording(
+            id: "recording",
+            eventID: nil,
+            title: "Example Show",
+            subtitle: "Recorded subtitle",
+            overview: "",
+            channelID: "channel",
+            channelName: "Example Channel",
+            start: start,
+            end: start.addingTimeInterval(3_900),
+            state: .completed,
+            statusText: nil,
+            warningText: nil,
+            fileSize: 1_000,
+            errorCount: 0,
+            dataErrorCount: 0,
+            autorecID: nil,
+            streamPath: "/recording"
+        )
+
+        let overlay = RecordingThumbnailOverlayPolicy.overlay(
+            for: recording,
+            matchingProgram: program
+        )
+
+        XCTAssertEqual(overlay.title, "Example Show")
+        XCTAssertEqual(
+            overlay.detail,
+            "Season 4 · Episode 8 · Recorded subtitle"
+        )
+        XCTAssertEqual(overlay.channelName, "Example Channel")
+        XCTAssertEqual(overlay.badge, "RECORDED")
+    }
+
+    func testRecordingLogoPlateAvoidsTheBroadcastLogoRegion() {
+        let size = CGSize(width: 1_216, height: 684)
+
+        let plate = RecordingTopShelfArtworkLayout.logoPlateRect(in: size)
+
+        XCTAssertGreaterThan(plate.midY, size.height * 0.75)
+        XCTAssertGreaterThan(plate.midX, size.width * 0.75)
+        XCTAssertLessThanOrEqual(plate.maxX, size.width - 64)
+        XCTAssertLessThanOrEqual(plate.maxY, size.height - 48)
+    }
+
+    func testLogoPlateUsesDarkBackgroundForLightLogos() {
+        XCTAssertEqual(
+            RecordingTopShelfLogoPlateStyle.forContentLuminance(0.95),
+            .dark
+        )
+    }
+
+    func testLogoPlateUsesLightBackgroundForDarkLogos() {
+        XCTAssertEqual(
+            RecordingTopShelfLogoPlateStyle.forContentLuminance(0.05),
+            .light
+        )
+    }
+
+    func testThumbnailQueueRetainsWorkAddedDuringGeneration() {
+        var queue = RecordingThumbnailWorkQueue<String>()
+        queue.enqueue("first recording", forKey: "first")
+
+        XCTAssertEqual(queue.popFirst(), "first recording")
+
+        queue.enqueue("growing recording", forKey: "growing")
+
+        XCTAssertEqual(queue.popFirst(), "growing recording")
+        XCTAssertNil(queue.popFirst())
     }
 }
 
@@ -70,7 +224,7 @@ final class TopShelfSnapshotStoreTests: XCTestCase {
         XCTAssertEqual(cacheDirectory.path, "/shared/app-group/Library/Caches")
         XCTAssertEqual(
             cacheDirectory.appending(path: TopShelfSnapshotStore.snapshotFilename).path,
-            "/shared/app-group/Library/Caches/top-shelf-v1.json"
+            "/shared/app-group/Library/Caches/top-shelf-v2.json"
         )
     }
 
@@ -81,10 +235,44 @@ final class TopShelfSnapshotStoreTests: XCTestCase {
         XCTAssertNil(TopShelfSnapshotStore.cachedArtworkURL(for: "unrelated-image.jpg"))
     }
 
+    func testCarouselMetadataSurvivesSnapshotSerialization() throws {
+        let creationDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let item = TopShelfSnapshot.Item(
+            id: "programme",
+            title: "Example Show",
+            contextTitle: "On Now · Example Channel",
+            summary: "An example summary.",
+            genre: "Comedy",
+            duration: 3_600,
+            creationDate: creationDate,
+            mediaOptions: [.hd, .closedCaptioning],
+            namedAttributes: [
+                .init(name: "Episode", values: ["Season 2 · Episode 3"]),
+            ],
+            routeURL: "tvplayer://channel/example",
+            displayRouteURL: "tvplayer://show/channel/example",
+            artworkFilename: "top-shelf-artwork-example.jpg",
+            expirationDate: nil,
+            playbackProgress: nil
+        )
+
+        let data = try JSONEncoder().encode(item)
+        let decoded = try JSONDecoder().decode(TopShelfSnapshot.Item.self, from: data)
+
+        XCTAssertEqual(decoded.contextTitle, item.contextTitle)
+        XCTAssertEqual(decoded.summary, item.summary)
+        XCTAssertEqual(decoded.genre, item.genre)
+        XCTAssertEqual(decoded.duration, item.duration)
+        XCTAssertEqual(decoded.creationDate, creationDate)
+        XCTAssertEqual(decoded.mediaOptions, [.hd, .closedCaptioning])
+        XCTAssertEqual(decoded.namedAttributes, item.namedAttributes)
+        XCTAssertEqual(decoded.displayRouteURL, item.displayRouteURL)
+    }
+
     func testAvailableOnNowItemsExcludeExpiredAndFuturePrograms() {
         let now = Date(timeIntervalSince1970: 10_000)
         let snapshot = TopShelfSnapshot(
-            version: 1,
+            version: 2,
             generatedAt: now,
             onNow: [
                 item(id: "expired", start: now.addingTimeInterval(-120), end: now),
@@ -113,7 +301,7 @@ final class TopShelfSnapshotStoreTests: XCTestCase {
             end: now.addingTimeInterval(60)
         )
         let snapshot = TopShelfSnapshot(
-            version: 1,
+            version: 2,
             generatedAt: now,
             onNow: [item],
             recordings: []
@@ -196,7 +384,7 @@ final class TopShelfSnapshotStoreTests: XCTestCase {
         let now = Date(timeIntervalSince1970: 20_000)
         let end = now.addingTimeInterval(60)
         let snapshot = TopShelfSnapshot(
-            version: 1,
+            version: 2,
             generatedAt: now,
             onNow: [
                 item(id: "first", start: now, end: end, contentIdentifier: "episode:one"),
@@ -233,6 +421,123 @@ final class TopShelfSnapshotStoreTests: XCTestCase {
 }
 
 final class TopShelfOnNowPolicyTests: XCTestCase {
+    func testProgramCarouselMetadataIncludesGuideDetails() {
+        let firstAired = Date(timeIntervalSince1970: 1_700_000_000)
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let program = GuideProgram(
+            id: "programme",
+            channelID: "channel",
+            title: "Example Show",
+            subtitle: "The Example Episode",
+            overview: "A useful programme description.",
+            start: start,
+            end: start.addingTimeInterval(3_600),
+            metadata: GuideProgramMetadata(
+                seasonNumber: "2",
+                episodeNumber: "3",
+                firstAired: Int64(firstAired.timeIntervalSince1970),
+                categories: ["Comedy"],
+                ageRating: "FSK 12",
+                isHD: true,
+                isSubtitled: true,
+                isNew: true
+            )
+        )
+        let channel = GuideChannel(
+            id: "channel",
+            number: 2,
+            name: "Example Channel",
+            monogram: "EC",
+            tint: .blue,
+            iconURL: nil,
+            programs: [program]
+        )
+
+        let metadata = TopShelfMetadataPolicy.program(
+            channel: channel,
+            program: program
+        )
+
+        XCTAssertEqual(metadata.title, "Example Show")
+        XCTAssertEqual(metadata.contextTitle, "On Now · Example Channel")
+        XCTAssertEqual(
+            metadata.summary,
+            "The Example Episode\nA useful programme description."
+        )
+        XCTAssertEqual(metadata.genre, "Comedy")
+        XCTAssertEqual(metadata.duration, 3_600)
+        XCTAssertEqual(metadata.creationDate, firstAired)
+        XCTAssertEqual(metadata.mediaOptions, [.hd, .closedCaptioning])
+        XCTAssertEqual(
+            metadata.namedAttributes,
+            [
+                .init(name: "Episode", values: ["Season 2 · Episode 3"]),
+                .init(name: "Rating", values: ["FSK 12"]),
+                .init(name: "Features", values: ["New", "HD", "Subtitles"]),
+            ]
+        )
+    }
+
+    func testRecordingCarouselMetadataUsesRecordingAndMatchedGuideDetails() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let program = GuideProgram(
+            id: "programme",
+            channelID: "channel",
+            title: "Example Show",
+            subtitle: "Guide subtitle",
+            overview: "Guide overview",
+            start: start,
+            end: start.addingTimeInterval(3_600),
+            metadata: GuideProgramMetadata(
+                seasonNumber: "4",
+                episodeNumber: "8",
+                categories: ["Drama"],
+                starRating: "4/5",
+                isHD: true
+            )
+        )
+        let recording = TVRecording(
+            id: "recording",
+            eventID: nil,
+            title: "Example Show",
+            subtitle: "Recorded subtitle",
+            overview: "Recorded overview",
+            channelID: "channel",
+            channelName: "Example Channel",
+            start: start,
+            end: start.addingTimeInterval(3_900),
+            state: .completed,
+            statusText: nil,
+            warningText: nil,
+            fileSize: 1_000,
+            errorCount: 0,
+            dataErrorCount: 0,
+            autorecID: nil,
+            streamPath: "/recording"
+        )
+
+        let metadata = TopShelfMetadataPolicy.recording(
+            recording,
+            matchingProgram: program
+        )
+
+        XCTAssertEqual(metadata.title, "Example Show")
+        XCTAssertEqual(metadata.contextTitle, "Recorded · Example Channel")
+        XCTAssertEqual(metadata.summary, "Recorded subtitle\nRecorded overview")
+        XCTAssertEqual(metadata.genre, "Drama")
+        XCTAssertEqual(metadata.duration, 3_900)
+        XCTAssertEqual(metadata.creationDate, start)
+        XCTAssertEqual(metadata.mediaOptions, [.hd])
+        XCTAssertEqual(
+            metadata.namedAttributes,
+            [
+                .init(name: "Episode", values: ["Season 4 · Episode 8"]),
+                .init(name: "Rating", values: ["★ 4/5"]),
+                .init(name: "Features", values: ["HD"]),
+            ]
+        )
+    }
+
     func testSnapshotKeepsTheCompleteAvailableFavoriteSchedule() {
         let now = Date(timeIntervalSince1970: 5_000)
         var candidates: [TopShelfOnNowPolicy.Candidate] = []

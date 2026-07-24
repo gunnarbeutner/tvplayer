@@ -1,12 +1,30 @@
 import Foundation
 
 struct TopShelfSnapshot: Codable, Sendable {
+    enum MediaOption: String, Codable, Sendable {
+        case hd
+        case closedCaptioning
+    }
+
+    struct NamedAttribute: Codable, Sendable, Equatable {
+        let name: String
+        let values: [String]
+    }
+
     struct Item: Codable, Sendable, Identifiable {
         private static let topShelfRetirementLeadTime: TimeInterval = 2 * 60
 
         let id: String
         let title: String
+        let contextTitle: String?
+        let summary: String?
+        let genre: String?
+        let duration: TimeInterval?
+        let creationDate: Date?
+        let mediaOptions: [MediaOption]?
+        let namedAttributes: [NamedAttribute]?
         let routeURL: String
+        let displayRouteURL: String?
         let artworkFilename: String?
         let availabilityDate: Date?
         let expirationDate: Date?
@@ -16,7 +34,15 @@ struct TopShelfSnapshot: Codable, Sendable {
         init(
             id: String,
             title: String,
+            contextTitle: String? = nil,
+            summary: String? = nil,
+            genre: String? = nil,
+            duration: TimeInterval? = nil,
+            creationDate: Date? = nil,
+            mediaOptions: [MediaOption]? = nil,
+            namedAttributes: [NamedAttribute]? = nil,
             routeURL: String,
+            displayRouteURL: String? = nil,
             artworkFilename: String?,
             availabilityDate: Date? = nil,
             expirationDate: Date?,
@@ -25,12 +51,41 @@ struct TopShelfSnapshot: Codable, Sendable {
         ) {
             self.id = id
             self.title = title
+            self.contextTitle = contextTitle
+            self.summary = summary
+            self.genre = genre
+            self.duration = duration
+            self.creationDate = creationDate
+            self.mediaOptions = mediaOptions
+            self.namedAttributes = namedAttributes
             self.routeURL = routeURL
+            self.displayRouteURL = displayRouteURL
             self.artworkFilename = artworkFilename
             self.availabilityDate = availabilityDate
             self.expirationDate = expirationDate
             self.playbackProgress = playbackProgress
             self.contentIdentifier = contentIdentifier
+        }
+
+        func replacingArtworkFilename(with artworkFilename: String?) -> Self {
+            Self(
+                id: id,
+                title: title,
+                contextTitle: contextTitle,
+                summary: summary,
+                genre: genre,
+                duration: duration,
+                creationDate: creationDate,
+                mediaOptions: mediaOptions,
+                namedAttributes: namedAttributes,
+                routeURL: routeURL,
+                displayRouteURL: displayRouteURL,
+                artworkFilename: artworkFilename,
+                availabilityDate: availabilityDate,
+                expirationDate: expirationDate,
+                playbackProgress: playbackProgress,
+                contentIdentifier: contentIdentifier
+            )
         }
 
         func isAvailable(at date: Date) -> Bool {
@@ -132,7 +187,7 @@ enum TopShelfSnapshotStore {
     }
 
     static let appGroupIdentifier = "group.de.beutner.TVPlayer"
-    static let snapshotFilename = "top-shelf-v1.json"
+    static let snapshotFilename = "top-shelf-v2.json"
 
     static func containerURL(fileManager: FileManager = .default) -> URL? {
         fileManager.containerURL(
@@ -176,7 +231,7 @@ enum TopShelfSnapshotStore {
             .appending(path: snapshotFilename),
               let data = try? Data(contentsOf: url),
               let snapshot = try? JSONDecoder().decode(TopShelfSnapshot.self, from: data),
-              snapshot.version == 1
+              snapshot.version == 2
         else { return nil }
         return snapshot
     }

@@ -28,6 +28,23 @@ final class AppRouteTests: XCTestCase {
         XCTAssertEqual(AppRoute(url: route.url), route)
     }
 
+    func testChannelDetailsRouteRoundTripsWithoutOpeningPlayback() {
+        let route = AppRoute.showChannelDetails(
+            "channel id",
+            programID: "programme/id"
+        )
+
+        XCTAssertEqual(AppRoute(url: route.url), route)
+        XCTAssertFalse(route.opensPlayback)
+    }
+
+    func testRecordingDetailsRouteRoundTripsWithoutOpeningPlayback() {
+        let route = AppRoute.showRecordingDetails("recording id ä")
+
+        XCTAssertEqual(AppRoute(url: route.url), route)
+        XCTAssertFalse(route.opensPlayback)
+    }
+
     func testRejectsUnknownRoutesAndSchemes() {
         XCTAssertNil(AppRoute(url: URL(string: "https://example.com/guide")!))
         XCTAssertNil(AppRoute(url: URL(string: "tvplayer://play/unknown/123")!))
@@ -35,6 +52,8 @@ final class AppRouteTests: XCTestCase {
 
     func testOnlyPlayerRoutesOpenPlayback() {
         XCTAssertFalse(AppRoute.guide.opensPlayback)
+        XCTAssertFalse(AppRoute.showChannelDetails("channel", programID: "programme").opensPlayback)
+        XCTAssertFalse(AppRoute.showRecordingDetails("recording").opensPlayback)
         XCTAssertTrue(AppRoute.playChannel("channel").opensPlayback)
         XCTAssertTrue(AppRoute.playRecording("recording").opensPlayback)
     }

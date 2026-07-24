@@ -7,12 +7,14 @@ struct TopShelfLaunchContext: Equatable, Sendable {
 
 enum AppRoute: Equatable, Sendable {
     case guide
+    case showChannelDetails(String, programID: String?)
+    case showRecordingDetails(String)
     case playChannel(String, topShelf: TopShelfLaunchContext? = nil)
     case playRecording(String)
 
     var opensPlayback: Bool {
         switch self {
-        case .guide: false
+        case .guide, .showChannelDetails, .showRecordingDetails: false
         case .playChannel, .playRecording: true
         }
     }
@@ -28,18 +30,22 @@ enum AppRoute: Equatable, Sendable {
             self = .guide
             return
         }
-        guard host == "play", components.count == 2,
+        guard let host, ["play", "show"].contains(host), components.count == 2,
               let identifier = components[1].removingPercentEncoding,
               !identifier.isEmpty
         else { return nil }
 
+        let queryItems = URLComponents(
+            url: url,
+            resolvingAgainstBaseURL: false
+        )?.queryItems ?? []
         switch components[0].lowercased() {
         case "channel":
-            let queryItems = URLComponents(
-                url: url,
-                resolvingAgainstBaseURL: false
-            )?.queryItems ?? []
             let programID = queryItems.first { $0.name == "program" }?.value
+            if host == "show" {
+                self = .showChannelDetails(identifier, programID: programID)
+                return
+            }
             let artworkFilename = queryItems.first { $0.name == "artwork" }?.value
             let context = programID.flatMap { programID in
                 programID.isEmpty ? nil : TopShelfLaunchContext(
@@ -48,7 +54,10 @@ enum AppRoute: Equatable, Sendable {
                 )
             }
             self = .playChannel(identifier, topShelf: context)
-        case "recording": self = .playRecording(identifier)
+        case "recording":
+            self = host == "show"
+                ? .showRecordingDetails(identifier)
+                : .playRecording(identifier)
         default: return nil
         }
     }
@@ -57,6 +66,21 @@ enum AppRoute: Equatable, Sendable {
         switch self {
         case .guide:
             return URL(string: "tvplayer://guide")!
+        case let .showChannelDetails(identifier, programID):
+            return Self.contentURL(
+                action: "show",
+                kind: "channel",
+                identifier: identifier,
+                queryItems: programID.map {
+                    [URLQueryItem(name: "program", value: $0)]
+                } ?? []
+            )
+        case let .showRecordingDetails(identifier):
+            return Self.contentURL(
+                action: "show",
+                kind: "recording",
+                identifier: identifier
+            )
         case let .playChannel(identifier, context):
             var queryItems: [URLQueryItem] = []
             if let context {
@@ -65,24 +89,30 @@ enum AppRoute: Equatable, Sendable {
                     queryItems.append(URLQueryItem(name: "artwork", value: artworkFilename))
                 }
             }
-            return Self.playURL(
+            return Self.contentURL(
+                action: "play",
                 kind: "channel",
                 identifier: identifier,
                 queryItems: queryItems
             )
         case let .playRecording(identifier):
-            return Self.playURL(kind: "recording", identifier: identifier)
+            return Self.contentURL(
+                action: "play",
+                kind: "recording",
+                identifier: identifier
+            )
         }
     }
 
-    private static func playURL(
+    private static func contentURL(
+        action: String,
         kind: String,
         identifier: String,
         queryItems: [URLQueryItem] = []
     ) -> URL {
         var components = URLComponents()
         components.scheme = "tvplayer"
-        components.host = "play"
+        components.host = action
         components.path = "/\(kind)/\(identifier)"
         components.queryItems = queryItems.isEmpty ? nil : queryItems
         return components.url!

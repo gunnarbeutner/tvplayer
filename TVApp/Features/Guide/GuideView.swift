@@ -12,6 +12,7 @@ struct GuideView: View {
         isSelected: Bool,
         onOpenSettings: @escaping () -> Void,
         focusRequest: UUID? = nil,
+        detailRequest: Binding<ProgrammeDetailPresentation?> = .constant(nil),
         onPresentedChannelChange: @escaping (GuideChannel.ID?) -> Void = { _ in },
         onInitialFocusResolved: @escaping () -> Void = {},
         onExitToNavigator: @escaping () -> Void = {}
@@ -19,6 +20,7 @@ struct GuideView: View {
         self.isSelected = isSelected
         self.onOpenSettings = onOpenSettings
         self.focusRequest = focusRequest
+        self._detailRequest = detailRequest
         self.onPresentedChannelChange = onPresentedChannelChange
         self.onInitialFocusResolved = onInitialFocusResolved
         self.onExitToNavigator = onExitToNavigator
@@ -34,6 +36,7 @@ struct GuideView: View {
     @EnvironmentObject private var playback: PlaybackCoordinator
     @EnvironmentObject private var recordings: RecordingStore
     @EnvironmentObject private var channelPreferences: ChannelPreferencesStore
+    @Binding private var detailRequest: ProgrammeDetailPresentation?
 #if os(tvOS)
     @Environment(\.resetFocus) private var resetFocus
 #endif
@@ -186,6 +189,11 @@ struct GuideView: View {
                 onWatchLive: playFromDetails,
                 onPlayFromBeginning: playRecordingFromDetails
             )
+        }
+        .onChange(of: detailRequest?.id, initial: true) { _, _ in
+            guard let detailRequest else { return }
+            detail = detailRequest
+            self.detailRequest = nil
         }
         .onChange(of: scenePhase) { _, newPhase in
             guard newPhase == .active else { return }

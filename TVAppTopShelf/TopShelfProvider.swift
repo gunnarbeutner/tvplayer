@@ -11,31 +11,34 @@ final class TopShelfProvider: TVTopShelfContentProvider {
 
         let now = Date()
         let onNow = snapshot.availableOnNowItems(at: now)
-        var sections: [TVTopShelfItemCollection<TVTopShelfSectionedItem>] = []
-        if !onNow.isEmpty {
-            let section = TVTopShelfItemCollection(items: onNow.map(makeItem))
-            section.title = "On Now"
-            sections.append(section)
-        }
         let recordings = snapshot.recordings.filter { $0.isAvailable(at: now) }
-        if !recordings.isEmpty {
-            let section = TVTopShelfItemCollection(items: recordings.map(makeItem))
-            section.title = "Recordings"
-            sections.append(section)
+        let items = (onNow + recordings).map(makeItem)
+        guard !items.isEmpty else {
+            completionHandler(nil)
+            return
         }
-        completionHandler(sections.isEmpty ? nil : TVTopShelfSectionedContent(sections: sections))
+        completionHandler(TVTopShelfCarouselContent(style: .details, items: items))
     }
 
-    private func makeItem(_ snapshot: TopShelfSnapshot.Item) -> TVTopShelfSectionedItem {
-        let item = TVTopShelfSectionedItem(identifier: snapshot.id)
+    private func makeItem(_ snapshot: TopShelfSnapshot.Item) -> TVTopShelfCarouselItem {
+        let item = TVTopShelfCarouselItem(identifier: snapshot.id)
         item.title = snapshot.title
-        item.imageShape = .hdtv
+        item.contextTitle = snapshot.contextTitle
+        item.summary = snapshot.summary
+        item.genre = snapshot.genre
+        item.duration = snapshot.duration ?? 0
+        item.creationDate = snapshot.creationDate
+        item.mediaOptions = mediaOptions(for: snapshot.mediaOptions ?? [])
+        item.namedAttributes = (snapshot.namedAttributes ?? []).prefix(4).map {
+            TVTopShelfNamedAttribute(name: $0.name, values: $0.values)
+        }
         item.expirationDate = snapshot.topShelfExpirationDate
-        item.playbackProgress = snapshot.playbackProgress ?? 0
-        if let route = URL(string: snapshot.routeURL) {
-            let action = TVTopShelfAction(url: route)
-            item.displayAction = action
-            item.playAction = action
+        if let playURL = URL(string: snapshot.routeURL) {
+            item.playAction = TVTopShelfAction(url: playURL)
+        }
+        if let displayRouteURL = snapshot.displayRouteURL,
+           let displayURL = URL(string: displayRouteURL) {
+            item.displayAction = TVTopShelfAction(url: displayURL)
         }
         if let filename = snapshot.artworkFilename,
            let imageURL = TopShelfSnapshotStore.cachedArtworkURL(for: filename) {
@@ -46,5 +49,18 @@ final class TopShelfProvider: TVTopShelfContentProvider {
             item.setImageURL(imageURL, for: .screenScale2x)
         }
         return item
+    }
+
+    private func mediaOptions(
+        for options: [TopShelfSnapshot.MediaOption]
+    ) -> TVTopShelfCarouselItem.MediaOptions {
+        var result: TVTopShelfCarouselItem.MediaOptions = []
+        if options.contains(.hd) {
+            result.insert(.videoResolutionHD)
+        }
+        if options.contains(.closedCaptioning) {
+            result.insert(.audioTranscriptionClosedCaptioning)
+        }
+        return result
     }
 }

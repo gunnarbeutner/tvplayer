@@ -95,6 +95,8 @@ struct RootTabView: View {
     @State private var playbackAlertMessage: String?
     @State private var recordingAlertMessage: String?
     @State private var pendingRoute: AppRoute?
+    @State private var guideDetailRequest: ProgrammeDetailPresentation?
+    @State private var recordingDetailRequest: RecordingDetailRequest?
 #if os(tvOS)
     @State private var startupRoutePhase: StartupRoutePhase
     @State private var startupPlaybackRoute: AppRoute?
@@ -629,6 +631,40 @@ struct RootTabView: View {
             guideFocusRequest = UUID()
 #endif
 
+        case let .showChannelDetails(channelID, programID):
+            var channel = guide.channels.first { $0.id == channelID }
+            if channel == nil {
+                await guide.load(configuration: settings.configuration, force: true)
+                channel = guide.channels.first { $0.id == channelID }
+            }
+            guard let channel else {
+                playbackAlertMessage = "That channel is no longer available."
+                selection = .guide
+                return
+            }
+            let program = programID.flatMap { programID in
+                channel.programs.first { $0.id == programID }
+            } ?? channel.programs.first { $0.isAiring(at: guide.now) }
+            selection = .guide
+            guideDetailRequest = ProgrammeDetailPresentation(
+                program: program,
+                channel: channel
+            )
+
+        case let .showRecordingDetails(recordingID):
+            var recording = recordings.recordings.first { $0.id == recordingID }
+            if recording == nil {
+                await recordings.load(configuration: settings.configuration, force: true)
+                recording = recordings.recordings.first { $0.id == recordingID }
+            }
+            guard let recording else {
+                recordingAlertMessage = "That recording is no longer available."
+                selection = .recordings
+                return
+            }
+            selection = .recordings
+            recordingDetailRequest = RecordingDetailRequest(recording: recording)
+
         case let .playChannel(channelID, topShelfContext):
             var channel = guide.channels.first { $0.id == channelID }
             if channel == nil {
@@ -899,6 +935,7 @@ struct RootTabView: View {
                     isSelected: selection == .guide,
                     onOpenSettings: { selection = .settings },
                     focusRequest: guideFocusRequest,
+                    detailRequest: $guideDetailRequest,
                     onPresentedChannelChange: { guideHeaderChannelID = $0 },
                     onInitialFocusResolved: { allowsSectionNavigatorFocus = true },
                     onExitToNavigator: { navigationFocusRequest = .guide }
@@ -908,7 +945,8 @@ struct RootTabView: View {
             televisionSection(.recordings) {
                 RecordingsView(
                     onOpenSettings: { selection = .settings },
-                    focusRequest: recordingsFocusRequest
+                    focusRequest: recordingsFocusRequest,
+                    detailRequest: $recordingDetailRequest
                 )
             }
 
@@ -929,14 +967,18 @@ struct RootTabView: View {
 
             GuideView(
                 isSelected: selection == .guide,
-                onOpenSettings: { selection = .settings }
+                onOpenSettings: { selection = .settings },
+                detailRequest: $guideDetailRequest
             )
                 .tabItem {
                     Label("Guide", systemImage: "rectangle.grid.2x2")
                 }
                 .tag(AppTab.guide)
 
-            RecordingsView(onOpenSettings: { selection = .settings })
+            RecordingsView(
+                onOpenSettings: { selection = .settings },
+                detailRequest: $recordingDetailRequest
+            )
                 .tabItem {
                     Label("Recordings", systemImage: "record.circle")
                 }
@@ -983,10 +1025,14 @@ struct RootTabView: View {
         case .guide:
             GuideView(
                 isSelected: true,
-                onOpenSettings: { selection = .settings }
+                onOpenSettings: { selection = .settings },
+                detailRequest: $guideDetailRequest
             )
         case .recordings:
-            RecordingsView(onOpenSettings: { selection = .settings })
+            RecordingsView(
+                onOpenSettings: { selection = .settings },
+                detailRequest: $recordingDetailRequest
+            )
         case .settings:
             SettingsView()
         }

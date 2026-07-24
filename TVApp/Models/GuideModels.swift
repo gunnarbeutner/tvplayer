@@ -97,9 +97,7 @@ struct GuideProgramMetadata: Hashable, Codable, Sendable {
 
     static let empty = GuideProgramMetadata()
 
-    var displayLabels: [String] {
-        var labels: [String] = []
-
+    var episodeDisplayDescription: String? {
         let seasonDescription = Self.numberDescription(
             label: "Season",
             number: seasonNumber,
@@ -111,20 +109,40 @@ struct GuideProgramMetadata: Hashable, Codable, Sendable {
             count: episodeCount
         )
         if let seasonDescription, let episodeDescription {
-            labels.append("\(seasonDescription) · \(episodeDescription)")
-        } else if let seasonDescription {
-            labels.append(seasonDescription)
-        } else if let episodeDescription {
-            labels.append(episodeDescription)
+            return "\(seasonDescription) · \(episodeDescription)"
         }
-        if let part = Self.numberDescription(label: "Part", number: partNumber, count: partCount) {
-            labels.append(part)
+        return seasonDescription ?? episodeDescription
+    }
+
+    var primaryContentLabel: String? {
+        contentLabels.first
+    }
+
+    var ratingDisplayDescription: String? {
+        if let rating = ratingLabel ?? ageRating {
+            return rating
         }
-        labels.append(contentsOf: contentLabels.prefix(3))
+        return starRating.map { "★ \($0)" }
+    }
+
+    var featureLabels: [String] {
+        var labels: [String] = []
         if isNew { labels.append("New") }
         if isHD { labels.append("HD") }
         if isWidescreen { labels.append("Widescreen") }
         if isSubtitled { labels.append("Subtitles") }
+        return labels
+    }
+
+    var displayLabels: [String] {
+        var labels: [String] = []
+
+        if let episodeDisplayDescription { labels.append(episodeDisplayDescription) }
+        if let part = Self.numberDescription(label: "Part", number: partNumber, count: partCount) {
+            labels.append(part)
+        }
+        labels.append(contentsOf: contentLabels.prefix(3))
+        labels.append(contentsOf: featureLabels)
         if let rating = ratingLabel ?? ageRating { labels.append(rating) }
         if let starRating { labels.append("★ \(starRating)") }
 

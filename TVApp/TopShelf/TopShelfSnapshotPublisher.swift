@@ -74,6 +74,114 @@ enum TopShelfOnNowPolicy {
     }
 }
 
+struct TopShelfDisplayMetadata: Equatable, Sendable {
+    let title: String
+    let contextTitle: String
+    let summary: String?
+    let genre: String?
+    let duration: TimeInterval
+    let creationDate: Date
+    let mediaOptions: [TopShelfSnapshot.MediaOption]
+    let namedAttributes: [TopShelfSnapshot.NamedAttribute]
+}
+
+enum TopShelfMetadataPolicy {
+    static func program(
+        channel: GuideChannel,
+        program: GuideProgram
+    ) -> TopShelfDisplayMetadata {
+        metadata(
+            title: program.title,
+            contextTitle: "On Now · \(channel.name)",
+            subtitle: program.subtitle,
+            overview: program.overview,
+            start: program.start,
+            duration: program.duration,
+            guideMetadata: program.metadata
+        )
+    }
+
+    static func recording(
+        _ recording: TVRecording,
+        matchingProgram: GuideProgram?
+    ) -> TopShelfDisplayMetadata {
+        metadata(
+            title: recording.title,
+            contextTitle: "\(recording.state.label) · \(recording.channelName)",
+            subtitle: recording.subtitle ?? matchingProgram?.subtitle,
+            overview: recording.overview.isEmpty
+                ? matchingProgram?.overview ?? ""
+                : recording.overview,
+            start: recording.start,
+            duration: recording.duration,
+            guideMetadata: matchingProgram?.metadata ?? .empty,
+            preferFirstAiredDate: false
+        )
+    }
+
+    private static func metadata(
+        title: String,
+        contextTitle: String,
+        subtitle: String?,
+        overview: String,
+        start: Date,
+        duration: TimeInterval,
+        guideMetadata: GuideProgramMetadata,
+        preferFirstAiredDate: Bool = true
+    ) -> TopShelfDisplayMetadata {
+        var mediaOptions: [TopShelfSnapshot.MediaOption] = []
+        if guideMetadata.isHD {
+            mediaOptions.append(.hd)
+        }
+        if guideMetadata.isSubtitled {
+            mediaOptions.append(.closedCaptioning)
+        }
+
+        var namedAttributes: [TopShelfSnapshot.NamedAttribute] = []
+        if let episode = guideMetadata.episodeDisplayDescription {
+            namedAttributes.append(.init(name: "Episode", values: [episode]))
+        }
+        if let rating = guideMetadata.ratingDisplayDescription {
+            namedAttributes.append(.init(name: "Rating", values: [rating]))
+        }
+        if !guideMetadata.featureLabels.isEmpty {
+            namedAttributes.append(
+                .init(name: "Features", values: guideMetadata.featureLabels)
+            )
+        }
+
+        let firstAiredDate = guideMetadata.firstAired.flatMap { timestamp in
+            timestamp > 0 ? Date(timeIntervalSince1970: TimeInterval(timestamp)) : nil
+        }
+        return TopShelfDisplayMetadata(
+            title: title,
+            contextTitle: contextTitle,
+            summary: summary(subtitle: subtitle, overview: overview),
+            genre: guideMetadata.primaryContentLabel,
+            duration: duration,
+            creationDate: preferFirstAiredDate ? firstAiredDate ?? start : start,
+            mediaOptions: mediaOptions,
+            namedAttributes: namedAttributes
+        )
+    }
+
+    private static func summary(subtitle: String?, overview: String) -> String? {
+        var seen = Set<String>()
+        let values = [subtitle, overview].compactMap { value -> String? in
+            guard let value else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            let normalized = trimmed
+                .split(whereSeparator: \.isWhitespace)
+                .joined(separator: " ")
+                .lowercased()
+            guard seen.insert(normalized).inserted else { return nil }
+            return trimmed
+        }
+        return values.isEmpty ? nil : values.joined(separator: "\n")
+    }
+}
+
 actor TopShelfSnapshotPublisher {
     static let shared = TopShelfSnapshotPublisher()
 
@@ -84,10 +192,18 @@ actor TopShelfSnapshotPublisher {
 
     private struct ThumbnailCandidate: Sendable {
         let recording: TVRecording
-        let fallbackFilename: String
+        let replacementArtworkFilename: String
+        let overlay: RecordingThumbnailOverlay
+        let channelLogoFilename: String?
+    }
+
+    private struct ThumbnailWork: Sendable {
+        let candidate: ThumbnailCandidate
+        let configuration: TVHeadendConfiguration
     }
 
     private var thumbnailGenerationTask: Task<Void, Never>?
+    private var thumbnailWorkQueue = RecordingThumbnailWorkQueue<ThumbnailWork>()
     private var nextThumbnailAttempt: [String: Date] = [:]
 
     func publish(
@@ -141,6 +257,10 @@ actor TopShelfSnapshotPublisher {
         var attemptedChannelArtwork = Set<GuideChannel.ID>()
         var onNowItems: [TopShelfSnapshot.Item] = []
         for (channel, program) in favoriteProgramCandidates {
+            let metadata = TopShelfMetadataPolicy.program(
+                channel: channel,
+                program: program
+            )
             let filename: String?
             if detailedArtworkIDs.contains("\(channel.id):\(program.id)") {
                 filename = await cacheArtwork(
@@ -164,13 +284,24 @@ actor TopShelfSnapshotPublisher {
             onNowItems.append(
                 TopShelfSnapshot.Item(
                     id: "channel:\(channel.id)",
-                    title: "\(channel.name): \(program.title)",
+                    title: metadata.title,
+                    contextTitle: metadata.contextTitle,
+                    summary: metadata.summary,
+                    genre: metadata.genre,
+                    duration: metadata.duration,
+                    creationDate: metadata.creationDate,
+                    mediaOptions: metadata.mediaOptions,
+                    namedAttributes: metadata.namedAttributes,
                     routeURL: AppRoute.playChannel(
                         channel.id,
                         topShelf: TopShelfLaunchContext(
                             programID: program.id,
                             artworkFilename: filename
                         )
+                    ).url.absoluteString,
+                    displayRouteURL: AppRoute.showChannelDetails(
+                        channel.id,
+                        programID: program.id
                     ).url.absoluteString,
                     artworkFilename: filename,
                     availabilityDate: program.start,
@@ -196,34 +327,71 @@ actor TopShelfSnapshotPublisher {
                 identifier: "recording-\(recording.id)",
                 client: artworkClient
             )
+            let metadata = TopShelfMetadataPolicy.recording(
+                recording,
+                matchingProgram: matchingProgram
+            )
+            let thumbnailOverlay = RecordingThumbnailOverlayPolicy.overlay(
+                for: recording,
+                matchingProgram: matchingProgram
+            )
             let channel = channels.first {
                 $0.id == recording.channelID || $0.name == recording.channelName
             }
-            let cachedFrameFilename = cachedRecordingFrameFilename(for: recording)
+            let channelLogoFilename = await cacheArtwork(
+                urlString: channel?.iconURL?.absoluteString,
+                identifier: channel.map { "channel-\($0.id)-fallback" }
+                    ?? "recording-\(recording.id)-channel",
+                client: artworkClient
+            )
+            let cachedFrameFilename = cachedRecordingFrameFilename(
+                for: recording,
+                channelLogoIdentifier: channelLogoFilename
+            )
             let fallbackFilename = cacheRecordingFallback(
                 for: recording,
-                channel: channel
+                channel: channel,
+                channelLogoFilename: channelLogoFilename,
+                overlay: thumbnailOverlay
             )
             let filename = RecordingTopShelfArtworkPolicy.selectedFilename(
                 guideArtwork: guideArtworkFilename,
                 cachedFrame: cachedFrameFilename,
+                channelLogo: channelLogoFilename,
                 fallback: fallbackFilename
             )
-            if let filename { referencedArtwork.insert(filename) }
+            referencedArtwork.formUnion(
+                RecordingTopShelfArtworkPolicy.referencedFilenames(
+                    selected: filename,
+                    channelLogo: channelLogoFilename
+                )
+            )
             if guideArtworkFilename == nil, cachedFrameFilename == nil,
-               let fallbackFilename {
+               let filename {
                 thumbnailCandidates.append(
                     ThumbnailCandidate(
                         recording: recording,
-                        fallbackFilename: fallbackFilename
+                        replacementArtworkFilename: filename,
+                        overlay: thumbnailOverlay,
+                        channelLogoFilename: channelLogoFilename
                     )
                 )
             }
             recordingItems.append(
                 TopShelfSnapshot.Item(
                     id: "recording:\(recording.id)",
-                    title: recording.title,
+                    title: metadata.title,
+                    contextTitle: metadata.contextTitle,
+                    summary: metadata.summary,
+                    genre: metadata.genre,
+                    duration: metadata.duration,
+                    creationDate: metadata.creationDate,
+                    mediaOptions: metadata.mediaOptions,
+                    namedAttributes: metadata.namedAttributes,
                     routeURL: AppRoute.playRecording(recording.id).url.absoluteString,
+                    displayRouteURL: AppRoute.showRecordingDetails(
+                        recording.id
+                    ).url.absoluteString,
                     artworkFilename: filename,
                     expirationDate: nil,
                     playbackProgress: nil
@@ -232,7 +400,7 @@ actor TopShelfSnapshotPublisher {
         }
 
         let snapshot = TopShelfSnapshot(
-            version: 1,
+            version: 2,
             generatedAt: now,
             guideCoverageEnd: guideCoverageEnd,
             onNow: onNowItems,
@@ -257,35 +425,60 @@ actor TopShelfSnapshotPublisher {
         candidates: [ThumbnailCandidate],
         configuration: TVHeadendConfiguration
     ) {
-        guard thumbnailGenerationTask == nil, !candidates.isEmpty else { return }
-        thumbnailGenerationTask = Task(priority: .utility) { [weak self] in
-            guard let self else { return }
-            for candidate in candidates {
-                guard !Task.isCancelled else { break }
-                await self.generateThumbnail(
-                    for: candidate,
-                    configuration: configuration
+        for candidate in candidates {
+            let work = ThumbnailWork(
+                candidate: candidate,
+                configuration: configuration
+            )
+            thumbnailWorkQueue.enqueue(
+                work,
+                forKey: recordingFrameCacheKey(
+                    for: candidate.recording,
+                    channelLogoIdentifier: candidate.channelLogoFilename
                 )
-            }
-            await self.thumbnailGenerationFinished()
+            )
         }
+        guard thumbnailGenerationTask == nil, !thumbnailWorkQueue.isEmpty else { return }
+        thumbnailGenerationTask = Task(priority: .utility) { [weak self] in
+            await self?.drainThumbnailQueue()
+        }
+    }
+
+    private func drainThumbnailQueue() async {
+        while !Task.isCancelled, let work = thumbnailWorkQueue.popFirst() {
+            await generateThumbnail(
+                for: work.candidate,
+                configuration: work.configuration
+            )
+        }
+        thumbnailGenerationTask = nil
     }
 
     private func generateThumbnail(
         for candidate: ThumbnailCandidate,
         configuration: TVHeadendConfiguration
     ) async {
-        let cacheKey = recordingFrameCacheKey(for: candidate.recording)
+        let cacheKey = recordingFrameCacheKey(
+            for: candidate.recording,
+            channelLogoIdentifier: candidate.channelLogoFilename
+        )
         let now = Date()
         guard nextThumbnailAttempt[cacheKey].map({ $0 <= now }) != false else { return }
 
         guard let data = await RecordingThumbnailGenerator.shared.thumbnailData(
             for: candidate.recording,
+            overlay: candidate.overlay,
+            channelLogoData: candidate.channelLogoFilename.flatMap {
+                TopShelfSnapshotStore.cachedArtworkURL(for: $0)
+            }.flatMap {
+                try? Data(contentsOf: $0)
+            },
             configuration: configuration
         ),
               let filename = storeRecordingFrame(
                 data,
-                for: candidate.recording
+                for: candidate.recording,
+                channelLogoIdentifier: candidate.channelLogoFilename
               )
         else {
             let retryDelay: TimeInterval = candidate.recording.state == .recording
@@ -297,14 +490,10 @@ actor TopShelfSnapshotPublisher {
 
         nextThumbnailAttempt[cacheKey] = nil
         replaceFallback(
-            candidate.fallbackFilename,
+            candidate.replacementArtworkFilename,
             with: filename,
             for: candidate.recording
         )
-    }
-
-    private func thumbnailGenerationFinished() {
-        thumbnailGenerationTask = nil
     }
 
     private func replaceFallback(
@@ -318,14 +507,7 @@ actor TopShelfSnapshotPublisher {
         let recordings = snapshot.recordings.map { item in
             guard item.id == itemID, item.artworkFilename == fallbackFilename else { return item }
             replaced = true
-            return TopShelfSnapshot.Item(
-                id: item.id,
-                title: item.title,
-                routeURL: item.routeURL,
-                artworkFilename: thumbnailFilename,
-                expirationDate: item.expirationDate,
-                playbackProgress: item.playbackProgress
-            )
+            return item.replacingArtworkFilename(with: thumbnailFilename)
         }
         guard replaced else { return }
 
@@ -376,19 +558,32 @@ actor TopShelfSnapshotPublisher {
         }
     }
 
-    private func cachedRecordingFrameFilename(for recording: TVRecording) -> String? {
+    private func cachedRecordingFrameFilename(
+        for recording: TVRecording,
+        channelLogoIdentifier: String?
+    ) -> String? {
         guard let cacheDirectory = TopShelfSnapshotStore.cacheDirectoryURL() else { return nil }
-        let filename = recordingFrameFilename(for: recording)
+        let filename = recordingFrameFilename(
+            for: recording,
+            channelLogoIdentifier: channelLogoIdentifier
+        )
         return FileManager.default.fileExists(
             atPath: cacheDirectory.appending(path: filename).path
         ) ? filename : nil
     }
 
-    private func storeRecordingFrame(_ data: Data, for recording: TVRecording) -> String? {
+    private func storeRecordingFrame(
+        _ data: Data,
+        for recording: TVRecording,
+        channelLogoIdentifier: String?
+    ) -> String? {
         guard !data.isEmpty,
               let cacheDirectory = TopShelfSnapshotStore.cacheDirectoryURL()
         else { return nil }
-        let filename = recordingFrameFilename(for: recording)
+        let filename = recordingFrameFilename(
+            for: recording,
+            channelLogoIdentifier: channelLogoIdentifier
+        )
         do {
             try data.write(to: cacheDirectory.appending(path: filename), options: [.atomic])
             return filename
@@ -397,36 +592,59 @@ actor TopShelfSnapshotPublisher {
         }
     }
 
-    private func recordingFrameFilename(for recording: TVRecording) -> String {
-        "top-shelf-artwork-\(recordingFrameCacheKey(for: recording)).jpg"
+    private func recordingFrameFilename(
+        for recording: TVRecording,
+        channelLogoIdentifier: String?
+    ) -> String {
+        let key = recordingFrameCacheKey(
+            for: recording,
+            channelLogoIdentifier: channelLogoIdentifier
+        )
+        return "top-shelf-artwork-\(key).jpg"
     }
 
-    private func recordingFrameCacheKey(for recording: TVRecording) -> String {
+    private func recordingFrameCacheKey(
+        for recording: TVRecording,
+        channelLogoIdentifier: String?
+    ) -> String {
         digest(
             RecordingTopShelfArtworkPolicy.frameCacheIdentifier(
                 recordingID: recording.id,
-                state: recording.state
+                state: recording.state,
+                channelLogoIdentifier: channelLogoIdentifier
             )
         )
     }
 
     private func cacheRecordingFallback(
         for recording: TVRecording,
-        channel: GuideChannel?
+        channel: GuideChannel?,
+        channelLogoFilename: String?,
+        overlay: RecordingThumbnailOverlay
     ) -> String? {
         guard let cacheDirectory = TopShelfSnapshotStore.cacheDirectoryURL() else { return nil }
         let identifier = [
-            "recording-fallback-v1",
+            "recording-fallback-v3",
             recording.id,
             recording.title,
+            overlay.detail ?? "no-detail",
             recording.channelName,
             recording.state.rawValue,
+            channelLogoFilename ?? "no-logo",
         ].joined(separator: "-")
         let filename = "top-shelf-artwork-\(digest(identifier)).jpg"
         let destination = cacheDirectory.appending(path: filename)
         if FileManager.default.fileExists(atPath: destination.path) { return filename }
 
-        guard let data = recordingFallbackData(for: recording, channel: channel) else { return nil }
+        let channelLogo = channelLogoFilename
+            .flatMap { TopShelfSnapshotStore.cachedArtworkURL(for: $0) }
+            .flatMap { UIImage(contentsOfFile: $0.path) }
+        guard let data = recordingFallbackData(
+            for: recording,
+            channel: channel,
+            channelLogo: channelLogo,
+            overlay: overlay
+        ) else { return nil }
         do {
             try data.write(to: destination, options: [.atomic])
             return filename
@@ -437,7 +655,9 @@ actor TopShelfSnapshotPublisher {
 
     private func recordingFallbackData(
         for recording: TVRecording,
-        channel: GuideChannel?
+        channel: GuideChannel?,
+        channelLogo: UIImage?,
+        overlay: RecordingThumbnailOverlay
     ) -> Data? {
         let pointSize = TVTopShelfSectionedContent.imageSize(for: .hdtv)
         let size = CGSize(
@@ -471,54 +691,16 @@ actor TopShelfSnapshotPublisher {
                 in: .whitespacesAndNewlines
             )
             let fallbackMonogram = recording.channelName.split(separator: " ").prefix(2)
-                    .compactMap(\.first).map(String.init).joined().uppercased()
+                .compactMap(\.first).map(String.init).joined().uppercased()
             let monogram = channelMonogram?.isEmpty == false
                 ? channelMonogram ?? fallbackMonogram
                 : fallbackMonogram
-            let monogramAttributes: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 150, weight: .black),
-                .foregroundColor: UIColor.white.withAlphaComponent(0.22),
-            ]
-            (monogram as NSString).draw(
-                in: CGRect(x: size.width - 390, y: 70, width: 300, height: 190),
-                withAttributes: monogramAttributes
-            )
-
-            let badgeText = recording.state == .recording ? "RECORDING" : "RECORDED"
-            let badgeAttributes: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 30, weight: .bold),
-                .foregroundColor: UIColor.white,
-            ]
-            let badge = NSMutableAttributedString(
-                string: "●",
-                attributes: badgeAttributes.merging([.foregroundColor: UIColor.systemRed]) { $1 }
-            )
-            badge.append(NSAttributedString(string: "  \(badgeText)", attributes: badgeAttributes))
-            badge.draw(
-                at: CGPoint(x: 72, y: 64),
-            )
-
-            let paragraph = NSMutableParagraphStyle()
-            paragraph.lineBreakMode = .byTruncatingTail
-            let titleAttributes: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 64, weight: .bold),
-                .foregroundColor: UIColor.white,
-                .paragraphStyle: paragraph,
-            ]
-            (recording.title as NSString).draw(
-                with: CGRect(x: 72, y: 170, width: size.width - 144, height: 180),
-                options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
-                attributes: titleAttributes,
-                context: nil
-            )
-
-            let metadataAttributes: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 34, weight: .semibold),
-                .foregroundColor: UIColor.white.withAlphaComponent(0.78),
-            ]
-            (recording.channelName as NSString).draw(
-                at: CGPoint(x: 72, y: size.height - 105),
-                withAttributes: metadataAttributes
+            RecordingTopShelfArtworkRenderer.drawOverlay(
+                overlay,
+                channelLogo: channelLogo,
+                fallbackMonogram: monogram,
+                size: size,
+                context: context.cgContext
             )
         }
         return image.jpegData(compressionQuality: 0.86)

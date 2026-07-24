@@ -1,18 +1,29 @@
 import SwiftUI
 
+struct RecordingDetailRequest: Identifiable {
+    let id = UUID()
+    let recording: TVRecording
+}
+
 struct RecordingsView: View {
     let onOpenSettings: () -> Void
     let focusRequest: UUID?
 
-    init(onOpenSettings: @escaping () -> Void, focusRequest: UUID? = nil) {
+    init(
+        onOpenSettings: @escaping () -> Void,
+        focusRequest: UUID? = nil,
+        detailRequest: Binding<RecordingDetailRequest?> = .constant(nil)
+    ) {
         self.onOpenSettings = onOpenSettings
         self.focusRequest = focusRequest
+        self._detailRequest = detailRequest
     }
 
     @EnvironmentObject private var store: RecordingStore
     @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var guide: GuideViewModel
     @EnvironmentObject private var playback: PlaybackCoordinator
+    @Binding private var detailRequest: RecordingDetailRequest?
     @FocusState private var focusedRecordingID: TVRecording.ID?
     @State private var selectedRecording: TVRecording?
     @State private var ruleToDelete: TVRecordingRule?
@@ -53,6 +64,11 @@ struct RecordingsView: View {
                 onPlayRecording: playFromDetails,
                 onWatchLive: watchLiveFromDetails
             )
+        }
+        .onChange(of: detailRequest?.id, initial: true) { _, _ in
+            guard let detailRequest else { return }
+            selectedRecording = detailRequest.recording
+            self.detailRequest = nil
         }
         .confirmationDialog(
             "Stop recording all future showings?",
