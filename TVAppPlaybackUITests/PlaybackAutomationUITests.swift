@@ -202,7 +202,17 @@ final class PlaybackAutomationUITests: XCTestCase {
 
     func testReplayTestSignalDisplaysAllFourCornerPixels() throws {
         launchReplay()
-        _ = try waitForReadyPlayback(timeout: 8)
+        let playback = try waitForReadyPlayback(timeout: 8)
+        XCTAssertEqual(
+            playback.videoTrackWidth,
+            1_920,
+            "The replay fixture must remain native 1080p."
+        )
+        XCTAssertEqual(
+            playback.videoTrackHeight,
+            1_080,
+            "The replay fixture must remain native 1080p."
+        )
         try waitForPlaybackChromeToHide(timeout: 8)
 
         let screenshot = attachScreenshot(named: "Replay test signal corners")
@@ -473,6 +483,16 @@ final class PlaybackAutomationUITests: XCTestCase {
         let image = try XCTUnwrap(screenshot.image.cgImage)
         let width = image.width
         let height = image.height
+        XCTAssertEqual(
+            width,
+            1_920,
+            "The corner test requires the 1080p tvOS simulator display."
+        )
+        XCTAssertEqual(
+            height,
+            1_080,
+            "The corner test requires the 1080p tvOS simulator display."
+        )
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
         let context = try XCTUnwrap(
             CGContext(
@@ -487,26 +507,20 @@ final class PlaybackAutomationUITests: XCTestCase {
         )
         context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-        // The one-source-pixel marker is 3×3 pixels on a 1080p display and
-        // 6×6 on a 4K display. Search a similarly scaled patch so capture
-        // filtering cannot hide it, while staying clear of the test pattern.
-        let patchSize = max(4, min(width, height) / 180)
+        // The replay fixture is native 1080p, so each source corner maps to
+        // the corresponding screen corner without a fixture-size rescale.
         let corners = [
             ("top left", 0, 0),
-            ("top right", width - patchSize, 0),
-            ("bottom left", 0, height - patchSize),
-            ("bottom right", width - patchSize, height - patchSize),
+            ("top right", width - 1, 0),
+            ("bottom left", 0, height - 1),
+            ("bottom right", width - 1, height - 1),
         ]
 
-        for (name, originX, originY) in corners {
-            let markerIsVisible = (originY..<(originY + patchSize)).contains { y in
-                (originX..<(originX + patchSize)).contains { x in
-                    let offset = (y * width + x) * 4
-                    return pixels[offset] >= 180
-                        && pixels[offset + 1] >= 180
-                        && pixels[offset + 2] >= 180
-                }
-            }
+        for (name, x, y) in corners {
+            let offset = (y * width + x) * 4
+            let markerIsVisible = pixels[offset] >= 100
+                && pixels[offset + 1] >= 100
+                && pixels[offset + 2] >= 100
             XCTAssertTrue(
                 markerIsVisible,
                 "The replay test signal's \(name) corner pixel is cropped."
