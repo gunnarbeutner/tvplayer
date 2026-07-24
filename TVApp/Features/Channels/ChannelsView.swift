@@ -329,7 +329,9 @@ private struct ChannelCard: View {
         .padding(24)
         .frame(height: cardHeight, alignment: .topLeading)
         .background(
-            isFocused ? AppTheme.focused : (isPlaying ? AppTheme.playing : AppTheme.surface),
+            isFocused && isPlaying
+                ? AppTheme.focusedPlaying
+                : (isFocused ? AppTheme.focused : (isPlaying ? AppTheme.playing : AppTheme.surface)),
             in: RoundedRectangle(cornerRadius: 14)
         )
         .overlay {

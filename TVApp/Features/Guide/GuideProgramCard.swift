@@ -13,6 +13,7 @@ struct GuideProgramCard: View {
     }
 
     private var background: Color {
+        if isFocused, isPlaying { return AppTheme.focusedPlaying }
         if isFocused { return AppTheme.focused }
         if isPlaying { return AppTheme.playing }
         switch phase {

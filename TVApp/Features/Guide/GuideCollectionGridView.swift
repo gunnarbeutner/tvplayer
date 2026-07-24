@@ -2075,7 +2075,9 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
             isChannelFocusActive: isChannelFocusActive
         )
         let background: UIColor
-        if presentsFocus {
+        if presentsFocus, isPlaying {
+            background = UIColor(AppTheme.focusedPlaying)
+        } else if presentsFocus {
             background = UIColor(AppTheme.focused)
         } else if isPlaying {
             background = UIColor(AppTheme.playing)
