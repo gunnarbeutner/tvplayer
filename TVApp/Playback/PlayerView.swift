@@ -9,6 +9,13 @@ private enum PlayerChromeMode: Equatable {
     case panel
 }
 
+private struct PlayerChromeAutoHideTaskID: Equatable {
+    let activity: UUID
+    let mode: PlayerChromeMode
+    let hasActiveSeekPreview: Bool
+    let shouldAutoHide: Bool
+}
+
 private enum PlayerOverlayTab: String, CaseIterable, Identifiable {
     case details = "Details"
     case playback = "Playback"
@@ -294,6 +301,25 @@ struct PlaybackView: View {
                 Color.clear.ignoresSafeArea()
             }
 
+#if os(iOS)
+            IOSHoldSeekSurface(
+                isEnabled: canPreviewSeek && chromeMode != .panel,
+                activate: beginTouchSeekPreview,
+                updateTranslation: updateTouchSeekPreview,
+                finish: finishTouchSeekPreview,
+                tap: {
+                    switch chromeMode {
+                    case .hidden, .panel:
+                        showTimeline()
+                    case .timeline:
+                        hideChrome()
+                    }
+                }
+            )
+                .ignoresSafeArea()
+                .accessibilityHidden(chromeMode != .hidden)
+                .accessibilityLabel("Show playback timeline")
+#else
             if chromeMode == .hidden {
                 Color.clear
                     .contentShape(Rectangle())
@@ -301,21 +327,10 @@ struct PlaybackView: View {
                     .focusable()
                     .focused($wakeSurfaceFocused)
                     .focusEffectDisabled()
-#if os(iOS)
-                    .modifier(
-                        IOSHoldSeekGestureModifier(
-                            isEnabled: canPreviewSeek,
-                            activate: beginTouchSeekPreview,
-                            updateTranslation: updateTouchSeekPreview,
-                            finish: finishTouchSeekPreview,
-                            tap: showTimeline
-                        )
-                    )
-#else
                     .onTapGesture(perform: showTimeline)
-#endif
                     .accessibilityLabel("Show playback timeline")
             }
+#endif
 
             if showsCommercialDetectionOverlay,
                !presentation.isRecording,
@@ -334,28 +349,11 @@ struct PlaybackView: View {
                 .zIndex(4)
             }
 
-#if !os(tvOS)
+#if os(macOS)
             if chromeMode != .hidden {
                 Color.clear
                     .contentShape(Rectangle())
                     .ignoresSafeArea()
-#if os(iOS)
-                    .modifier(
-                        IOSHoldSeekGestureModifier(
-                            isEnabled: canPreviewSeek && chromeMode != .panel,
-                            activate: beginTouchSeekPreview,
-                            updateTranslation: updateTouchSeekPreview,
-                            finish: finishTouchSeekPreview,
-                            tap: {
-                                if chromeMode == .panel {
-                                    showTimeline()
-                                } else {
-                                    hideChrome()
-                                }
-                            }
-                        )
-                    )
-#else
                     .onTapGesture {
                         if chromeMode == .panel {
                             showTimeline()
@@ -363,7 +361,6 @@ struct PlaybackView: View {
                             hideChrome()
                         }
                     }
-#endif
                     .accessibilityHidden(true)
             }
 #endif
@@ -422,6 +419,7 @@ struct PlaybackView: View {
                     }
                 }
                 .transition(.opacity)
+                .accessibilityIdentifier("tvplayer.playback.chrome.timeline")
             }
 
             // Keep the panel mounted for the lifetime of PlaybackView. In
@@ -602,7 +600,7 @@ struct PlaybackView: View {
                 engine.refreshPlaybackInformation()
             }
         }
-        .task(id: chromeActivity) {
+        .task(id: chromeAutoHideTaskID) {
             guard chromeMode == .timeline,
                   !hasActiveSeekPreview,
                   shouldAutoHideChrome
@@ -906,6 +904,15 @@ struct PlaybackView: View {
 
     private func noteActivity() {
         chromeActivity = UUID()
+    }
+
+    private var chromeAutoHideTaskID: PlayerChromeAutoHideTaskID {
+        PlayerChromeAutoHideTaskID(
+            activity: chromeActivity,
+            mode: chromeMode,
+            hasActiveSeekPreview: hasActiveSeekPreview,
+            shouldAutoHide: shouldAutoHideChrome
+        )
     }
 
     private var shouldAutoHideChrome: Bool {
@@ -3123,7 +3130,7 @@ private struct PlayerStepButton: View {
 }
 
 #if os(iOS)
-private struct IOSHoldSeekGestureModifier: ViewModifier {
+private struct IOSHoldSeekSurface: UIViewRepresentable {
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
 
     let isEnabled: Bool
@@ -3132,64 +3139,105 @@ private struct IOSHoldSeekGestureModifier: ViewModifier {
     let finish: (Bool) -> Void
     let tap: () -> Void
 
-    @State private var isActivated = false
-    @State private var movedOutsideDeadZone = false
-
-    func body(content: Content) -> some View {
-        GeometryReader { geometry in
-            content
-                .contentShape(Rectangle())
-                .gesture(
-                    holdThenDragGesture(playerWidth: geometry.size.width),
-                    including: isEnabled && !voiceOverEnabled ? .all : .none
-                )
-                .onTapGesture(perform: tap)
-        }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(surface: self)
     }
 
-    private func holdThenDragGesture(
-        playerWidth: CGFloat
-    ) -> some Gesture {
-        LongPressGesture(
-            minimumDuration: Double(HoldSeekVelocityPolicy.activationDelayMilliseconds) / 1_000,
-            maximumDistance: 22
-        )
-        .sequenced(before: DragGesture(minimumDistance: 0))
-        .onChanged { value in
-            switch value {
-            case .first(true):
-                activateIfNeeded(playerWidth: playerWidth)
-            case let .second(true, drag):
-                activateIfNeeded(playerWidth: playerWidth)
-                guard let drag else { return }
-                let translation = drag.translation.width
-                if abs(translation) > HoldSeekVelocityPolicy.touchDeadZone {
-                    movedOutsideDeadZone = true
-                }
-                updateTranslation(translation, playerWidth)
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+        context.coordinator.installRecognizers(on: view)
+        return view
+    }
+
+    func updateUIView(_ view: UIView, context: Context) {
+        context.coordinator.surface = self
+        context.coordinator.longPressRecognizer?.isEnabled =
+            isEnabled && !voiceOverEnabled
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var surface: IOSHoldSeekSurface
+        weak var view: UIView?
+        weak var longPressRecognizer: UILongPressGestureRecognizer?
+
+        private var activationLocation: CGPoint?
+        private var isActivated = false
+        private var movedOutsideDeadZone = false
+
+        init(surface: IOSHoldSeekSurface) {
+            self.surface = surface
+        }
+
+        func installRecognizers(on view: UIView) {
+            self.view = view
+
+            let longPress = UILongPressGestureRecognizer(
+                target: self,
+                action: #selector(handleLongPress(_:))
+            )
+            longPress.minimumPressDuration =
+                Double(HoldSeekVelocityPolicy.activationDelayMilliseconds) / 1_000
+            longPress.allowableMovement = 22
+            view.addGestureRecognizer(longPress)
+            longPressRecognizer = longPress
+
+            let tap = UITapGestureRecognizer(
+                target: self,
+                action: #selector(handleTap)
+            )
+            tap.require(toFail: longPress)
+            view.addGestureRecognizer(tap)
+        }
+
+        @objc
+        private func handleTap() {
+            surface.tap()
+        }
+
+        @objc
+        private func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
+            guard let view else { return }
+            let playerWidth = max(1, view.bounds.width)
+
+            switch recognizer.state {
+            case .began:
+                isActivated = true
+                movedOutsideDeadZone = false
+                activationLocation = recognizer.location(in: view)
+                surface.activate(playerWidth)
+            case .changed:
+                updateTranslation(for: recognizer, in: view, playerWidth: playerWidth)
+            case .ended:
+                updateTranslation(for: recognizer, in: view, playerWidth: playerWidth)
+                finishGesture(shouldCommit: isActivated && movedOutsideDeadZone)
+            case .cancelled, .failed:
+                finishGesture(shouldCommit: false)
             default:
                 break
             }
         }
-        .onEnded { value in
-            if case let .second(true, drag) = value, let drag {
-                let translation = drag.translation.width
-                if abs(translation) > HoldSeekVelocityPolicy.touchDeadZone {
-                    movedOutsideDeadZone = true
-                }
-                updateTranslation(translation, playerWidth)
+
+        private func updateTranslation(
+            for recognizer: UILongPressGestureRecognizer,
+            in view: UIView,
+            playerWidth: CGFloat
+        ) {
+            guard let activationLocation else { return }
+            let translation = recognizer.location(in: view).x - activationLocation.x
+            if abs(translation) > HoldSeekVelocityPolicy.touchDeadZone {
+                movedOutsideDeadZone = true
             }
-            finish(isActivated && movedOutsideDeadZone)
+            surface.updateTranslation(translation, playerWidth)
+        }
+
+        private func finishGesture(shouldCommit: Bool) {
+            surface.finish(shouldCommit)
+            activationLocation = nil
             isActivated = false
             movedOutsideDeadZone = false
         }
-    }
-
-    private func activateIfNeeded(playerWidth: CGFloat) {
-        guard !isActivated else { return }
-        isActivated = true
-        movedOutsideDeadZone = false
-        activate(playerWidth)
     }
 }
 #endif

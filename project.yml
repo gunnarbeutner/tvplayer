@@ -131,6 +131,9 @@ targets:
     templates:
       - SharedApp
     platform: iOS
+    sources:
+      - path: TVApp/Resources/playback-replay.jsonl
+        buildPhase: resources
     dependencies:
       - framework: .build/VLCKit/VLCKit.xcframework
         embed: true
@@ -167,6 +170,7 @@ targets:
     scheme:
       testTargets:
         - TVAppTests-iOS
+        - TVAppPlaybackUITests-iOS
 
   TVApp-macOS:
     templates:
@@ -217,6 +221,19 @@ targets:
         GENERATE_INFOPLIST_FILE: true
         PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer.playback-ui-tests
         TEST_TARGET_NAME: TVApp
+
+  TVAppPlaybackUITests-iOS:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: TVAppIOSUITests
+    dependencies:
+      - target: TVApp-iOS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: true
+        PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer.playback-ui-tests.ios
+        TEST_TARGET_NAME: TVApp-iOS
 
   TVAppTests-iOS:
     templates:
