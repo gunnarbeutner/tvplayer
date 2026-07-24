@@ -304,12 +304,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     let mediaPlayer: VLCMediaPlayer
 
     private var nativeInputStream: HTSPLiveInputStream?
-    // VLCKit's custom-stream bridge does not retain the InputStream passed to
-    // VLCMedia(stream:), and can still open or close it after the player has
-    // reported Stopped. Keep each cheap, weak-source reader alive for the
-    // engine lifetime; releasing it at Stopped races VLCKit's access callback.
-    private var retainedNativeVLCReaders: [InputStream] = []
-    private var activeNativeVLCReader: InputStream?
+    private var nativeHTTPTransport: VLCLoopbackHTTPTransport?
     private let timeshiftAudioLogger: VLCTimeshiftAudioLogger?
     private var nativeTimeshiftActions: NativeTimeshiftActionController?
     private var nativeTimeshiftSessionID: UUID?
@@ -445,6 +440,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         logger.info("Preparing stream from \(request.url.host ?? "unknown host", privacy: .public)")
 
         try await stopMediaPlayerForReplacement()
+        nativeHTTPTransport?.stop()
+        nativeHTTPTransport = nil
         nativeInputStream?.close()
         nativeInputStream = nil
         nativeTimeshiftActions = nil
@@ -498,9 +495,15 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                         stream.close()
                         throw CancellationError()
                     }
-                    let reader = stream.makeVLCReader()
-                    retainNativeVLCReader(reader)
-                    media = Self.makeNativeHTSPMedia(stream: reader)
+                    let transport: VLCLoopbackHTTPTransport
+                    do {
+                        transport = try Self.makeNativeHTTPTransport(stream: stream)
+                    } catch {
+                        stream.close()
+                        throw error
+                    }
+                    nativeHTTPTransport = transport
+                    media = Self.makeNativeHTSPMedia(url: transport.mediaURL)
                     nativeInputStream = stream
                     nativeTimeshiftActions = NativeTimeshiftActionController(sink: stream)
                     let sessionID = UUID()
@@ -641,7 +644,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         recoveryReason = nil
         recoveryAttempt = 0
         cancelPendingRecordingSeek()
-        closeActiveNativeVLCReader()
+        nativeHTTPTransport?.disconnectClients()
         mediaPlayer.stop()
 #if !os(macOS)
         // On macOS, VLC 4 tears its OpenGL vout down asynchronously. Keep the
@@ -655,6 +658,8 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         sampleBufferFallbackTask = nil
         sampleBufferBridge.flush()
 #endif
+        nativeHTTPTransport?.stop()
+        nativeHTTPTransport = nil
         nativeInputStream?.close()
         nativeInputStream = nil
         nativeTimeshiftActions = nil
@@ -1290,16 +1295,6 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         mediaPlayer.videoFitMode = .smaller
     }
 
-    private func retainNativeVLCReader(_ reader: InputStream) {
-        activeNativeVLCReader = reader
-        retainedNativeVLCReaders.append(reader)
-    }
-
-    private func closeActiveNativeVLCReader() {
-        activeNativeVLCReader?.close()
-        activeNativeVLCReader = nil
-    }
-
     private func stopMediaPlayerForReplacement() async throws {
         let startedAt = ProcessInfo.processInfo.systemUptime
         defer {
@@ -1307,11 +1302,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                 ((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000).rounded()
             )
         }
-        // `stop()` cannot finish while VLC's custom-access thread is blocked
-        // inside InputStream.read(). Closing only this disposable reader
-        // invalidates its generation and wakes the read without touching the
-        // long-lived TVHeadend subscription or its timeshift buffer.
-        closeActiveNativeVLCReader()
+        // Wake the HTTP worker if it is blocked waiting for live transport
+        // bytes, without touching the long-lived TVHeadend subscription.
+        nativeHTTPTransport?.disconnectClients()
         mediaPlayer.stop()
         // VLC 4's stop operation is asynchronous. Replacing its media or
         // closing the custom input before Stopped lets the old demux/vout race
@@ -1463,9 +1456,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         pipelineRecoveryID = recoveryID
         nativeTimeshiftSessionID = nil
         nativeTimeshiftActions = nil
-        closeActiveNativeVLCReader()
+        nativeHTTPTransport?.disconnectClients()
         mediaPlayer.pause()
         mediaPlayer.stop()
+        nativeHTTPTransport?.stop()
+        nativeHTTPTransport = nil
         nativeInputStream?.close()
         nativeInputStream = nil
         outputHealthMonitor.restartGracePeriod(
@@ -1539,13 +1534,19 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                     return
                 }
 
-                let reader = stream.makeVLCReader()
-                retainNativeVLCReader(reader)
-                let media = Self.makeNativeHTSPMedia(stream: reader)
+                let transport: VLCLoopbackHTTPTransport
+                do {
+                    transport = try Self.makeNativeHTTPTransport(stream: stream)
+                } catch {
+                    stream.close()
+                    throw error
+                }
+                let media = Self.makeNativeHTSPMedia(url: transport.mediaURL)
                 addCachingOptions(
                     to: media,
                     milliseconds: htsp.tuningPolicy.vlcCacheMilliseconds
                 )
+                nativeHTTPTransport = transport
                 nativeInputStream = stream
                 nativeTimeshiftActions = NativeTimeshiftActionController(sink: stream)
                 let sessionID = UUID()
@@ -1615,9 +1616,17 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 #endif
     }
 
-    private static func makeNativeHTSPMedia(stream: InputStream) -> VLCMedia {
-        guard let media = VLCMedia(stream: stream) else {
-            preconditionFailure("VLC 4 rejected the native input stream")
+    private static func makeNativeHTTPTransport(
+        stream: HTSPLiveInputStream
+    ) throws -> VLCLoopbackHTTPTransport {
+        try VLCLoopbackHTTPTransport {
+            stream.makeVLCReader()
+        }
+    }
+
+    private static func makeNativeHTSPMedia(url: URL) -> VLCMedia {
+        guard let media = VLCMedia(url: url) else {
+            preconditionFailure("VLC 4 rejected the local HTTP transport URL")
         }
         media.addOption(":demux=ts")
         return media
@@ -1710,11 +1719,14 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 
     private func replaceLocalVLCPipeline() async -> Bool {
-        guard let stream = nativeInputStream, activeRequest != nil else { return false }
+        guard let stream = nativeInputStream,
+              let transport = nativeHTTPTransport,
+              activeRequest != nil
+        else { return false }
 #if DEBUG
         let replacementStartedAt = ProcessInfo.processInfo.systemUptime
 #endif
-        closeActiveNativeVLCReader()
+        transport.disconnectClients()
         mediaPlayer.stop()
         // LibVLC 4 stops asynchronously. Installing and playing the fresh
         // media before the Stopped callback lets the old input teardown race
@@ -1738,9 +1750,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 #if DEBUG
         let stoppedAt = ProcessInfo.processInfo.systemUptime
 #endif
-        let reader = stream.makeVLCReader()
-        retainNativeVLCReader(reader)
-        let media = Self.makeNativeHTSPMedia(stream: reader)
+        let media = Self.makeNativeHTSPMedia(url: transport.mediaURL)
         let cachingMilliseconds = stream.tuningPolicy.vlcCacheMilliseconds
         addCachingOptions(to: media, milliseconds: cachingMilliseconds)
         mediaPlayer.media = media
