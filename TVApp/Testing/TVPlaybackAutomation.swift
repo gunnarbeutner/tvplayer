@@ -1,6 +1,63 @@
 import Foundation
 import SwiftUI
 
+enum TVGuideAutomation {
+    static let launchArgument = "--guide-ui-testing"
+    static let probeIdentifier = "tvplayer.guide.automation.probe"
+    static let preferencesSuiteName = "de.beutner.TVPlayer.guide-ui-testing"
+
+    static var isEnabled: Bool {
+#if DEBUG && os(tvOS)
+        ProcessInfo.processInfo.arguments.contains(launchArgument)
+#else
+        false
+#endif
+    }
+
+    static func guideSnapshot(at date: Date) -> TVProviderSnapshot? {
+        guard isEnabled else { return nil }
+        let channels = (1...40).map { ordinal in
+            let channelID = String(format: "guide-test-channel-%02d", ordinal)
+            let currentEnd = date.addingTimeInterval(
+                1_200 + TimeInterval(ordinal % 6) * 600
+            )
+            let programs = [
+                GuideProgram(
+                    id: String(format: "guide-test-current-%02d", ordinal),
+                    channelID: channelID,
+                    title: "Guide Test Current \(ordinal)",
+                    subtitle: "Deterministic focus fixture",
+                    overview: "Current programme for guide focus automation.",
+                    start: date.addingTimeInterval(-7_200),
+                    end: currentEnd
+                ),
+                GuideProgram(
+                    id: String(format: "guide-test-future-%02d", ordinal),
+                    channelID: channelID,
+                    title: "Guide Test Future \(ordinal)",
+                    subtitle: nil,
+                    overview: "Future programme for horizontal navigation.",
+                    start: currentEnd,
+                    end: date.addingTimeInterval(26 * 3_600)
+                ),
+            ]
+            return GuideChannel(
+                id: channelID,
+                number: ordinal,
+                name: "Guide Test Channel \(ordinal)",
+                monogram: "G\(ordinal)",
+                tint: GuideChannelAppearance.tint(for: channelID),
+                iconURL: nil,
+                programs: programs
+            )
+        }
+        return TVProviderSnapshot(
+            channels: channels,
+            serverName: "Guide Focus Automation"
+        )
+    }
+}
+
 enum TVPlaybackAutomation {
     static let launchArgument = "--playback-ui-testing"
     static let probeIdentifier = "tvplayer.playback.automation.probe"

@@ -336,6 +336,108 @@ final class GuideGridLayoutTests: XCTestCase {
             showsPendingFocus: false,
             isChannelFocusActive: true
         ))
+        XCTAssertTrue(GuideFocusPresentation.allowsProgramFocus(
+            programID: "favorite-current-show",
+            pendingProgramID: "favorite-current-show",
+            isGuideEnabled: true
+        ))
+        XCTAssertTrue(GuideFocusPresentation.allowsProgramFocus(
+            programID: "favorite-current-show",
+            pendingProgramID: nil,
+            isGuideEnabled: true
+        ))
+        XCTAssertFalse(GuideFocusPresentation.shouldCommitChannelFocus(
+            pendingProgramID: "favorite-current-show"
+        ))
+        XCTAssertTrue(GuideFocusPresentation.shouldCommitChannelFocus(
+            pendingProgramID: nil
+        ))
+        XCTAssertFalse(GuideFocusPresentation.shouldCommitProgramFocus(
+            channelSnapshotRestoreID: "favorite-channel"
+        ))
+        XCTAssertTrue(GuideFocusPresentation.shouldCommitProgramFocus(
+            channelSnapshotRestoreID: nil
+        ))
+    }
+
+    func testProgramMarkerPresentationTruthTable() {
+        for isUIKitFocused in [false, true] {
+            for showsPendingFocus in [false, true] {
+                for isChannelFocusActive in [false, true] {
+                    XCTAssertEqual(
+                        GuideFocusPresentation.presentsProgramFocus(
+                            isUIKitFocused: isUIKitFocused,
+                            showsPendingFocus: showsPendingFocus,
+                            isChannelFocusActive: isChannelFocusActive
+                        ),
+                        !isChannelFocusActive
+                            && (isUIKitFocused || showsPendingFocus),
+                        "Unexpected presentation for UIKit=\(isUIKitFocused), "
+                            + "pending=\(showsPendingFocus), "
+                            + "channel=\(isChannelFocusActive)"
+                    )
+                }
+            }
+        }
+    }
+
+    func testProgramFocusEligibilityTruthTable() {
+        for isGuideEnabled in [false, true] {
+            for pendingProgramID: GuideProgram.ID? in [nil, "target"] {
+                for programID in ["target", "other"] {
+                    let expected = isGuideEnabled
+                        && (pendingProgramID == nil || pendingProgramID == programID)
+                    XCTAssertEqual(
+                        GuideFocusPresentation.allowsProgramFocus(
+                            programID: programID,
+                            pendingProgramID: pendingProgramID,
+                            isGuideEnabled: isGuideEnabled
+                        ),
+                        expected,
+                        "Unexpected eligibility for enabled=\(isGuideEnabled), "
+                            + "pending=\(String(describing: pendingProgramID)), "
+                            + "program=\(programID)"
+                    )
+                }
+            }
+        }
+    }
+
+    func testPendingAndConfirmedFocusCommitPoliciesAreMutuallyExclusive() {
+        XCTAssertTrue(GuideFocusPresentation.shouldCommitChannelFocus(
+            pendingProgramID: nil
+        ))
+        XCTAssertFalse(GuideFocusPresentation.shouldCommitChannelFocus(
+            pendingProgramID: "outgoing-program"
+        ))
+        XCTAssertTrue(GuideFocusPresentation.shouldCommitProgramFocus(
+            channelSnapshotRestoreID: nil
+        ))
+        XCTAssertFalse(GuideFocusPresentation.shouldCommitProgramFocus(
+            channelSnapshotRestoreID: "restoring-channel"
+        ))
+    }
+
+    func testProgramFocusRestoreNeverOverridesChannelFocus() {
+        for isRestoreRequest in [false, true] {
+            for hasChannelFocus in [false, true] {
+                XCTAssertEqual(
+                    GuideFocusPresentation.programFocusRestoreTarget(
+                        programID: "selected-program",
+                        isRestoreRequest: isRestoreRequest,
+                        hasChannelFocus: hasChannelFocus
+                    ),
+                    isRestoreRequest && !hasChannelFocus
+                        ? "selected-program"
+                        : nil
+                )
+            }
+        }
+        XCTAssertNil(GuideFocusPresentation.programFocusRestoreTarget(
+            programID: nil,
+            isRestoreRequest: true,
+            hasChannelFocus: false
+        ))
     }
 
     func testDirectionalInputUsesItsEventCellDuringFocusTransitions() {

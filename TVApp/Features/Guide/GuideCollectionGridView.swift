@@ -157,6 +157,39 @@ enum GuideFocusPresentation {
     ) -> Bool {
         !isChannelFocusActive && (isUIKitFocused || showsPendingFocus)
     }
+
+    static func allowsProgramFocus(
+        programID: GuideProgram.ID,
+        pendingProgramID: GuideProgram.ID?,
+        isGuideEnabled: Bool
+    ) -> Bool {
+        guard isGuideEnabled else { return false }
+        if let pendingProgramID {
+            return pendingProgramID == programID
+        }
+        return true
+    }
+
+    static func shouldCommitChannelFocus(
+        pendingProgramID: GuideProgram.ID?
+    ) -> Bool {
+        pendingProgramID == nil
+    }
+
+    static func shouldCommitProgramFocus(
+        channelSnapshotRestoreID: GuideChannel.ID?
+    ) -> Bool {
+        channelSnapshotRestoreID == nil
+    }
+
+    static func programFocusRestoreTarget(
+        programID: GuideProgram.ID?,
+        isRestoreRequest: Bool,
+        hasChannelFocus: Bool
+    ) -> GuideProgram.ID? {
+        guard isRestoreRequest, !hasChannelFocus else { return nil }
+        return programID
+    }
 }
 
 enum GuideCollectionNavigationDirection: Equatable {
@@ -965,6 +998,14 @@ private final class GuideCollectionView: UICollectionView,
         self.onFirstSnapshotApplied = onFirstSnapshotApplied
         self.onExitToNavigator = onExitToNavigator
         isGuideEnabled = isEnabled
+#if DEBUG && os(tvOS)
+        TVGuideAutomationFocusRecorder.shared.updateGuide(
+            channelIDs: channels.map(\.id),
+            favoriteChannelIDs: Set(
+                channels.lazy.filter { isFavorite($0.id) }.map(\.id)
+            )
+        )
+#endif
 
         if previousRequestedFocusedProgramID != focusedProgramID {
             reconfigureVisibleProgrammeCells()
@@ -1007,18 +1048,22 @@ private final class GuideCollectionView: UICollectionView,
         appliedFocusRestoreRequest = focusRestoreRequest
         updateFocusAvailability()
 
-        if isRestoreRequest, let focusedProgramID {
+        if let focusRestoreTarget = GuideFocusPresentation.programFocusRestoreTarget(
+            programID: focusedProgramID,
+            isRestoreRequest: isRestoreRequest,
+            hasChannelFocus: hasChannelFocus
+        ) {
             // Focus currently belongs to the disappearing player layer or to
             // the TabView's bar. Target the exact programme cell through the
             // window focus system so the tab bar cannot retain focus simply
             // because it sits outside this collection view's subtree.
             requestFocus(
-                on: focusedProgramID,
+                on: focusRestoreTarget,
                 animated: false,
                 retriesRemaining: 8,
                 directly: true
             )
-        } else if !isChannelFocusActive,
+        } else if !hasChannelFocus,
                   let focusedProgramID,
                   focusedProgramID != previousRequestedFocusedProgramID,
                   focusedProgramID != currentlyFocusedProgramID,
@@ -1176,10 +1221,15 @@ private final class GuideCollectionView: UICollectionView,
             .representedChannelID
     }
 
-    private var isChannelFocusActive: Bool {
+    private var hasChannelFocus: Bool {
         pendingChannelProgramID != nil
             || focusedChannelID != nil
             || currentlyFocusedChannelID != nil
+            || channelIDAwaitingSnapshotFocus != nil
+    }
+
+    private var suppressesProgramFocus: Bool {
+        hasChannelFocus && pendingFocusProgramID == nil
     }
 
     private func currentProgramID(for channelID: GuideChannel.ID) -> GuideProgram.ID? {
@@ -1374,7 +1424,12 @@ private final class GuideCollectionView: UICollectionView,
             inputAt: inputAt
         )
         lastDirectionalInputAt = inputAt
-        requestFocus(on: destination, animated: animatesScroll, retriesRemaining: 8)
+        requestFocus(
+            on: destination,
+            animated: animatesScroll,
+            retriesRemaining: 8,
+            directly: true
+        )
         return .consumed
     }
 
@@ -1463,6 +1518,9 @@ private final class GuideCollectionView: UICollectionView,
             if channelIDAwaitingSnapshotFocus == channelID {
                 channelIDAwaitingSnapshotFocus = nil
                 channelReturnProgramIDAwaitingSnapshotFocus = nil
+#if DEBUG && os(tvOS)
+                TVGuideAutomationFocusRecorder.shared.endChannelRestoration()
+#endif
             }
             channelFocusRetryTask = nil
             return
@@ -1537,19 +1595,34 @@ private final class GuideCollectionView: UICollectionView,
                   self.pendingFocusProgramID == nil,
                   self.currentlyFocusedProgramID == origin
             else { return }
-            self.requestFocus(on: destination, animated: true, retriesRemaining: 8)
+            self.requestFocus(
+                on: destination,
+                animated: true,
+                retriesRemaining: 8,
+                directly: true
+            )
         }
         return false
     }
 
     private func allowsFocus(on programID: GuideProgram.ID) -> Bool {
-        guard isGuideEnabled else { return false }
-        guard !isChannelFocusActive else { return false }
-        guard let pendingFocusProgramID else { return true }
-        return pendingFocusProgramID == programID
+        GuideFocusPresentation.allowsProgramFocus(
+            programID: programID,
+            pendingProgramID: pendingFocusProgramID,
+            isGuideEnabled: isGuideEnabled
+        )
     }
 
     private func didFocus(programID: GuideProgram.ID) {
+        guard GuideFocusPresentation.shouldCommitProgramFocus(
+            channelSnapshotRestoreID: channelIDAwaitingSnapshotFocus
+        ) else {
+            updateFocusAvailability()
+            return
+        }
+        channelFocusRetryTask?.cancel()
+        channelFocusRetryTask = nil
+        pendingChannelProgramID = nil
         focusedChannelID = nil
         focusedChannelReturnProgramID = nil
         let previousProgramID = requestedFocusedProgramID
@@ -1616,7 +1689,7 @@ private final class GuideCollectionView: UICollectionView,
             requested: requestedFocusedProgramID,
             pending: pendingFocusProgramID,
             preferred: preferredProgramID,
-            isChannelFocusActive: isChannelFocusActive
+            isChannelFocusActive: suppressesProgramFocus
         )
         for case let cell as GuideProgrammeCollectionCell in visibleCells {
             cell.updateFocusState(
@@ -1627,7 +1700,7 @@ private final class GuideCollectionView: UICollectionView,
                     pendingProgramID: pendingFocusProgramID,
                     currentlyFocusedProgramID: currentProgramID
                 ),
-                isChannelFocusActive: isChannelFocusActive
+                isChannelFocusActive: suppressesProgramFocus
             )
         }
         if !isGuideEnabled, currentlyFocusedProgramID != nil {
@@ -1641,7 +1714,7 @@ private final class GuideCollectionView: UICollectionView,
             requested: requestedFocusedProgramID,
             pending: pendingFocusProgramID,
             preferred: preferredProgramID,
-            isChannelFocusActive: isChannelFocusActive
+            isChannelFocusActive: suppressesProgramFocus
         )
         cell.configure(
             item: item,
@@ -1654,7 +1727,7 @@ private final class GuideCollectionView: UICollectionView,
                 pendingProgramID: pendingFocusProgramID,
                 currentlyFocusedProgramID: currentProgramID
             ),
-            isChannelFocusActive: isChannelFocusActive,
+            isChannelFocusActive: suppressesProgramFocus,
             isFocusAllowed: allowsFocus(on: item.id),
             leadingOcclusion: leadingOcclusion(for: item),
             onFocused: { [weak self] in self?.didFocus(programID: item.id) },
@@ -1711,7 +1784,7 @@ private final class GuideCollectionView: UICollectionView,
         // UICollectionView may retain its last selected programme while focus is
         // on a supplementary channel header. Do not let a Select press intended
         // for that header activate the stale programme selection.
-        guard !isChannelFocusActive else {
+        guard !hasChannelFocus else {
             collectionView.deselectItem(at: indexPath, animated: false)
             return
         }
@@ -1759,12 +1832,28 @@ private final class GuideCollectionView: UICollectionView,
                     configuration: currentConfiguration,
                     isFavorite: isFavorite(channel.id),
                     onActivate: { [weak self] returnProgramID in
-                        self?.channelIDAwaitingSnapshotFocus = channel.id
-                        self?.channelReturnProgramIDAwaitingSnapshotFocus = returnProgramID
-                        self?.onToggleFavorite(channel.id)
+                        guard let self else { return }
+                        self.channelIDAwaitingSnapshotFocus = channel.id
+                        self.channelReturnProgramIDAwaitingSnapshotFocus = returnProgramID
+                        self.updateFocusAvailability()
+#if DEBUG && os(tvOS)
+                        TVGuideAutomationFocusRecorder.shared.beginChannelRestoration(
+                            channelID: channel.id
+                        )
+#endif
+                        self.onToggleFavorite(channel.id)
                     },
                     onFocused: { [weak self, weak view] returnProgramID in
                         guard let self else { return }
+                        // UIKit can reaffirm the currently focused header while
+                        // an explicit move back into the programme grid is in
+                        // flight. Do not let that transient callback cancel the
+                        // programme request and trap focus in this column.
+                        guard GuideFocusPresentation.shouldCommitChannelFocus(
+                            pendingProgramID: self.pendingFocusProgramID
+                        ) else {
+                            return
+                        }
                         // A favourite toggle rebuilds and reorders the guide
                         // snapshot. Its focus restoration is only needed until
                         // a channel header actually acquires focus. Keeping the
@@ -1777,6 +1866,9 @@ private final class GuideCollectionView: UICollectionView,
                         self.focusRetryTask = nil
                         self.channelIDAwaitingSnapshotFocus = nil
                         self.channelReturnProgramIDAwaitingSnapshotFocus = nil
+#if DEBUG && os(tvOS)
+                        TVGuideAutomationFocusRecorder.shared.endChannelRestoration()
+#endif
                         self.pendingFocusProgramID = nil
                         self.focusRequestAwaitingStableLayout = nil
                         self.pendingChannelProgramID = nil
@@ -1793,7 +1885,12 @@ private final class GuideCollectionView: UICollectionView,
                         }
                     },
                     onMoveRight: { [weak self] programID in
-                        self?.requestFocus(on: programID, animated: true, retriesRemaining: 8)
+                        self?.requestFocus(
+                            on: programID,
+                            animated: true,
+                            retriesRemaining: 8,
+                            directly: true
+                        )
                     },
                     onMoveUp: indexPath.section == 0
                         ? { [weak self] in self?.onExitToNavigator() }
@@ -1893,6 +1990,11 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
 
     override func prepareForReuse() {
         super.prepareForReuse()
+#if DEBUG && os(tvOS)
+        if let item {
+            TVGuideAutomationFocusRecorder.shared.removeProgram(id: item.id)
+        }
+#endif
         item = nil
         titleLabel.text = nil
         timeLabel.text = nil
@@ -2115,6 +2217,13 @@ private final class GuideProgrammeCollectionCell: UICollectionViewCell {
             recordingImageView.image = nil
         }
         if animated { setNeedsLayout() }
+#if DEBUG && os(tvOS)
+        TVGuideAutomationFocusRecorder.shared.updateProgram(
+            id: item.id,
+            isFocused: isFocused,
+            presentsMarker: presentsFocus
+        )
+#endif
     }
 
     private func accessibilityLabel(for program: GuideProgram, timeText: String) -> String {
@@ -2345,6 +2454,13 @@ private final class GuideChannelHeaderReusableView: UICollectionReusableView {
     override func prepareForReuse() {
         super.prepareForReuse()
         logoTask?.cancel()
+#if DEBUG && os(tvOS)
+        if let representedChannelID {
+            TVGuideAutomationFocusRecorder.shared.removeChannel(
+                id: representedChannelID
+            )
+        }
+#endif
         representedChannelID = nil
         returnProgramID = nil
         onMoveUp = nil
@@ -2361,6 +2477,12 @@ private final class GuideChannelHeaderReusableView: UICollectionReusableView {
         onMoveUp: (() -> Void)?
     ) {
         representedChannelID = channel.id
+#if DEBUG && os(tvOS)
+        TVGuideAutomationFocusRecorder.shared.updateChannel(
+            id: channel.id,
+            isFocused: isFocused
+        )
+#endif
         self.onActivate = onActivate
         self.onFocused = onFocused
         self.onMoveRight = onMoveRight
@@ -2426,6 +2548,14 @@ private final class GuideChannelHeaderReusableView: UICollectionReusableView {
         with coordinator: UIFocusAnimationCoordinator
     ) {
         super.didUpdateFocus(in: context, with: coordinator)
+#if DEBUG && os(tvOS)
+        if let representedChannelID {
+            TVGuideAutomationFocusRecorder.shared.updateChannel(
+                id: representedChannelID,
+                isFocused: isFocused
+            )
+        }
+#endif
         if isFocused { onFocused(returnProgramID) }
         coordinator.addCoordinatedAnimations { [self] in
             backgroundColor = isFocused ? UIColor(AppTheme.focused) : UIColor(AppTheme.chrome)

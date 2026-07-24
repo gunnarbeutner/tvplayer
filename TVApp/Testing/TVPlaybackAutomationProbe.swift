@@ -3,6 +3,173 @@ import SwiftUI
 #if DEBUG && os(tvOS)
 import UIKit
 
+private struct TVGuideAutomationSnapshot: Codable {
+    let version: Int
+    let sampledAt: TimeInterval
+    let focusedProgramID: String?
+    let focusedChannelID: String?
+    let programMarkerIDs: [String]
+    let channelMarkerIDs: [String]
+    let displayedChannelIDs: [String]
+    let favoriteChannelIDs: [String]
+    let channelRestorationPending: Bool
+    let markerOverlapCount: Int
+    let programMarkerDuringChannelRestorationCount: Int
+}
+
+@MainActor
+final class TVGuideAutomationFocusRecorder: ObservableObject {
+    static let shared = TVGuideAutomationFocusRecorder()
+
+    @Published private(set) var revision = 0
+    private var focusedProgramID: String?
+    private var focusedChannelID: String?
+    private var programMarkerIDs: Set<String> = []
+    private var channelMarkerIDs: Set<String> = []
+    private var displayedChannelIDs: [String] = []
+    private var favoriteChannelIDs: Set<String> = []
+    private var channelRestorationPending = false
+    private var markerOverlapCount = 0
+    private var programMarkerDuringChannelRestorationCount = 0
+    private var overlapViolationActive = false
+    private var restorationViolationActive = false
+
+    private init() {}
+
+    func updateGuide(
+        channelIDs: [String],
+        favoriteChannelIDs: Set<String>
+    ) {
+        guard TVGuideAutomation.isEnabled else { return }
+        displayedChannelIDs = channelIDs
+        self.favoriteChannelIDs = favoriteChannelIDs
+        publish()
+    }
+
+    func updateProgram(
+        id: String,
+        isFocused: Bool,
+        presentsMarker: Bool
+    ) {
+        guard TVGuideAutomation.isEnabled else { return }
+        if isFocused {
+            focusedProgramID = id
+        } else if focusedProgramID == id {
+            focusedProgramID = nil
+        }
+        if presentsMarker {
+            programMarkerIDs.insert(id)
+        } else {
+            programMarkerIDs.remove(id)
+        }
+        evaluateViolations()
+        publish()
+    }
+
+    func removeProgram(id: String) {
+        guard TVGuideAutomation.isEnabled else { return }
+        if focusedProgramID == id { focusedProgramID = nil }
+        programMarkerIDs.remove(id)
+        evaluateViolations()
+        publish()
+    }
+
+    func updateChannel(id: String, isFocused: Bool) {
+        guard TVGuideAutomation.isEnabled else { return }
+        if isFocused {
+            focusedChannelID = id
+            channelMarkerIDs.insert(id)
+        } else {
+            if focusedChannelID == id { focusedChannelID = nil }
+            channelMarkerIDs.remove(id)
+        }
+        evaluateViolations()
+        publish()
+    }
+
+    func removeChannel(id: String) {
+        guard TVGuideAutomation.isEnabled else { return }
+        if focusedChannelID == id { focusedChannelID = nil }
+        channelMarkerIDs.remove(id)
+        evaluateViolations()
+        publish()
+    }
+
+    func beginChannelRestoration(channelID: String) {
+        guard TVGuideAutomation.isEnabled else { return }
+        channelRestorationPending = true
+        focusedChannelID = channelID
+        evaluateViolations()
+        publish()
+    }
+
+    func endChannelRestoration() {
+        guard TVGuideAutomation.isEnabled else { return }
+        channelRestorationPending = false
+        evaluateViolations()
+        publish()
+    }
+
+    var encodedSnapshot: String {
+        let snapshot = TVGuideAutomationSnapshot(
+            version: 1,
+            sampledAt: ProcessInfo.processInfo.systemUptime,
+            focusedProgramID: focusedProgramID,
+            focusedChannelID: focusedChannelID,
+            programMarkerIDs: programMarkerIDs.sorted(),
+            channelMarkerIDs: channelMarkerIDs.sorted(),
+            displayedChannelIDs: displayedChannelIDs,
+            favoriteChannelIDs: favoriteChannelIDs.sorted(),
+            channelRestorationPending: channelRestorationPending,
+            markerOverlapCount: markerOverlapCount,
+            programMarkerDuringChannelRestorationCount:
+                programMarkerDuringChannelRestorationCount
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(snapshot),
+              let string = String(data: data, encoding: .utf8)
+        else { return "{}" }
+        return string
+    }
+
+    private func evaluateViolations() {
+        let hasOverlap = !programMarkerIDs.isEmpty && !channelMarkerIDs.isEmpty
+        if hasOverlap, !overlapViolationActive {
+            markerOverlapCount += 1
+        }
+        overlapViolationActive = hasOverlap
+
+        let hasRestorationViolation =
+            channelRestorationPending && !programMarkerIDs.isEmpty
+        if hasRestorationViolation, !restorationViolationActive {
+            programMarkerDuringChannelRestorationCount += 1
+        }
+        restorationViolationActive = hasRestorationViolation
+    }
+
+    private func publish() {
+        revision &+= 1
+    }
+}
+
+struct TVGuideAutomationProbe: View {
+    @ObservedObject private var recorder =
+        TVGuideAutomationFocusRecorder.shared
+
+    var body: some View {
+        Text("Guide automation probe")
+            .font(.system(size: 1))
+            .opacity(0.001)
+            .frame(width: 1, height: 1)
+            .allowsHitTesting(false)
+            .accessibilityElement(children: .ignore)
+            .accessibilityIdentifier(TVGuideAutomation.probeIdentifier)
+            .accessibilityLabel("Guide automation probe")
+            .accessibilityValue(recorder.encodedSnapshot)
+    }
+}
+
 private struct TVPlaybackAutomationSnapshot: Codable {
     let version: Int
     let sampledAt: TimeInterval

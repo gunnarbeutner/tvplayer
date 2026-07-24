@@ -117,7 +117,11 @@ struct RootTabView: View {
         _startupPlaybackRoute = State(initialValue: nil)
         _topShelfLaunchItem = State(initialValue: nil)
 #endif
-        _selection = State(initialValue: Self.appTab(for: playback.initialStartupSection))
+        _selection = State(
+            initialValue: TVGuideAutomation.isEnabled
+                ? .guide
+                : Self.appTab(for: playback.initialStartupSection)
+        )
         let settings = ServerSettingsStore()
         let configuration = settings.configuration
         let cachedSnapshot = if configuration.isComplete {
@@ -130,7 +134,18 @@ struct RootTabView: View {
         }
 
         _settings = StateObject(wrappedValue: settings)
-        let channelPreferences = ChannelPreferencesStore()
+        let channelPreferences: ChannelPreferencesStore
+        if TVGuideAutomation.isEnabled,
+           let automationDefaults = UserDefaults(
+                suiteName: TVGuideAutomation.preferencesSuiteName
+           ) {
+            automationDefaults.removePersistentDomain(
+                forName: TVGuideAutomation.preferencesSuiteName
+            )
+            channelPreferences = ChannelPreferencesStore(defaults: automationDefaults)
+        } else {
+            channelPreferences = ChannelPreferencesStore()
+        }
         channelPreferences.activate(
             serverIdentifier: configuration.channelPreferencesIdentifier
                 ?? cachedSnapshot?.startupChannelPreferencesIdentifier,
@@ -328,6 +343,10 @@ struct RootTabView: View {
                     showsGuidePreview: showsGuideLivePreview
                 )
                 .zIndex(100)
+            }
+            if TVGuideAutomation.isEnabled {
+                TVGuideAutomationProbe()
+                    .zIndex(100)
             }
 #endif
         }
