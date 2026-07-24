@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import OSLog
 import SwiftUI
 @preconcurrency import VLCKit
@@ -317,9 +318,6 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private var concealsSeekAfterPausedFrameCapture = false
     private var navigationShouldResume = true
     private var isReplacingVLCPipeline = false
-#if os(iOS)
-    private var foregroundVideoRecoveryTask: Task<Void, Never>?
-#endif
     private var pauseRequested = false
     private var preferredAudioLanguageCode: String?
     private var subtitlePreference: SubtitlePreference = .off
@@ -420,10 +418,6 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         defer {
             if activePreparationID == preparationID { activePreparationID = nil }
         }
-#if os(iOS)
-        foregroundVideoRecoveryTask?.cancel()
-        foregroundVideoRecoveryTask = nil
-#endif
         cancelPostSeekOutputGate()
         pipelineRecoveryTask?.cancel()
         pipelineRecoveryTask = nil
@@ -620,10 +614,6 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     func stop() {
         activePreparationID = nil
         lastNativePipelineDiagnostic = nil
-#if os(iOS)
-        foregroundVideoRecoveryTask?.cancel()
-        foregroundVideoRecoveryTask = nil
-#endif
         cancelPostSeekOutputGate()
         pipelineRecoveryTask?.cancel()
         pipelineRecoveryTask = nil
@@ -656,13 +646,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 
 #if os(iOS)
-    /// Recreates VLC's local decoder/output pipeline after iOS has suspended
-    /// video rendering. The disposable VLC reader is replaced while the
-    /// long-lived HTSP subscription—and therefore its timeshift buffer and
-    /// current delivery position—remain alive.
+    /// Resumes VLCKit's sample-buffer renderer when iOS explicitly reports
+    /// that an interruption requires it to be flushed.
     func recoverVideoOutputAfterForegrounding() {
-        guard foregroundVideoRecoveryTask == nil,
-              pipelineRecoveryTask == nil,
+        guard pipelineRecoveryTask == nil,
               !isReplacingVLCPipeline,
               !pauseRequested,
               activeRequest?.kind.isLive == true,
@@ -670,34 +657,13 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
               !stream.healthSnapshot.isNavigating
         else { return }
 
-        foregroundVideoRecoveryTask = Task { @MainActor [weak self] in
-            // Let SwiftUI apply the matching drawable reattachment before VLC
-            // creates the replacement video output.
-            await Task.yield()
-            guard let self, !Task.isCancelled else { return }
-
-            self.anchorLivePlaybackPositionIfNeeded()
-            self.publishLivePlaybackMarker()
-            self.isReplacingVLCPipeline = true
-            let didReplace = await self.replaceLocalVLCPipeline()
-
-            guard !Task.isCancelled else {
-                self.isReplacingVLCPipeline = false
-                self.foregroundVideoRecoveryTask = nil
-                return
-            }
-            if didReplace {
-                self.resumeLocalPlaybackAfterTimeshiftNavigation()
-                self.logger.info(
-                    "Recreated VLC video output after returning to the foreground"
-                )
-            } else {
-                self.isReplacingVLCPipeline = false
-                self.logger.error(
-                    "Could not recreate VLC video output after returning to the foreground"
-                )
-            }
-            self.foregroundVideoRecoveryTask = nil
+        let flushedLayerCount = flushInterruptedVideoDisplayLayers(
+            in: mediaPlayer.drawable
+        )
+        if flushedLayerCount > 0 {
+            logger.info(
+                "Flushed \(flushedLayerCount) interrupted VLC video layer(s)"
+            )
         }
     }
 #endif
@@ -2288,6 +2254,30 @@ private func aspectFitRect(aspectRatio: CGFloat, inside bounds: CGRect) -> CGRec
 }
 
 #if canImport(UIKit)
+@MainActor
+private func flushInterruptedVideoDisplayLayers(in drawable: Any?) -> Int {
+    guard let root = drawable as? UIView else { return 0 }
+
+    var displayLayers: [AVSampleBufferDisplayLayer] = []
+    func collect(from view: UIView) {
+        if let displayLayer = view.layer as? AVSampleBufferDisplayLayer {
+            displayLayers.append(displayLayer)
+        }
+        for subview in view.subviews {
+            collect(from: subview)
+        }
+    }
+    collect(from: root)
+
+    let renderersToFlush = displayLayers.map(\.sampleBufferRenderer).filter {
+        $0.requiresFlushToResumeDecoding || $0.status == .failed
+    }
+    for renderer in renderersToFlush {
+        renderer.flush()
+    }
+    return renderersToFlush.count
+}
+
 struct VLCVideoSurface: UIViewRepresentable {
     let mediaPlayer: VLCMediaPlayer
     let attachmentRevision: Int

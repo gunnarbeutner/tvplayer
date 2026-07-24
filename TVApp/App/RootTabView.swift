@@ -1202,7 +1202,6 @@ private struct PersistentPlaybackSurface: View {
     @ObservedObject var engine: VLCPlaybackEngine
     let isPresented: Bool
     let showsGuidePreview: Bool
-    @State private var videoAttachmentRevision = 0
 #if os(iOS)
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -1259,7 +1258,6 @@ private struct PersistentPlaybackSurface: View {
                 } else {
                     VLCVideoSurface(
                         mediaPlayer: engine.mediaPlayer,
-                        attachmentRevision: videoAttachmentRevision,
                         fadesLeadingEdge: showsGuidePreview,
                         leadingFadeInset: showsGuidePreview ? guideLeadingCrop : 0,
                         isOutputConcealed: isPresented && engine.isPlaybackOutputConcealed,
@@ -1269,7 +1267,6 @@ private struct PersistentPlaybackSurface: View {
 #else
                 VLCVideoSurface(
                     mediaPlayer: engine.mediaPlayer,
-                    attachmentRevision: videoAttachmentRevision,
                     fadesLeadingEdge: showsGuidePreview,
                     leadingFadeInset: showsGuidePreview ? guideLeadingCrop : 0,
                     isOutputConcealed: isPresented && engine.isPlaybackOutputConcealed,
@@ -1307,11 +1304,8 @@ private struct PersistentPlaybackSurface: View {
             case .active:
                 guard wasBackgrounded else { return }
                 wasBackgrounded = false
-                // iOS can discard VLC's active video renderer while allowing
-                // its background audio pipeline to continue. Rebinding the
-                // persistent drawable recreates video output without seeking
-                // or disturbing the timeshift position.
-                videoAttachmentRevision &+= 1
+                // iOS marks an interrupted sample-buffer renderer as requiring
+                // a flush. Healthy renderers are left completely untouched.
                 engine.recoverVideoOutputAfterForegrounding()
             case .inactive:
                 break
