@@ -1286,7 +1286,7 @@ struct PlaybackView: View {
                 engine.refreshPlaybackInformation()
                 let health = engine.nativeTimeshiftHealthSnapshot
                 if (engine.state == .playing || engine.state == .paused),
-                   !engine.isPlaybackOutputConcealed,
+                   (!engine.isPlaybackOutputConcealed || engine.state == .paused),
                    health?.isNavigating != true {
                     timelineSeekTargetDate = nil
                     timelineSeekTargetsLiveEdge = false

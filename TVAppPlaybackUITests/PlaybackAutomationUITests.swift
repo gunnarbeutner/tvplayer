@@ -280,6 +280,84 @@ final class PlaybackAutomationUITests: XCTestCase {
         try exerciseRapidBidirectionalSeekBurst(startingWith: current)
     }
 
+    func testPausedTimeshiftSeekLeavesPlayerPaused() throws {
+        launchReplay()
+        // Match the user interaction: pause as soon as the first picture is
+        // visible and timeshift controls become available. Waiting for audio
+        // and the full readiness probe lets the initial tune settle and
+        // misses the pause/seek race.
+        let playing = try waitForProbe(timeout: 8) {
+            $0.playerPresented
+                && !$0.launchVisible
+                && $0.displayedPictures > 0
+                && $0.isSeekable
+        }
+
+        XCUIRemote.shared.press(.playPause)
+        let paused = try waitForProbe(timeout: 3) {
+            $0.engineState == "paused"
+                && !$0.isPlaying
+        }
+
+        XCUIRemote.shared.press(.left)
+        _ = try waitForProbe(timeout: 3) {
+            $0.navigationState != paused.navigationState
+                || $0.concealed
+                || $0.liveDelaySeconds > paused.liveDelaySeconds + 1
+        }
+
+        XCUIRemote.shared.press(.right)
+        let pendingSeek = app.staticTexts.matching(
+            NSPredicate(
+                format: "label == %@ OR label BEGINSWITH %@",
+                "Go to live",
+                "Seek to"
+            )
+        ).firstMatch
+
+        let settled = try waitForProbe(timeout: 8) {
+            $0.navigationState == "paused on selected frame"
+                && $0.engineState == "paused"
+                && $0.vlcState == paused.vlcState
+                && !$0.isPlaying
+        }
+        XCTAssertTrue(
+            pendingSeek.waitForNonExistence(timeout: 2),
+            "The pending seek label remained stuck after navigation completed."
+        )
+
+        XCTAssertEqual(settled.presentationID, playing.presentationID)
+        XCTAssertEqual(settled.recoveryCount, playing.recoveryCount)
+
+        // VLCKit can briefly report a paused state before decoded output
+        // continues advancing. Give the asynchronous pause time to settle,
+        // then prove that the rendered video and playback clock stay still.
+        Thread.sleep(forTimeInterval: 0.75)
+        let stillFrame = try currentProbe()
+        let afterPause = try samplePlayback(
+            for: 3,
+            startingWith: stillFrame
+        )
+        XCTAssertEqual(afterPause.engineState, "paused")
+        XCTAssertEqual(afterPause.vlcState, paused.vlcState)
+        XCTAssertFalse(afterPause.isPlaying)
+        XCTAssertEqual(
+            afterPause.displayedPictures,
+            stillFrame.displayedPictures,
+            "Video frames continued rendering after the paused seek settled."
+        )
+        XCTAssertEqual(
+            afterPause.playedAudioBuffers,
+            stillFrame.playedAudioBuffers,
+            "Audio continued playing after the paused seek settled."
+        )
+        XCTAssertEqual(
+            afterPause.playbackTimeMilliseconds,
+            stillFrame.playbackTimeMilliseconds,
+            "The VLC playback clock continued after the paused seek settled."
+        )
+    }
+
     func testHeldDirectionalSeekCanResumeWithSelectAndPlay() throws {
         launchReplay()
         var current = try waitForReadyPlayback(timeout: 8)

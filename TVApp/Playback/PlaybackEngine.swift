@@ -1217,6 +1217,16 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             hasStartedPlayback = true
             vlcURLPlaybackRouting.markPlaybackStarted()
             if pauseRequested {
+                // A pause issued while VLC is opening or replacing its media
+                // can lose a race with the later Playing transition. Do not
+                // merely publish our requested state while VLC keeps running:
+                // reassert the pause after that transition. Paused seek
+                // priming is the one exception because it deliberately runs
+                // VLC behind the concealed snapshot until a destination frame
+                // has been decoded.
+                if !isPrimingPausedSeekFrame {
+                    mediaPlayer.pause()
+                }
                 setState(.paused)
             } else if let recoveryReason {
                 setState(.recovering(recoveryReason, attempt: recoveryAttempt))
