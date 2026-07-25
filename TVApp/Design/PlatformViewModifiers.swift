@@ -7,6 +7,72 @@ enum PlatformMoveDirection: Equatable {
     case right
 }
 
+/// An action control whose tvOS focus appearance is entirely app-defined.
+///
+/// SwiftUI's `Button` can add a system material and shadow even when its
+/// button style and focus effect are disabled. A directly focusable action
+/// avoids that decoration while retaining remote and accessibility activation.
+struct AppActionButton<Label: View>: View {
+    let action: () -> Void
+    let isFocusEnabled: Bool
+    let focusRequest: UUID?
+    let onMoveDown: (() -> Void)?
+    let onFocusChanged: (Bool) -> Void
+    let label: (Bool) -> Label
+
+#if os(tvOS)
+    @FocusState private var isFocused: Bool
+#endif
+
+    init(
+        action: @escaping () -> Void,
+        isFocusEnabled: Bool = true,
+        focusRequest: UUID? = nil,
+        onMoveDown: (() -> Void)? = nil,
+        onFocusChanged: @escaping (Bool) -> Void = { _ in },
+        @ViewBuilder label: @escaping (Bool) -> Label
+    ) {
+        self.action = action
+        self.isFocusEnabled = isFocusEnabled
+        self.focusRequest = focusRequest
+        self.onMoveDown = onMoveDown
+        self.onFocusChanged = onFocusChanged
+        self.label = label
+    }
+
+    var body: some View {
+#if os(tvOS)
+        label(isFocused)
+            .contentShape(Rectangle())
+            .focusable(isFocusEnabled)
+            .focused($isFocused)
+            .focusEffectDisabled()
+            .onTapGesture(perform: action)
+            .onMoveCommand { direction in
+                guard isFocused, direction == .down else { return }
+                isFocused = false
+                onMoveDown?()
+            }
+            .onChange(of: focusRequest) { _, request in
+                guard request != nil, isFocusEnabled else { return }
+                isFocused = true
+            }
+            .onChange(of: isFocused) { _, focused in
+                onFocusChanged(focused)
+            }
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction {
+                action()
+            }
+#else
+        Button(action: action) {
+            label(false)
+        }
+        .buttonStyle(.plain)
+#endif
+    }
+}
+
 extension View {
     @ViewBuilder
     func televisionGuideEdges() -> some View {

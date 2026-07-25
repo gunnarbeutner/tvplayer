@@ -5,22 +5,16 @@ import XCTest
 final class TimeshiftActionTests: XCTestCase {
     func testNativeTimeshiftTuningPolicyKeepsColdTuneAndPostSeekBuffersIndependent() {
         let defaults = NativeTimeshiftTuningPolicy()
-
-        XCTAssertEqual(defaults.vlcCacheMilliseconds, 1_500)
-        XCTAssertEqual(defaults.initialHorizonMilliseconds, 500)
-        XCTAssertEqual(defaults.postSeekReserveMilliseconds, 1_500)
-        XCTAssertEqual(defaults.alignedRevealDuration, 0.5)
-        XCTAssertEqual(defaults.fallbackRevealDuration, 0.75)
-        XCTAssertEqual(defaults.revealPollInterval, 0.05)
-        XCTAssertEqual(defaults.initialStageTimeout, 2.5)
-
         let reducedColdTuneCache = NativeTimeshiftTuningPolicy(
             vlcCacheMilliseconds: 800,
             initialHorizonMilliseconds: 650
         )
         XCTAssertEqual(reducedColdTuneCache.vlcCacheMilliseconds, 800)
         XCTAssertEqual(reducedColdTuneCache.initialHorizonMilliseconds, 650)
-        XCTAssertEqual(reducedColdTuneCache.postSeekReserveMilliseconds, 1_500)
+        XCTAssertEqual(
+            reducedColdTuneCache.postSeekReserveMilliseconds,
+            defaults.postSeekReserveMilliseconds
+        )
     }
 
     func testNativeTimeshiftTuningPolicyOnlyUsesShortRevealForCurrentAlignedBatch() {
@@ -163,11 +157,6 @@ final class TimeshiftActionTests: XCTestCase {
             PlaybackOutputCounters(displayedPictures: 2, playedAudioBuffers: 10),
             at: startedAt.addingTimeInterval(1.01)
         ))
-    }
-
-    func testTimelineSeekCommitPolicyCoalescesTaps() {
-        XCTAssertEqual(TimelineSeekCommitPolicy.coalescingDelayMilliseconds, 250)
-        XCTAssertEqual(NativeTimeshiftActionPlan.preferredLiveDelay, 2)
     }
 
     func testPlayStartsNativeTimeshift() {

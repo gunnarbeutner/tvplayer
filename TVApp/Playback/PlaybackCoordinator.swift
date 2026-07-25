@@ -510,10 +510,9 @@ final class PlaybackCoordinator: ObservableObject {
             finishLaunch(launchPresentation.id, dismissPlayer: true)
             return
         }
-        // Keep live television running only when the caller is about to expose
-        // the guide preview. Otherwise stopping the player must also stop its
-        // audio; leaving the live engine active behind Channels (or anywhere on
-        // iOS, which has no embedded preview) produces invisible playback.
+        // Keep live television running only when the destination can represent
+        // and reopen the active session. Other destinations stop its audio
+        // rather than leaving invisible playback running.
         if presentation?.isRecording == true {
             engine.pause()
         } else if !retainingLivePlayback {
@@ -531,6 +530,25 @@ final class PlaybackCoordinator: ObservableObject {
     func returnToPlayer() {
         guard presentation != nil else { return }
         isPlayerPresented = true
+        errorMessage = nil
+    }
+
+    func toggleRetainedPlayback() {
+        guard presentation != nil else { return }
+        if engine.state == .paused {
+            engine.play()
+        } else {
+            engine.pause()
+        }
+    }
+
+    func stopRetainedPlayback() {
+        guard presentation != nil else { return }
+        cancelPlaybackStartIntent()
+        cancelLivePlaybackPrefetch()
+        engine.stop()
+        presentation = nil
+        isUserInitiatedPlayback = false
         errorMessage = nil
     }
 

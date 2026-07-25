@@ -30,6 +30,46 @@ enum AppTab: Hashable, CaseIterable {
     }
 }
 
+enum RetainedPlaybackPresentation: Equatable {
+    case hidden
+    case fullPlayer
+    case guidePreview
+    case miniPlayer
+}
+
+enum RetainedPlaybackPresentationPolicy {
+    static func presentation(
+        isPlayerPresented: Bool,
+        hasPlayback: Bool,
+        showsGuidePreview: Bool,
+        allowsMiniPlayer: Bool
+    ) -> RetainedPlaybackPresentation {
+        if isPlayerPresented { return .fullPlayer }
+        guard hasPlayback else { return .hidden }
+        if showsGuidePreview { return .guidePreview }
+        return allowsMiniPlayer ? .miniPlayer : .hidden
+    }
+}
+
+enum TVMiniPlayerLayout {
+    static let navigatorHeight: CGFloat = 84
+    static let height: CGFloat = 160
+    static let verticalSpacing: CGFloat = 18
+    static let horizontalInset: CGFloat = 54
+    static let reservedContentHeight = height + verticalSpacing * 2
+}
+
+enum TVSectionDownFocusDestination: Equatable {
+    case miniPlayer
+    case content
+}
+
+enum TVSectionDownFocusPolicy {
+    static func destination(hasMiniPlayer: Bool) -> TVSectionDownFocusDestination {
+        hasMiniPlayer ? .miniPlayer : .content
+    }
+}
+
 enum PlaybackExitCommandAction: Equatable {
     case passThrough
     case cancelLaunch
@@ -127,6 +167,9 @@ private struct CloudSyncLifecycleModifier: ViewModifier {
 
 struct RootTabView: View {
     @Environment(\.scenePhase) private var scenePhase
+#if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+#endif
     @State private var selection: AppTab
     @StateObject private var settings: ServerSettingsStore
     @StateObject private var guide: GuideViewModel
@@ -139,6 +182,7 @@ struct RootTabView: View {
     @State private var pendingRoute: AppRoute?
     @State private var guideDetailRequest: ProgrammeDetailPresentation?
     @State private var recordingDetailRequest: RecordingDetailRequest?
+    @State private var miniPlayerFocusRequest: UUID?
 #if os(tvOS)
     @State private var startupRoutePhase: StartupRoutePhase
     @State private var startupPlaybackRoute: AppRoute?
@@ -306,14 +350,19 @@ struct RootTabView: View {
             // dismissed surface.
             PersistentPlaybackSurface(
                 engine: playback.engine,
-                isPresented: playback.isPlayerPresented,
-                showsGuidePreview: showsGuideLivePreview
+                presentation: playback.presentation,
+                presentationMode: retainedPlaybackPresentation,
+                onExpand: playback.returnToPlayer,
+                onTogglePlayback: playback.toggleRetainedPlayback,
+                onStop: playback.stopRetainedPlayback,
+                miniPlayerFocusRequest: miniPlayerFocusRequest,
+                onMoveDownFromMiniPlayer: {
+#if os(tvOS)
+                    requestContentFocus(for: selection)
+#endif
+                }
             )
-                .zIndex(
-                    playback.isPlayerPresented
-                        ? 10
-                        : showsGuideLivePreview ? 1 : -1
-                )
+                .zIndex(retainedPlaybackSurfaceZIndex)
 
 #if os(tvOS)
             // Keep the controls above the embedded video without placing the
@@ -352,7 +401,7 @@ struct RootTabView: View {
                     engine: playback.engine,
                     presentation: presentation,
                     showsVideoSurface: false,
-                    retainsLivePlaybackOnDismiss: supportsGuideLivePreviewOnDismissal
+                    retainsLivePlaybackOnDismiss: true
                 )
                 .environmentObject(playback)
                 .environmentObject(settings)
@@ -671,9 +720,7 @@ struct RootTabView: View {
         switch route {
         case .guide:
             if playback.isPlayerPresented {
-                playback.leavePlayer(
-                    retainingLivePlayback: platformSupportsGuideLivePreview
-                )
+                playback.leavePlayer(retainingLivePlayback: true)
             }
             selection = .guide
 #if os(tvOS)
@@ -796,15 +843,11 @@ struct RootTabView: View {
             playback.leavePlayer()
             return true
         case .dismissTransition:
-            playback.leavePlayer(
-                retainingLivePlayback: supportsGuideLivePreviewOnDismissal
-            )
+            playback.leavePlayer(retainingLivePlayback: true)
             return true
         case .delegateToPlayer:
             guard let handler = TVRemoteCommandCenter.playerExitHandler else {
-                playback.leavePlayer(
-                    retainingLivePlayback: supportsGuideLivePreviewOnDismissal
-                )
+                playback.leavePlayer(retainingLivePlayback: true)
                 return true
             }
             return handler()
@@ -861,7 +904,12 @@ struct RootTabView: View {
 #if os(tvOS)
         VStack(spacing: 0) {
             Color.clear
-                .frame(height: 84)
+                .frame(height: TVMiniPlayerLayout.navigatorHeight)
+
+            if retainedPlaybackPresentation == .miniPlayer {
+                Color.clear
+                    .frame(height: TVMiniPlayerLayout.reservedContentHeight)
+            }
 
             tabs
                 .onExitCommand(perform: exitToSectionNavigator)
@@ -891,21 +939,32 @@ struct RootTabView: View {
             allowsFocus: allowsSectionNavigatorFocus,
             onFocusChanged: { isSectionNavigatorFocused = $0 },
             onEnterContent: { tab in
-                switch tab {
-                case .channels:
-                    channelsFocusRequest = UUID()
-                case .guide:
-                    guideFocusRequest = UUID()
-                case .recordings:
-                    recordingsFocusRequest = UUID()
-                case .settings:
-                    settingsFocusRequest = UUID()
+                switch TVSectionDownFocusPolicy.destination(
+                    hasMiniPlayer: retainedPlaybackPresentation == .miniPlayer
+                ) {
+                case .miniPlayer:
+                    miniPlayerFocusRequest = UUID()
+                case .content:
+                    requestContentFocus(for: tab)
                 }
             }
         )
         .frame(height: 84)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .ignoresSafeArea(.container, edges: .top)
+    }
+
+    private func requestContentFocus(for tab: AppTab) {
+        switch tab {
+        case .channels:
+            channelsFocusRequest = UUID()
+        case .guide:
+            guideFocusRequest = UUID()
+        case .recordings:
+            recordingsFocusRequest = UUID()
+        case .settings:
+            settingsFocusRequest = UUID()
+        }
     }
 #endif
 
@@ -931,16 +990,36 @@ struct RootTabView: View {
 #endif
     }
 
-    private var supportsGuideLivePreviewOnDismissal: Bool {
-        platformSupportsGuideLivePreview && selection == .guide
-    }
-
     private var platformSupportsGuideLivePreview: Bool {
 #if os(iOS)
         false
 #else
         true
 #endif
+    }
+
+    private var retainedPlaybackPresentation: RetainedPlaybackPresentation {
+        RetainedPlaybackPresentationPolicy.presentation(
+            isPlayerPresented: playback.isPlayerPresented,
+            hasPlayback: playback.presentation != nil
+                && playback.launchPresentation == nil,
+            showsGuidePreview: showsGuideLivePreview,
+            allowsMiniPlayer: selection != .guide
+                || !platformSupportsGuideLivePreview
+        )
+    }
+
+    private var retainedPlaybackSurfaceZIndex: Double {
+        switch retainedPlaybackPresentation {
+        case .hidden:
+            -1
+        case .guidePreview:
+            1
+        case .miniPlayer:
+            4
+        case .fullPlayer:
+            10
+        }
     }
 
 #if os(tvOS)
@@ -1009,6 +1088,7 @@ struct RootTabView: View {
                 isSelected: selection == .channels,
                 onOpenSettings: { selection = .settings }
             )
+                .safeAreaPadding(.bottom, compactMiniPlayerContentInset)
                 .tabItem {
                     Label("Channels", systemImage: "play.rectangle.on.rectangle")
                 }
@@ -1019,6 +1099,7 @@ struct RootTabView: View {
                 onOpenSettings: { selection = .settings },
                 detailRequest: $guideDetailRequest
             )
+                .safeAreaPadding(.bottom, compactMiniPlayerContentInset)
                 .tabItem {
                     Label("Guide", systemImage: "rectangle.grid.2x2")
                 }
@@ -1028,12 +1109,14 @@ struct RootTabView: View {
                 onOpenSettings: { selection = .settings },
                 detailRequest: $recordingDetailRequest
             )
+                .safeAreaPadding(.bottom, compactMiniPlayerContentInset)
                 .tabItem {
                     Label("Recordings", systemImage: "record.circle")
                 }
                 .tag(AppTab.recordings)
 
             SettingsView()
+                .safeAreaPadding(.bottom, compactMiniPlayerContentInset)
                 .tabItem {
                     Label("Settings", systemImage: "gearshape")
                 }
@@ -1042,6 +1125,15 @@ struct RootTabView: View {
         .tabViewStyle(.sidebarAdaptable)
 #endif
     }
+
+#if os(iOS)
+    private var compactMiniPlayerContentInset: CGFloat {
+        retainedPlaybackPresentation == .miniPlayer
+            && horizontalSizeClass == .compact
+            ? 72
+            : 0
+    }
+#endif
 
 #if os(tvOS)
     private var guideHeaderTint: Color? {
@@ -1327,8 +1419,17 @@ private struct TVSectionNavigator: View {
 
 private struct PersistentPlaybackSurface: View {
     @ObservedObject var engine: VLCPlaybackEngine
-    let isPresented: Bool
-    let showsGuidePreview: Bool
+    let presentation: PlaybackPresentation?
+    let presentationMode: RetainedPlaybackPresentation
+    let onExpand: () -> Void
+    let onTogglePlayback: () -> Void
+    let onStop: () -> Void
+    let miniPlayerFocusRequest: UUID?
+    let onMoveDownFromMiniPlayer: () -> Void
+#if os(tvOS)
+    @State private var miniPlayerHasFocus = false
+    @State private var focusedMiniPlayerTargets: Set<MiniPlayerFocusTarget> = []
+#endif
 #if os(iOS)
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -1346,6 +1447,18 @@ private struct PersistentPlaybackSurface: View {
 
     private var guideLeadingCrop: CGFloat {
         max(0, guideVideoWidth - GuideArtworkStyle.artworkWidth)
+    }
+
+    private var isPresented: Bool {
+        presentationMode == .fullPlayer
+    }
+
+    private var showsGuidePreview: Bool {
+        presentationMode == .guidePreview
+    }
+
+    private var showsMiniPlayer: Bool {
+        presentationMode == .miniPlayer
     }
 
     private var ignoredSafeAreaEdges: Edge.Set {
@@ -1366,11 +1479,61 @@ private struct PersistentPlaybackSurface: View {
 #endif
     }
 
+    private var usesCompactMiniPlayer: Bool {
+#if os(tvOS)
+        showsMiniPlayer
+#elseif os(iOS)
+        showsMiniPlayer && horizontalSizeClass == .compact
+#else
+        false
+#endif
+    }
+
+    private var miniVideoSize: CGSize {
+#if os(tvOS)
+        CGSize(
+            width: TVMiniPlayerLayout.height * 16 / 9,
+            height: TVMiniPlayerLayout.height
+        )
+#elseif os(macOS)
+        CGSize(width: 320, height: 180)
+#else
+        usesCompactMiniPlayer
+            ? CGSize(width: 128, height: 72)
+            : CGSize(width: 320, height: 180)
+#endif
+    }
+
+    private var miniCornerRadius: CGFloat {
+#if os(tvOS)
+        22
+#else
+        14
+#endif
+    }
+
     var body: some View {
         GeometryReader { proxy in
             let presentedHeight = usesCompactPortraitPlayer
                 ? proxy.size.width * 9 / 16
                 : proxy.size.height
+            let miniContainerSize = CGSize(
+                width: miniPlayerContainerWidth(for: proxy.size.width),
+                height: miniVideoSize.height
+            )
+            let videoSize = renderedVideoSize(
+                proxySize: proxy.size,
+                presentedHeight: presentedHeight
+            )
+            let containerSize = renderedContainerSize(
+                proxySize: proxy.size,
+                presentedHeight: presentedHeight,
+                miniContainerSize: miniContainerSize
+            )
+            let position = renderedPosition(
+                proxySize: proxy.size,
+                containerSize: containerSize
+            )
 
             Group {
 #if os(tvOS)
@@ -1402,27 +1565,36 @@ private struct PersistentPlaybackSurface: View {
 #endif
             }
             .frame(
-                width: isPresented ? proxy.size.width : guideVideoWidth,
-                height: isPresented ? presentedHeight : guidePreviewHeight
+                width: videoSize.width,
+                height: videoSize.height
             )
             // Broadcast video is normally 16:9 while the deliberately taller
             // guide artwork region is not. Render at the source aspect and
             // crop the leading side instead of asking VLC to letterbox it.
             .frame(
-                width: isPresented ? proxy.size.width : GuideArtworkStyle.artworkWidth,
-                height: isPresented ? presentedHeight : guidePreviewHeight,
-                alignment: .trailing
+                width: containerSize.width,
+                height: containerSize.height,
+                alignment: showsGuidePreview ? .trailing : .leading
             )
             .clipped()
-            .frame(
-                maxWidth: .infinity,
-                maxHeight: .infinity,
-                alignment: usesCompactPortraitPlayer ? .center : .topTrailing
+            .background(showsMiniPlayer ? Color.black : Color.clear)
+            .overlay {
+                if showsMiniPlayer {
+                    miniPlayerChrome(videoWidth: miniVideoSize.width)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: showsMiniPlayer ? miniCornerRadius : 0))
+            .shadow(
+                color: showsMiniPlayer ? .black.opacity(0.45) : .clear,
+                radius: showsMiniPlayer ? 18 : 0,
+                y: showsMiniPlayer ? 8 : 0
             )
+            .position(position)
         }
         .ignoresSafeArea(.container, edges: ignoredSafeAreaEdges)
-        .opacity(isPresented || showsGuidePreview ? 1 : 0)
-        .allowsHitTesting(false)
+        .opacity(presentationMode == .hidden ? 0 : 1)
+        .allowsHitTesting(showsMiniPlayer)
+        .accessibilityHidden(!showsMiniPlayer)
 #if os(iOS)
         .onChange(of: scenePhase) { _, phase in
             switch phase {
@@ -1441,5 +1613,312 @@ private struct PersistentPlaybackSurface: View {
             }
         }
 #endif
+    }
+
+    private func renderedVideoSize(
+        proxySize: CGSize,
+        presentedHeight: CGFloat
+    ) -> CGSize {
+        switch presentationMode {
+        case .hidden, .guidePreview:
+            CGSize(width: guideVideoWidth, height: guidePreviewHeight)
+        case .miniPlayer:
+            miniVideoSize
+        case .fullPlayer:
+            CGSize(width: proxySize.width, height: presentedHeight)
+        }
+    }
+
+    private func renderedContainerSize(
+        proxySize: CGSize,
+        presentedHeight: CGFloat,
+        miniContainerSize: CGSize
+    ) -> CGSize {
+        switch presentationMode {
+        case .hidden, .guidePreview:
+            CGSize(width: GuideArtworkStyle.artworkWidth, height: guidePreviewHeight)
+        case .miniPlayer:
+            miniContainerSize
+        case .fullPlayer:
+            CGSize(width: proxySize.width, height: presentedHeight)
+        }
+    }
+
+    private func miniPlayerContainerWidth(for availableWidth: CGFloat) -> CGFloat {
+#if os(tvOS)
+        max(0, availableWidth - TVMiniPlayerLayout.horizontalInset * 2)
+#else
+        usesCompactMiniPlayer
+            ? max(0, availableWidth - 24)
+            : miniVideoSize.width
+#endif
+    }
+
+    private func renderedPosition(
+        proxySize: CGSize,
+        containerSize: CGSize
+    ) -> CGPoint {
+        switch presentationMode {
+        case .hidden, .guidePreview:
+            CGPoint(
+                x: proxySize.width - containerSize.width / 2,
+                y: containerSize.height / 2
+            )
+        case .fullPlayer:
+            CGPoint(x: proxySize.width / 2, y: proxySize.height / 2)
+        case .miniPlayer:
+#if os(tvOS)
+            CGPoint(
+                x: proxySize.width / 2,
+                y: TVMiniPlayerLayout.navigatorHeight
+                    + TVMiniPlayerLayout.verticalSpacing
+                    + containerSize.height / 2
+            )
+#elseif os(macOS)
+            CGPoint(
+                x: proxySize.width - containerSize.width / 2 - 24,
+                y: proxySize.height - containerSize.height / 2 - 24
+            )
+#else
+            if usesCompactMiniPlayer {
+                CGPoint(
+                    x: proxySize.width / 2,
+                    y: proxySize.height - containerSize.height / 2 - 92
+                )
+            } else {
+                CGPoint(
+                    x: proxySize.width - containerSize.width / 2 - 24,
+                    y: proxySize.height - containerSize.height / 2 - 24
+                )
+            }
+#endif
+        }
+    }
+
+    @ViewBuilder
+    private func miniPlayerChrome(videoWidth: CGFloat) -> some View {
+        if usesCompactMiniPlayer {
+            compactMiniPlayerChrome(videoWidth: videoWidth)
+        } else {
+            regularMiniPlayerChrome
+        }
+    }
+
+    private func compactMiniPlayerChrome(videoWidth: CGFloat) -> some View {
+        HStack(spacing: 0) {
+            AppActionButton(
+                action: onExpand,
+                focusRequest: miniPlayerFocusRequest,
+                onMoveDown: onMoveDownFromMiniPlayer,
+                onFocusChanged: {
+                    updateMiniPlayerFocus(.expand, isFocused: $0)
+                }
+            ) { isFocused in
+                HStack(spacing: 12) {
+                    Color.clear
+                        .frame(width: videoWidth)
+
+                    miniPlayerMetadata
+                }
+                .contentShape(Rectangle())
+                .overlay {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .strokeBorder(
+                            isFocused ? AppTheme.focusBorder : Color.clear,
+                            lineWidth: 3
+                        )
+                }
+            }
+
+            HStack(spacing: 16) {
+                miniPlayerButton(
+                    systemImage: engine.state == .paused ? "play.fill" : "pause.fill",
+                    accessibilityLabel: engine.state == .paused ? "Play" : "Pause",
+                    isFocusEnabled: miniPlayerChildFocusIsEnabled,
+                    focusTarget: .playPause,
+                    onMoveDown: onMoveDownFromMiniPlayer,
+                    action: onTogglePlayback
+                )
+
+                miniPlayerButton(
+                    systemImage: "xmark",
+                    accessibilityLabel: "Stop playback",
+                    isFocusEnabled: miniPlayerChildFocusIsEnabled,
+                    focusTarget: .stop,
+                    onMoveDown: onMoveDownFromMiniPlayer,
+                    action: onStop
+                )
+            }
+            .padding(.horizontal, 10)
+        }
+    }
+
+    private var regularMiniPlayerChrome: some View {
+        ZStack {
+            AppActionButton(action: onExpand) { _ in
+                Color.clear
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("Return to player")
+
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.88)],
+                startPoint: .center,
+                endPoint: .bottom
+            )
+            .allowsHitTesting(false)
+
+            VStack(spacing: 0) {
+                HStack {
+                    Spacer()
+                    miniPlayerButton(
+                        systemImage: "xmark",
+                        accessibilityLabel: "Stop playback",
+                        action: onStop
+                    )
+                }
+
+                Spacer()
+
+                HStack(spacing: 12) {
+                    miniPlayerMetadata
+
+                    miniPlayerButton(
+                        systemImage: engine.state == .paused ? "play.fill" : "pause.fill",
+                        accessibilityLabel: engine.state == .paused ? "Play" : "Pause",
+                        action: onTogglePlayback
+                    )
+
+                    miniPlayerButton(
+                        systemImage: "arrow.up.left.and.arrow.down.right",
+                        accessibilityLabel: "Return to player",
+                        action: onExpand
+                    )
+                }
+            }
+            .padding(10)
+        }
+    }
+
+    private var miniPlayerMetadata: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(
+                presentation?.recording?.title
+                    ?? presentation?.program?.title
+                    ?? presentation?.channel.name
+                    ?? "Playing"
+            )
+            .font(.headline)
+            .foregroundStyle(.white)
+            .lineLimit(1)
+
+            if let channelName = presentation?.channel.name {
+                Text(channelName)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.72))
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func miniPlayerButton(
+        systemImage: String,
+        accessibilityLabel: String,
+        isFocusEnabled: Bool = true,
+        focusTarget: MiniPlayerFocusTarget? = nil,
+        onMoveDown: (() -> Void)? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
+        MiniPlayerControlButton(
+            systemImage: systemImage,
+            accessibilityLabel: accessibilityLabel,
+            isFocusEnabled: isFocusEnabled,
+            onMoveDown: onMoveDown,
+            onFocusChanged: { isFocused in
+                guard let focusTarget else { return }
+                updateMiniPlayerFocus(focusTarget, isFocused: isFocused)
+            },
+            action: action
+        )
+    }
+
+    private var miniPlayerChildFocusIsEnabled: Bool {
+#if os(tvOS)
+        miniPlayerHasFocus
+#else
+        true
+#endif
+    }
+
+    private func updateMiniPlayerFocus(
+        _ target: MiniPlayerFocusTarget,
+        isFocused: Bool
+    ) {
+#if os(tvOS)
+        if isFocused {
+            focusedMiniPlayerTargets.insert(target)
+            miniPlayerHasFocus = true
+        } else {
+            focusedMiniPlayerTargets.remove(target)
+            Task { @MainActor in
+                await Task.yield()
+                if focusedMiniPlayerTargets.isEmpty {
+                    miniPlayerHasFocus = false
+                }
+            }
+        }
+#endif
+    }
+}
+
+private enum MiniPlayerFocusTarget: Hashable {
+    case expand
+    case playPause
+    case stop
+}
+
+private struct MiniPlayerControlButton: View {
+    let systemImage: String
+    let accessibilityLabel: String
+    let isFocusEnabled: Bool
+    let onMoveDown: (() -> Void)?
+    let onFocusChanged: (Bool) -> Void
+    let action: () -> Void
+
+    private var controlSize: CGFloat {
+#if os(tvOS)
+        56
+#else
+        38
+#endif
+    }
+
+    var body: some View {
+        AppActionButton(
+            action: action,
+            isFocusEnabled: isFocusEnabled,
+            onMoveDown: onMoveDown,
+            onFocusChanged: onFocusChanged
+        ) { isFocused in
+            Image(systemName: systemImage)
+                .font(.headline)
+                .foregroundStyle(.white)
+                .frame(width: controlSize, height: controlSize)
+                .background(
+                    isFocused ? AppTheme.focused : .black.opacity(0.62),
+                    in: Circle()
+                )
+                .overlay {
+                    Circle()
+                        .strokeBorder(
+                            isFocused ? AppTheme.focusBorder : Color.clear,
+                            lineWidth: 3
+                        )
+                }
+                .scaleEffect(isFocused ? 1.08 : 1)
+                .animation(.easeOut(duration: 0.14), value: isFocused)
+        }
+        .accessibilityLabel(accessibilityLabel)
     }
 }

@@ -1,5 +1,13 @@
 import SwiftUI
 
+enum PlaybackLaunchLayout {
+    static let closeButtonPadding: CGFloat = 20
+    static let closeButtonSize: CGFloat = 44
+    static let minimumIdentitySpacing: CGFloat = 16
+    static let channelIdentityLeadingInset =
+        closeButtonPadding + closeButtonSize + minimumIdentitySpacing
+}
+
 struct PlaybackLaunchView: View {
     @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var playback: PlaybackCoordinator
@@ -119,7 +127,8 @@ struct PlaybackLaunchView: View {
                     .lineLimit(1)
                     .multilineTextAlignment(centersChannelIdentity ? .center : .leading)
             }
-            .padding(.horizontal, usesCompactPortraitLayout ? 24 : 48)
+            .padding(.leading, channelIdentityLeadingPadding)
+            .padding(.trailing, standardIdentityHorizontalPadding)
             .padding(.vertical, usesCompactPortraitLayout ? 24 : 48)
             .frame(
                 maxWidth: .infinity,
@@ -146,13 +155,20 @@ struct PlaybackLaunchView: View {
                 Image(systemName: "xmark")
                     .font(.headline.bold())
                     .foregroundStyle(.white)
-                    .frame(width: 44, height: 44)
+                    .frame(
+                        width: PlaybackLaunchLayout.closeButtonSize,
+                        height: PlaybackLaunchLayout.closeButtonSize
+                    )
                     .background(.black.opacity(0.72), in: Circle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Cancel Playback")
-            .padding(20)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .padding(PlaybackLaunchLayout.closeButtonPadding)
+            .frame(
+                maxWidth: .infinity,
+                maxHeight: .infinity,
+                alignment: .topLeading
+            )
 #endif
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -235,6 +251,16 @@ struct PlaybackLaunchView: View {
 
     private var identityHorizontalAlignment: HorizontalAlignment {
         centersChannelIdentity ? .center : .leading
+    }
+
+    private var standardIdentityHorizontalPadding: CGFloat {
+        usesCompactPortraitLayout ? 24 : 48
+    }
+
+    private var channelIdentityLeadingPadding: CGFloat {
+        centersChannelIdentity
+            ? standardIdentityHorizontalPadding
+            : PlaybackLaunchLayout.channelIdentityLeadingInset
     }
 
     @MainActor

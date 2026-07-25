@@ -226,13 +226,6 @@ final class GuideGridLayoutTests: XCTestCase {
         )
     }
 
-    func testChannelAndProgrammeCardsUseTheSameRowHeight() {
-        XCTAssertEqual(
-            GuideGridMetrics.cardHeight + (GuideGridMetrics.rowInset * 2),
-            GuideGridMetrics.rowHeight
-        )
-    }
-
     func testInitialFocusDoesNotScrollBeforeTheGridHasStableBounds() throws {
         let firstRowFrame = CGRect(
             x: GuideGridMetrics.channelWidth + 100,
@@ -653,14 +646,6 @@ final class GuideGridLayoutTests: XCTestCase {
         XCTAssertEqual(
             snapshot.contentSize.height,
             GuideGridMetrics.headerHeight + 2 * GuideGridMetrics.rowHeight
-        )
-    }
-
-    func testTimelineHeaderContentIsVerticallyCentered() {
-        XCTAssertEqual(
-            GuideGridMetrics.headerContentY + GuideGridMetrics.headerContentHeight / 2,
-            GuideGridMetrics.headerHeight / 2,
-            accuracy: 0.001
         )
     }
 

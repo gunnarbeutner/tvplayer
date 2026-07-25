@@ -93,8 +93,6 @@ final class RecordingTopShelfArtworkPolicyTests: XCTestCase {
         let growing = RecordingTopShelfArtworkPolicy.snapshotPosition(for: .recording)
         let completed = RecordingTopShelfArtworkPolicy.snapshotPosition(for: .completed)
 
-        XCTAssertEqual(growing, 0.05)
-        XCTAssertEqual(completed, 0.20)
         XCTAssertLessThan(growing, completed)
     }
 

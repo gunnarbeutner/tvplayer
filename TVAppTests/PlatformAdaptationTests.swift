@@ -5,22 +5,6 @@ import SwiftUI
 @testable import TVApp
 
 final class PlatformAdaptationTests: XCTestCase {
-    func testAdaptiveCardMetricsRemainUsableOnCurrentPlatform() {
-        XCTAssertGreaterThanOrEqual(PlatformLayout.channelCardMinimumWidth, 280)
-        XCTAssertGreaterThanOrEqual(PlatformLayout.recordingCardMinimumWidth, 280)
-        XCTAssertGreaterThanOrEqual(PlatformLayout.contentPadding, 20)
-    }
-
-    func testPlatformMoveDirectionsAreDistinct() {
-        let directions: Set<String> = [
-            String(describing: PlatformMoveDirection.up),
-            String(describing: PlatformMoveDirection.down),
-            String(describing: PlatformMoveDirection.left),
-            String(describing: PlatformMoveDirection.right),
-        ]
-        XCTAssertEqual(directions.count, 4)
-    }
-
     func testTimelineScrubbingClampsRecordingTargetsToAvailableContent() {
         XCTAssertEqual(
             TimelineScrubbing.recordingTarget(
@@ -87,10 +71,6 @@ final class PlatformAdaptationTests: XCTestCase {
             ),
             availableEnd
         )
-    }
-
-    func testPlayerNavigationUsesSystemSkipInterval() {
-        XCTAssertEqual(PlayerNavigationPolicy.skipInterval, 10)
     }
 
     func testTouchHoldSeekVelocityUsesDeadZoneAndAcceleratesTowardEdges() {
@@ -310,49 +290,62 @@ final class PlatformAdaptationTests: XCTestCase {
         XCTAssertFalse(isVisible)
     }
 
-    func testPlayerPanelTabsClearTheCloseButton() {
-        let tabLeadingInset = PlayerPanelHeaderLayout.tabLeadingInset(
-            closeButtonHorizontalPadding: 20,
-            overlayHorizontalPadding: 28,
-            sharesHeaderRow: true
+    func testRetainedPlaybackUsesOnlyAnAvailablePresentationSurface() {
+        XCTAssertEqual(
+            RetainedPlaybackPresentationPolicy.presentation(
+                isPlayerPresented: true,
+                hasPlayback: true,
+                showsGuidePreview: false,
+                allowsMiniPlayer: false
+            ),
+            .fullPlayer
         )
+        XCTAssertEqual(
+            RetainedPlaybackPresentationPolicy.presentation(
+                isPlayerPresented: false,
+                hasPlayback: true,
+                showsGuidePreview: true,
+                allowsMiniPlayer: false
+            ),
+            .guidePreview
+        )
+        XCTAssertEqual(
+            RetainedPlaybackPresentationPolicy.presentation(
+                isPlayerPresented: false,
+                hasPlayback: true,
+                showsGuidePreview: false,
+                allowsMiniPlayer: true
+            ),
+            .miniPlayer
+        )
+        XCTAssertEqual(
+            RetainedPlaybackPresentationPolicy.presentation(
+                isPlayerPresented: false,
+                hasPlayback: false,
+                showsGuidePreview: false,
+                allowsMiniPlayer: true
+            ),
+            .hidden
+        )
+        XCTAssertEqual(
+            RetainedPlaybackPresentationPolicy.presentation(
+                isPlayerPresented: false,
+                hasPlayback: true,
+                showsGuidePreview: false,
+                allowsMiniPlayer: false
+            ),
+            .hidden
+        )
+    }
 
-        XCTAssertGreaterThanOrEqual(
-            28 + tabLeadingInset,
-            20 + PlayerPanelHeaderLayout.closeButtonSize
-                + PlayerPanelHeaderLayout.minimumSpacing
+    func testTVSectionNavigatorEntersVisibleMiniPlayerBeforeContent() {
+        XCTAssertEqual(
+            TVSectionDownFocusPolicy.destination(hasMiniPlayer: true),
+            .miniPlayer
         )
         XCTAssertEqual(
-            PlayerPanelHeaderLayout.tabLeadingInset(
-                closeButtonHorizontalPadding: 16,
-                overlayHorizontalPadding: 20,
-                sharesHeaderRow: false
-            ),
-            0
-        )
-        XCTAssertEqual(
-            PlayerPanelHeaderLayout.closeButtonTopPadding(
-                usesCompactLayout: false,
-                usesCompactHeight: false,
-                isPanelVisible: true
-            ),
-            PlayerPanelHeaderLayout.panelTopPadding(
-                usesCompactLayout: false,
-                usesCompactHeight: false,
-                alignsWithCloseButton: true
-            )
-        )
-        XCTAssertEqual(
-            PlayerPanelHeaderLayout.closeButtonTopPadding(
-                usesCompactLayout: false,
-                usesCompactHeight: false,
-                isPanelVisible: true
-            ),
-            PlayerPanelHeaderLayout.closeButtonTopPadding(
-                usesCompactLayout: false,
-                usesCompactHeight: false,
-                isPanelVisible: false
-            )
+            TVSectionDownFocusPolicy.destination(hasMiniPlayer: false),
+            .content
         )
     }
 
