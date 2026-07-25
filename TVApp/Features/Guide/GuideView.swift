@@ -376,24 +376,23 @@ struct GuideView: View {
         ) else { return }
 
         needsInitialFocus = false
+        guideFocusLogger.debug("restorePlaybackFocus: \(programID, privacy: .public), previous=\(String(describing: focusedProgramID), privacy: .public)")
+        focusedProgramID = programID
+        // Update the representable in the same render pass. The player remains
+        // above the guide for that pass, so a newly current programme is never
+        // exposed as a visible selection jump.
+        focusRestoreRequest = UUID()
+
+#if os(tvOS)
         Task { @MainActor in
             await Task.yield()
             guard isSelected else { return }
-            guideFocusLogger.debug("restorePlaybackFocus: \(programID, privacy: .public), previous=\(String(describing: focusedProgramID), privacy: .public)")
-            focusedProgramID = programID
-            // The played programme is usually the one that was already
-            // focused, so the binding may not change. Force the grid to
-            // re-request UIKit focus regardless.
-            focusRestoreRequest = UUID()
-#if os(tvOS)
             // Re-enabling the underlying TabView can otherwise let its tab bar
             // win the first focus update before the guide is ready. Reset the
             // guide's scope after the representable has received this request.
-            await Task.yield()
-            guard isSelected else { return }
             resetFocus(in: guideFocusScope)
-#endif
         }
+#endif
     }
 
     private func focusGuideFromNavigator() {

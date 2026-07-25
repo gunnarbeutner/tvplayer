@@ -31,4 +31,46 @@ final class PlaybackPreferencesTests: XCTestCase {
             .guide
         )
     }
+
+    func testLeavingPlayerPreparesGuideFocusBeforeRevealingIt() async {
+        let suiteName = "PlaybackPreferencesTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let coordinator = PlaybackCoordinator(defaults: defaults)
+        let channel = GuideChannel(
+            id: "channel",
+            number: 1,
+            name: "Channel",
+            monogram: "CH",
+            tint: .orange,
+            iconURL: nil,
+            programs: []
+        )
+        coordinator.start(
+            channel: channel,
+            program: nil,
+            configuration: TVHeadendConfiguration(
+                baseURL: nil,
+                username: "",
+                password: "",
+                streamProfile: "",
+                guideCacheURL: nil,
+                xmltvURL: nil
+            )
+        )
+        let focusRevision = coordinator.focusReturnRevision
+
+        coordinator.leavePlayer()
+
+        XCTAssertEqual(coordinator.focusReturnRevision, focusRevision + 1)
+        XCTAssertTrue(
+            coordinator.isPlayerPresented,
+            "The player must cover the guide until its restored selection has been applied"
+        )
+
+        try? await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertFalse(coordinator.isPlayerPresented)
+    }
 }

@@ -405,7 +405,6 @@ struct RootTabView: View {
 #if os(tvOS)
                 finishStartupPlaybackRouting()
 #endif
-                playback.playerDidDismiss()
             }
         }
 #if os(tvOS)

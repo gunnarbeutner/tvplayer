@@ -177,7 +177,13 @@ final class PlaybackCoordinator: ObservableObject {
     }
     @Published private(set) var launchPresentation: PlaybackLaunchPresentation?
     @Published private(set) var launchFailureMessage: String?
-    @Published var isPlayerPresented = false
+    @Published var isPlayerPresented = false {
+        didSet {
+            if isPlayerPresented {
+                playerDismissalGeneration &+= 1
+            }
+        }
+    }
     @Published var errorMessage: String?
     @Published private(set) var navigationSelection: PlaybackNavigationSelection?
     @Published private(set) var focusReturnRevision = 0
@@ -216,6 +222,7 @@ final class PlaybackCoordinator: ObservableObject {
     private var prewarmTask: Task<Void, Never>?
     private var prewarmedChannelID: String?
     private let playbackStartIntents = PlaybackStartIntentTracker()
+    private var playerDismissalGeneration = 0
     private var launchShouldRestoreAudio = false
     private var cachedLivePrefetch: CachedLivePrefetch?
     private var inFlightLivePrefetch: InFlightLivePrefetch?
@@ -507,7 +514,7 @@ final class PlaybackCoordinator: ObservableObject {
             presentation = nil
             isUserInitiatedPlayback = false
         }
-        isPlayerPresented = false
+        schedulePlayerDismissal()
     }
 
     func pruneCommercialBreaks(before date: Date) {
@@ -518,11 +525,6 @@ final class PlaybackCoordinator: ObservableObject {
         guard presentation != nil else { return }
         isPlayerPresented = true
         errorMessage = nil
-    }
-
-    func playerDidDismiss() {
-        guard navigationSelection != nil else { return }
-        focusReturnRevision &+= 1
     }
 
     func playbackDidStart(presentationID: UUID) {
@@ -1020,7 +1022,30 @@ final class PlaybackCoordinator: ObservableObject {
             engine.mediaPlayer.audio?.isMuted = false
             launchShouldRestoreAudio = false
         }
-        if dismissPlayer { isPlayerPresented = false }
+        if dismissPlayer { schedulePlayerDismissal() }
+    }
+
+    private func schedulePlayerDismissal() {
+        guard isPlayerPresented else { return }
+
+        // Let the still-covered navigation update its selection before its
+        // first visible frame. This matters when the programme that launched
+        // playback has ended while the player was open.
+        if navigationSelection != nil {
+            focusReturnRevision &+= 1
+        }
+        playerDismissalGeneration &+= 1
+        let generation = playerDismissalGeneration
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(20)) { [weak self] in
+            // Keep the player above navigation through one display interval so
+            // SwiftUI and the guide collection can apply the restored focus.
+            guard let self,
+                  self.playerDismissalGeneration == generation,
+                  self.isPlayerPresented
+            else { return }
+            self.isPlayerPresented = false
+        }
     }
 
     private func livePlaybackRequestForStart(
