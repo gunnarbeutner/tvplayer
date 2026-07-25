@@ -338,7 +338,20 @@ final class PlatformAdaptationTests: XCTestCase {
             ),
             PlayerPanelHeaderLayout.panelTopPadding(
                 usesCompactLayout: false,
-                usesCompactHeight: false
+                usesCompactHeight: false,
+                alignsWithCloseButton: true
+            )
+        )
+        XCTAssertEqual(
+            PlayerPanelHeaderLayout.closeButtonTopPadding(
+                usesCompactLayout: false,
+                usesCompactHeight: false,
+                isPanelVisible: true
+            ),
+            PlayerPanelHeaderLayout.closeButtonTopPadding(
+                usesCompactLayout: false,
+                usesCompactHeight: false,
+                isPanelVisible: false
             )
         )
     }

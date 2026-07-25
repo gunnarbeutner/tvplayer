@@ -51,10 +51,12 @@ enum PlayerPanelHeaderLayout {
 
     static func panelTopPadding(
         usesCompactLayout: Bool,
-        usesCompactHeight: Bool
+        usesCompactHeight: Bool,
+        alignsWithCloseButton: Bool = false
     ) -> CGFloat {
         if usesCompactHeight { return 8 }
-        return usesCompactLayout ? 72 : 26
+        if usesCompactLayout { return 72 }
+        return alignsWithCloseButton ? 20 : 26
     }
 
     static func closeButtonTopPadding(
@@ -68,13 +70,7 @@ enum PlayerPanelHeaderLayout {
         } else {
             defaultPadding = usesCompactLayout ? 12 : 20
         }
-        guard isPanelVisible, usesCompactHeight || !usesCompactLayout else {
-            return defaultPadding
-        }
-        return panelTopPadding(
-            usesCompactLayout: usesCompactLayout,
-            usesCompactHeight: usesCompactHeight
-        )
+        return defaultPadding
     }
 }
 
@@ -2583,7 +2579,8 @@ private struct PlayerTabbedOverlay: View {
             .top,
             PlayerPanelHeaderLayout.panelTopPadding(
                 usesCompactLayout: usesCompactLayout,
-                usesCompactHeight: usesCompactHeight
+                usesCompactHeight: usesCompactHeight,
+                alignsWithCloseButton: alignsPanelHeaderWithCloseButton
             )
         )
         .padding(.bottom, usesCompactHeight ? 10 : (usesCompactLayout ? 24 : 34))
@@ -2688,6 +2685,14 @@ private struct PlayerTabbedOverlay: View {
             overlayHorizontalPadding: overlayHorizontalPadding,
             sharesHeaderRow: usesCompactHeight || !usesCompactLayout
         )
+    }
+
+    private var alignsPanelHeaderWithCloseButton: Bool {
+#if os(tvOS)
+        false
+#else
+        true
+#endif
     }
 
     private var panelMinimumHeight: CGFloat {
