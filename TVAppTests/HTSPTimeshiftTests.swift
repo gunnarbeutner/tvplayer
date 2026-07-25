@@ -215,6 +215,58 @@ final class HTSPTimeshiftTests: XCTestCase {
         XCTAssertTrue(startup.audioPESPrefixes.contains("101:000001c0"))
     }
 
+    func testTransportMuxerUsesPrivatePESStreamForEAC3AccessUnits() throws {
+        let muxer = try MPEGTransportStreamMuxer(
+            streams: [
+                HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil),
+                HTSPStreamInfo(index: 2, type: "EAC3", language: "deu", metadata: nil),
+            ]
+        )
+        var transport = Data()
+        let durations: [Int64] = [24_000, 36_000, 28_000, 40_000, 32_000]
+        let payloadSizes = [320, 896, 512, 1_024, 640]
+        var timestamp: Int64 = 1_000_000
+
+        for frame in durations.indices {
+            transport.append(
+                muxer.mux(
+                    HTSPMuxPacket(
+                        streamIndex: 2,
+                        frameType: 0,
+                        presentationTime: timestamp,
+                        decodeTime: timestamp,
+                        durationMicroseconds: durations[frame],
+                        payload: Data(
+                            repeating: UInt8(frame),
+                            count: payloadSizes[frame]
+                        )
+                    )
+                )
+            )
+            timestamp += durations[frame]
+        }
+
+        let audioPESStarts = stride(from: 0, to: transport.count, by: 188).filter { offset in
+            guard offset + 188 <= transport.count, transport[offset] == 0x47 else {
+                return false
+            }
+            let pid = UInt16(transport[offset + 1] & 0x1f) << 8
+                | UInt16(transport[offset + 2])
+            return pid == 0x0101 && transport[offset + 1] & 0x40 != 0
+        }
+        XCTAssertEqual(audioPESStarts.count, 5)
+        let firstAudioPacketOffset = try XCTUnwrap(audioPESStarts.first)
+        let adaptationControl = (transport[firstAudioPacketOffset + 3] >> 4) & 0x03
+        var payloadOffset = firstAudioPacketOffset + 4
+        if adaptationControl == 0x03 {
+            payloadOffset += 1 + Int(transport[firstAudioPacketOffset + 4])
+        }
+        XCTAssertEqual(
+            Data(transport[payloadOffset..<(payloadOffset + 4)]),
+            Data([0x00, 0x00, 0x01, 0xbd])
+        )
+    }
+
     func testTransportMuxerMarksEveryElementaryPIDAfterASeek() throws {
         let muxer = try MPEGTransportStreamMuxer(
             streams: [
@@ -1586,6 +1638,99 @@ final class HTSPTimeshiftTests: XCTestCase {
         XCTAssertEqual(health.initialTuneStagingGeneration, stagingGeneration)
     }
 
+    func testLivePlaybackKeepsAudioPTSAtOrAheadOfPCRAfterInitialTune() async throws {
+        let connection = ScriptedHTSPConnection(
+            streams: [
+                HTSPStreamInfo(index: 1, type: "H264", language: nil, metadata: nil),
+                HTSPStreamInfo(index: 2, type: "EAC3", language: "deu", metadata: nil),
+            ],
+            reads: [
+                .message([
+                    "method": .string("muxpkt"),
+                    "stream": .int(1),
+                    "frametype": .int(73),
+                    "pts": .int(2_200_000),
+                    "dts": .int(1_000_000),
+                    "payload": .data(Data([0, 0, 0, 1, 0x65])),
+                ]),
+                .message([
+                    "method": .string("muxpkt"),
+                    "stream": .int(1),
+                    "frametype": .int(80),
+                    "pts": .int(2_900_000),
+                    "dts": .int(1_700_000),
+                    "payload": .data(Data([0, 0, 0, 1, 0x41])),
+                ]),
+                .message([
+                    "method": .string("muxpkt"),
+                    "stream": .int(2),
+                    "pts": .int(1_680_000),
+                    "duration": .int(20_000),
+                    "payload": .data(Data(repeating: 0x77, count: 768)),
+                ]),
+            ]
+        )
+        let configuration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://tvheadend.local:9981"),
+            username: "viewer",
+            password: "secret",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil
+        )
+        let stream = try await HTSPLiveInputStream.connect(
+            configuration: configuration,
+            channelID: 42,
+            profile: "pass",
+            tuningPolicy: NativeTimeshiftTuningPolicy(initialHorizonMilliseconds: 700),
+            connectionFactory: { connection }
+        )
+        defer { stream.close() }
+        stream.open()
+        for _ in 0..<100
+        where stream.healthSnapshot.initialTuneStagingQuality == .pending {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(
+            stream.healthSnapshot.initialTuneStagingQuality,
+            .timestampAligned(horizonMicroseconds: 700_000)
+        )
+        _ = readAvailableTransport(from: stream)
+
+        for index in 0..<6 {
+            connection.enqueue(.message([
+                "method": .string("muxpkt"),
+                "stream": .int(1),
+                "frametype": .int(80),
+                "pts": .int(3_200_000 + Int64(index) * 160_000),
+                "dts": .int(2_000_000 + Int64(index) * 160_000),
+                "payload": .data(Data(repeating: 0x55, count: 20_000)),
+            ]))
+        }
+        connection.enqueue(.message([
+            "method": .string("muxpkt"),
+            "stream": .int(2),
+            "pts": .int(2_000_000),
+            "duration": .int(32_000),
+            "payload": .data(Data(repeating: 0x77, count: 768)),
+        ]))
+        for _ in 0..<100
+        where stream.healthSnapshot.videoPacketCount < 8
+            || stream.healthSnapshot.audioPacketCount < 2 {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        let transport = readAvailableTransport(from: stream)
+        let lead = try XCTUnwrap(
+            firstAudioPTSLeadOverLatestPCRMicroseconds(in: transport)
+        )
+        XCTAssertGreaterThanOrEqual(
+            lead,
+            0,
+            "Live muxing must not publish audio behind an already-advanced PCR."
+        )
+    }
+
     func testLiveStreamHealthMarksBoundedInitialTuneFallback() async throws {
         let connection = ScriptedHTSPConnection(
             streams: [
@@ -2161,6 +2306,68 @@ final class HTSPTimeshiftTests: XCTestCase {
                 isAdaptationOnly: adaptationControl == 0x02
             )
         }
+    }
+
+    private func readAvailableTransport(from stream: HTSPLiveInputStream) -> Data {
+        var result = Data()
+        while stream.hasBytesAvailable {
+            var bytes = [UInt8](repeating: 0, count: 1 * 1_024 * 1_024)
+            let count = bytes.withUnsafeMutableBufferPointer {
+                stream.read($0.baseAddress!, maxLength: $0.count)
+            }
+            guard count > 0 else { break }
+            result.append(contentsOf: bytes.prefix(count))
+        }
+        return result
+    }
+
+    private func firstAudioPTSLeadOverLatestPCRMicroseconds(
+        in data: Data,
+        audioPID: UInt16 = 0x0101
+    ) -> Int64? {
+        var latestPCR: UInt64?
+        for offset in stride(from: 0, to: data.count, by: 188) {
+            guard offset + 188 <= data.count, data[offset] == 0x47 else { continue }
+            let adaptationControl = (data[offset + 3] >> 4) & 0x03
+            var payloadOffset = offset + 4
+            if adaptationControl == 0x02 || adaptationControl == 0x03 {
+                let adaptationLength = Int(data[offset + 4])
+                if adaptationLength >= 7, data[offset + 5] & 0x10 != 0 {
+                    latestPCR = UInt64(data[offset + 6]) << 25
+                        | UInt64(data[offset + 7]) << 17
+                        | UInt64(data[offset + 8]) << 9
+                        | UInt64(data[offset + 9]) << 1
+                        | UInt64(data[offset + 10] >> 7)
+                }
+                payloadOffset += 1 + adaptationLength
+            }
+            let pid = UInt16(data[offset + 1] & 0x1f) << 8
+                | UInt16(data[offset + 2])
+            guard pid == audioPID,
+                  data[offset + 1] & 0x40 != 0,
+                  payloadOffset + 14 <= offset + 188,
+                  data[payloadOffset] == 0,
+                  data[payloadOffset + 1] == 0,
+                  data[payloadOffset + 2] == 1,
+                  data[payloadOffset + 7] & 0x80 != 0,
+                  let latestPCR
+            else { continue }
+            let first = UInt64(data[payloadOffset + 9])
+            let second = UInt64(data[payloadOffset + 10])
+            let third = UInt64(data[payloadOffset + 11])
+            let fourth = UInt64(data[payloadOffset + 12])
+            let fifth = UInt64(data[payloadOffset + 13])
+            let pts = ((first >> 1) & 0x07) << 30
+                | second << 22
+                | ((third >> 1) & 0x7f) << 15
+                | fourth << 7
+                | ((fifth >> 1) & 0x7f)
+            var delta = Int64(pts) - Int64(latestPCR)
+            if delta < -(1 << 32) { delta += 1 << 33 }
+            if delta > 1 << 32 { delta -= 1 << 33 }
+            return delta * 1_000 / 90
+        }
+        return nil
     }
 }
 

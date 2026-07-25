@@ -43,6 +43,29 @@ struct CachedAddressRoutes: Equatable, Sendable {
     }
 }
 
+struct VLCURLPlaybackRouting {
+    private var hasStartedPlayback = false
+    private var hasAttemptedFallback = false
+
+    var initialProxyOption: String? { nil }
+
+    mutating func markPlaybackStarted() {
+        hasStartedPlayback = true
+    }
+
+    mutating func takeStartupFallbackOption(
+        proxy: CachedAddressProxy?,
+        url: URL
+    ) -> String? {
+        guard !hasStartedPlayback,
+              !hasAttemptedFallback,
+              let option = proxy?.vlcHTTPProxyOption(for: url)
+        else { return nil }
+        hasAttemptedFallback = true
+        return option
+    }
+}
+
 /// An immutable, scoped loopback proxy used only as a fallback for one
 /// configuration. The logical URL remains visible to URLSession and VLC, so
 /// Host, TLS SNI, certificate validation, redirects, and authentication keep

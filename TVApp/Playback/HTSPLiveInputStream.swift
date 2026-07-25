@@ -109,9 +109,15 @@ struct HTSPPlaybackMetadataSnapshot: Equatable, Sendable {
 
 private enum HTSPStreamFailure: LocalizedError {
     case packetStalled
+    case interleaveBufferExceeded
 
     var errorDescription: String? {
-        "TVHeadend delivered no stream packets for 10 seconds."
+        switch self {
+        case .packetStalled:
+            "TVHeadend delivered no stream packets for 10 seconds."
+        case .interleaveBufferExceeded:
+            "TVHeadend's audio and video streams remained too far apart to interleave safely."
+        }
     }
 }
 
@@ -189,7 +195,8 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         case initialTuneFailure(reason: String, epoch: UInt64)
         case flushInitialTune(ReadyInitialTuneDelivery)
         case flush(ReadyPostSeekDelivery)
-        case interleaved(packets: [HTSPMuxPacket], epoch: UInt64, fellBack: Bool)
+        case interleaved(packets: [HTSPMuxPacket], epoch: UInt64)
+        case interleaveOverflow
         case stagingOverflow(navigationGeneration: Int)
     }
 
@@ -264,7 +271,6 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     private var postSeekBuffer = HTSPPostSeekBufferTracker()
     private var postSeekPacketStager = HTSPPostSeekPacketStager()
     private var postSeekTailInterleaver: HTSPPostSeekTailInterleaver?
-    private var hasInitialTuneTailInterleaver = false
     private var postSeekStagingEpoch: UInt64 = 0
     private var postSeekNavigationGeneration = 0
     private var postSeekPrimaryVideoStreamIndex: Int?
@@ -1038,14 +1044,10 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                         diagnostics: completion.diagnostics
                     )
                 }
-            case let .interleaved(packets, epoch, fellBack):
+            case let .interleaved(packets, epoch):
                 muxAndAppendInterleavedPackets(packets, stagingEpoch: epoch)
-                if fellBack {
-                    benchmarkTrace(
-                        "A/V tail interleave reached its payload bound; "
-                            + "flushed in per-stream order"
-                    )
-                }
+            case .interleaveOverflow:
+                throw HTSPStreamFailure.interleaveBufferExceeded
             case let .stagingOverflow(navigationGeneration):
                 controlQueue.async { [weak self] in
                     guard let self,
@@ -1253,24 +1255,21 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 return .live
             }
             interleaver.append(packet)
-            var packets = interleaver.drainAvailable()
+            let packets = interleaver.drainAvailable()
             // A catch-up packet can open the common watermark and release a
             // large tail. Measure the cap after that normal drain so it does
             // not force an avoidable, unbalanced full flush.
-            let fellBack = interleaver.hasExceededPayloadLimit
-            if fellBack { packets.append(contentsOf: interleaver.drainAll()) }
-            let retiresInitialTail = hasInitialTuneTailInterleaver && interleaver.isEmpty
-            if fellBack || retiresInitialTail {
+            if interleaver.hasExceededPayloadLimit {
                 postSeekTailInterleaver = nil
-                hasInitialTuneTailInterleaver = false
-            } else {
-                postSeekTailInterleaver = interleaver
+                condition.unlock()
+                return .interleaveOverflow
             }
+            postSeekTailInterleaver = interleaver
             let epoch = postSeekStagingEpoch
             condition.unlock()
             return packets.isEmpty
                 ? .staged
-                : .interleaved(packets: packets, epoch: epoch, fellBack: fellBack)
+                : .interleaved(packets: packets, epoch: epoch)
         }
         guard postSeekPacketStager.append(
             packet,
@@ -1368,9 +1367,11 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             else { return false }
             buffer.removeAll(keepingCapacity: true)
             readOffset = 0
-            let retainedTail = tailInterleaver.flatMap { $0.isEmpty ? nil : $0 }
-            postSeekTailInterleaver = retainedTail
-            hasInitialTuneTailInterleaver = retainedTail != nil
+            // TVHeadend continues to deliver elementary streams in bursts
+            // after initial tune. Retain the timestamp watermarks even when
+            // this first batch drained completely so live packets cannot
+            // advance PCR ahead of delayed audio.
+            postSeekTailInterleaver = tailInterleaver
             initialTuneStagingQuality = completion.alignedHorizonMicroseconds.map {
                 .timestampAligned(horizonMicroseconds: $0)
             } ?? .fallback
@@ -1436,7 +1437,6 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             buffer.removeAll(keepingCapacity: true)
             readOffset = 0
             postSeekTailInterleaver = tailInterleaver
-            hasInitialTuneTailInterleaver = false
             buffer.append(transportData)
             // ReadyPostSeekDelivery now owns the completed navigation result.
             // Keeping it in the tracker leaves isNavigatingTimeshift true
@@ -1552,7 +1552,6 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         initialTuneStagingQuality = .notApplicable
         postSeekPacketStager.cancel()
         postSeekTailInterleaver = nil
-        hasInitialTuneTailInterleaver = false
         postSeekPrimaryVideoStreamIndex = nil
         postSeekPrimaryAudioStreamIndex = nil
     }
@@ -1651,7 +1650,6 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                 )
             }
             postSeekTailInterleaver = snapshot.tailInterleaver
-            hasInitialTuneTailInterleaver = snapshot.tailInterleaver != nil
             initialTuneStagingQuality = .timestampAligned(
                 horizonMicroseconds: snapshot.commonHorizonMicroseconds
             )

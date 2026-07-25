@@ -1193,6 +1193,11 @@ final class MPEGTransportStreamMuxer {
             if mapping.isVideo {
                 streamID = 0xe0 | min(videoOrdinal, 0x0f)
                 videoOrdinal &+= 1
+            } else if stream.type.uppercased() == "EAC3" {
+                // DVB carries E-AC-3 as private_stream_1, not as an MPEG
+                // audio stream. VLC is particularly sensitive to this
+                // distinction when the media arrives through callbacks.
+                streamID = 0xbd
             } else if mapping.isAudio {
                 streamID = 0xc0 | min(audioOrdinal, 0x1f)
                 audioOrdinal &+= 1

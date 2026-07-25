@@ -345,6 +345,31 @@ final class TVHeadendClientTests: XCTestCase {
         )
     }
 
+    func testVLCPlaybackUsesCachedAddressProxyOnlyAsOneTimeStartupFallback() throws {
+        let logicalHost = "cached-address-\(UUID().uuidString).local"
+        let url = try XCTUnwrap(URL(string: "http://\(logicalHost):9981/stream/channel/1"))
+        let configuration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://\(logicalHost):9981")!,
+            username: "",
+            password: "",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil,
+            resolvedAddresses: ["192.0.2.10"],
+            cachedAddressesObservedAt: Date()
+        )
+        let proxy = try XCTUnwrap(CachedAddressProxy(configuration: configuration))
+        var routing = VLCURLPlaybackRouting()
+
+        XCTAssertNil(routing.initialProxyOption)
+        XCTAssertNotNil(routing.takeStartupFallbackOption(proxy: proxy, url: url))
+        XCTAssertNil(routing.takeStartupFallbackOption(proxy: proxy, url: url))
+
+        var startedRouting = VLCURLPlaybackRouting()
+        startedRouting.markPlaybackStarted()
+        XCTAssertNil(startedRouting.takeStartupFallbackOption(proxy: proxy, url: url))
+    }
+
     func testCachedAddressFallbackOnlyRetriesPreConnectionFailures() {
         XCTAssertTrue(TVHeadendClient.shouldRetryUsingCachedAddress(
             after: URLError(.cannotFindHost)

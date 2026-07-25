@@ -304,7 +304,12 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     let mediaPlayer: VLCMediaPlayer
 
     private var nativeInputStream: HTSPLiveInputStream?
-    private var nativeHTTPTransport: VLCLoopbackHTTPTransport?
+    // VLCKit's custom-stream bridge does not retain the InputStream passed to
+    // VLCMedia(stream:), and can still open or close it after the player has
+    // reported Stopped. Keep each cheap, weak-source reader alive for the
+    // engine lifetime; releasing it at Stopped races VLCKit's access callback.
+    private var retainedNativeVLCReaders: [InputStream] = []
+    private var activeNativeVLCReader: InputStream?
     private let timeshiftAudioLogger: VLCTimeshiftAudioLogger?
     private var nativeTimeshiftActions: NativeTimeshiftActionController?
     private var nativeTimeshiftSessionID: UUID?
@@ -336,6 +341,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     private var didLogCapabilities = false
     private var activeRequest: LiveStreamRequest?
     private var cachedAddressProxy: CachedAddressProxy?
+    private var vlcURLPlaybackRouting = VLCURLPlaybackRouting()
+    private var cachedAddressPlaybackRetryTask: Task<Void, Never>?
+    private var cachedAddressPlaybackRetryID: UUID?
+    private var isReplacingCachedAddressPlayback = false
     private var activePreparationID: UUID?
     private var pendingSnapshotURL: URL?
     private var pendingRecordingSeek: PendingRecordingSeek?
@@ -431,6 +440,10 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         cancelPostSeekOutputGate()
         pipelineRecoveryTask?.cancel()
         pipelineRecoveryTask = nil
+        cachedAddressPlaybackRetryTask?.cancel()
+        cachedAddressPlaybackRetryTask = nil
+        cachedAddressPlaybackRetryID = nil
+        isReplacingCachedAddressPlayback = false
         pipelineRecoveryID = nil
         recoveryReason = nil
         recoveryAttempt = 0
@@ -440,8 +453,6 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         logger.info("Preparing stream from \(request.url.host ?? "unknown host", privacy: .public)")
 
         try await stopMediaPlayerForReplacement()
-        nativeHTTPTransport?.stop()
-        nativeHTTPTransport = nil
         nativeInputStream?.close()
         nativeInputStream = nil
         nativeTimeshiftActions = nil
@@ -450,8 +461,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         lastNativeCandidateMetrics = nil
         cachedAddressProxy = CachedAddressProxy(
             routes: request.cachedAddressRoutes,
-            connectionOrder: .logicalHostFirst
+            connectionOrder: .cachedAddressesFirst
         )
+        vlcURLPlaybackRouting = VLCURLPlaybackRouting()
 
         let media: VLCMedia
         var mediaCachingMilliseconds = request.networkCachingMilliseconds
@@ -495,15 +507,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                         stream.close()
                         throw CancellationError()
                     }
-                    let transport: VLCLoopbackHTTPTransport
-                    do {
-                        transport = try Self.makeNativeHTTPTransport(stream: stream)
-                    } catch {
-                        stream.close()
-                        throw error
-                    }
-                    nativeHTTPTransport = transport
-                    media = Self.makeNativeHTSPMedia(url: transport.mediaURL)
+                    let reader = stream.makeVLCReader()
+                    retainNativeVLCReader(reader)
+                    media = Self.makeNativeHTSPMedia(stream: reader)
                     nativeInputStream = stream
                     nativeTimeshiftActions = NativeTimeshiftActionController(sink: stream)
                     let sessionID = UUID()
@@ -519,15 +525,24 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                         throw CancellationError()
                     }
                     logger.error("Native timeshift unavailable; using live-only HTTP: \(error.localizedDescription, privacy: .public)")
-                    media = Self.makeMedia(url: request.url, proxy: cachedAddressProxy)
+                    media = Self.makeMedia(
+                        url: request.url,
+                        proxyOption: vlcURLPlaybackRouting.initialProxyOption
+                    )
                     activeLivePlaybackMode = .liveOnly(reason: error.localizedDescription)
                 }
             case let .liveOnly(reason):
-                media = Self.makeMedia(url: request.url, proxy: cachedAddressProxy)
+                media = Self.makeMedia(
+                    url: request.url,
+                    proxyOption: vlcURLPlaybackRouting.initialProxyOption
+                )
                 activeLivePlaybackMode = .liveOnly(reason: reason)
             }
         case .recording:
-            media = Self.makeMedia(url: request.url, proxy: cachedAddressProxy)
+            media = Self.makeMedia(
+                url: request.url,
+                proxyOption: vlcURLPlaybackRouting.initialProxyOption
+            )
         }
         guard activePreparationID == preparationID, !Task.isCancelled else {
             throw CancellationError()
@@ -640,11 +655,15 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         cancelPostSeekOutputGate()
         pipelineRecoveryTask?.cancel()
         pipelineRecoveryTask = nil
+        cachedAddressPlaybackRetryTask?.cancel()
+        cachedAddressPlaybackRetryTask = nil
+        cachedAddressPlaybackRetryID = nil
+        isReplacingCachedAddressPlayback = false
         pipelineRecoveryID = nil
         recoveryReason = nil
         recoveryAttempt = 0
         cancelPendingRecordingSeek()
-        nativeHTTPTransport?.disconnectClients()
+        closeActiveNativeVLCReader()
         mediaPlayer.stop()
 #if !os(macOS)
         // On macOS, VLC 4 tears its OpenGL vout down asynchronously. Keep the
@@ -658,8 +677,6 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         sampleBufferFallbackTask = nil
         sampleBufferBridge.flush()
 #endif
-        nativeHTTPTransport?.stop()
-        nativeHTTPTransport = nil
         nativeInputStream?.close()
         nativeInputStream = nil
         nativeTimeshiftActions = nil
@@ -667,6 +684,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         activeLivePlaybackMode = nil
         activeRequest = nil
         cachedAddressProxy = nil
+        vlcURLPlaybackRouting = VLCURLPlaybackRouting()
         clearPausedFrame()
         resetPlaybackMetrics()
         setState(.idle)
@@ -1168,6 +1186,14 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         let isOpening = playerState == .opening
         let isPlaying = playerState == .playing
         let isStopped = playerState == .stopped || playerState == .stopping
+        if isReplacingCachedAddressPlayback, isStopped {
+            refreshPlaybackInformation()
+            return
+        }
+        if isReplacingCachedAddressPlayback,
+           isOpening || isPlaying || playerState == .error {
+            isReplacingCachedAddressPlayback = false
+        }
         if isReplacingVLCPipeline {
             if isStopped || playerState == .error {
                 // The obsolete reader is expected to end during a local
@@ -1189,6 +1215,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             }
         } else if isPlaying {
             hasStartedPlayback = true
+            vlcURLPlaybackRouting.markPlaybackStarted()
             if pauseRequested {
                 setState(.paused)
             } else if let recoveryReason {
@@ -1214,10 +1241,15 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                 scheduleNativePipelineRecovery(
                     detail: detail ?? "VLC reported a playback error."
                 )
+            } else if scheduleCachedAddressPlaybackRetry() {
+                logger.info("Retrying VLC URL playback through the cached-address proxy")
             } else {
                 setState(.failed(detail ?? "VLC could not play this TVHeadend stream."))
             }
-        } else if isStopped, recoveryReason == nil, pipelineRecoveryTask == nil {
+        } else if isStopped,
+                  recoveryReason == nil,
+                  pipelineRecoveryTask == nil,
+                  cachedAddressPlaybackRetryTask == nil {
             hasStartedPlayback = false
             pauseRequested = false
             livePlaybackPosition.reset()
@@ -1295,6 +1327,16 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         mediaPlayer.videoFitMode = .smaller
     }
 
+    private func retainNativeVLCReader(_ reader: InputStream) {
+        activeNativeVLCReader = reader
+        retainedNativeVLCReaders.append(reader)
+    }
+
+    private func closeActiveNativeVLCReader() {
+        activeNativeVLCReader?.close()
+        activeNativeVLCReader = nil
+    }
+
     private func stopMediaPlayerForReplacement() async throws {
         let startedAt = ProcessInfo.processInfo.systemUptime
         defer {
@@ -1302,9 +1344,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                 ((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000).rounded()
             )
         }
-        // Wake the HTTP worker if it is blocked waiting for live transport
-        // bytes, without touching the long-lived TVHeadend subscription.
-        nativeHTTPTransport?.disconnectClients()
+        // `stop()` cannot finish while VLC's custom-access thread is blocked
+        // inside InputStream.read(). Closing only this disposable reader
+        // invalidates its generation and wakes the read without touching the
+        // long-lived TVHeadend subscription or its timeshift buffer.
+        closeActiveNativeVLCReader()
         mediaPlayer.stop()
         // VLC 4's stop operation is asynchronous. Replacing its media or
         // closing the custom input before Stopped lets the old demux/vout race
@@ -1456,11 +1500,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         pipelineRecoveryID = recoveryID
         nativeTimeshiftSessionID = nil
         nativeTimeshiftActions = nil
-        nativeHTTPTransport?.disconnectClients()
+        closeActiveNativeVLCReader()
         mediaPlayer.pause()
         mediaPlayer.stop()
-        nativeHTTPTransport?.stop()
-        nativeHTTPTransport = nil
         nativeInputStream?.close()
         nativeInputStream = nil
         outputHealthMonitor.restartGracePeriod(
@@ -1534,19 +1576,13 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                     return
                 }
 
-                let transport: VLCLoopbackHTTPTransport
-                do {
-                    transport = try Self.makeNativeHTTPTransport(stream: stream)
-                } catch {
-                    stream.close()
-                    throw error
-                }
-                let media = Self.makeNativeHTSPMedia(url: transport.mediaURL)
+                let reader = stream.makeVLCReader()
+                retainNativeVLCReader(reader)
+                let media = Self.makeNativeHTSPMedia(stream: reader)
                 addCachingOptions(
                     to: media,
                     milliseconds: htsp.tuningPolicy.vlcCacheMilliseconds
                 )
-                nativeHTTPTransport = transport
                 nativeInputStream = stream
                 nativeTimeshiftActions = NativeTimeshiftActionController(sink: stream)
                 let sessionID = UUID()
@@ -1616,17 +1652,68 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 #endif
     }
 
-    private static func makeNativeHTTPTransport(
-        stream: HTSPLiveInputStream
-    ) throws -> VLCLoopbackHTTPTransport {
-        try VLCLoopbackHTTPTransport {
-            stream.makeVLCReader()
+    private func scheduleCachedAddressPlaybackRetry() -> Bool {
+        guard cachedAddressPlaybackRetryTask == nil,
+              nativeInputStream == nil,
+              let request = activeRequest,
+              let proxyOption = vlcURLPlaybackRouting.takeStartupFallbackOption(
+                  proxy: cachedAddressProxy,
+                  url: request.url
+              )
+        else { return false }
+
+        setState(.preparing)
+        let retryID = UUID()
+        cachedAddressPlaybackRetryID = retryID
+        isReplacingCachedAddressPlayback = true
+        cachedAddressPlaybackRetryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.stopMediaPlayerForReplacement()
+                try Task.checkCancellation()
+                guard self.cachedAddressPlaybackRetryID == retryID,
+                      self.activeRequest == request
+                else {
+                    throw CancellationError()
+                }
+
+                let media = Self.makeMedia(
+                    url: request.url,
+                    proxyOption: proxyOption
+                )
+                self.addCachingOptions(
+                    to: media,
+                    milliseconds: request.networkCachingMilliseconds
+                )
+                self.mediaPlayer.media = media
+                self.mediaPlayer.currentAudioPlaybackDelay =
+                    self.audioDelayMilliseconds * 1_000
+                self.mediaPlayer.currentVideoSubTitleDelay =
+                    self.subtitleDelayMilliseconds * 1_000
+                self.hasStartedPlayback = false
+                self.cachedAddressPlaybackRetryTask = nil
+                self.cachedAddressPlaybackRetryID = nil
+                self.mediaPlayer.play()
+                self.setState(.preparing)
+            } catch is CancellationError {
+                guard self.cachedAddressPlaybackRetryID == retryID else { return }
+                self.cachedAddressPlaybackRetryTask = nil
+                self.cachedAddressPlaybackRetryID = nil
+                self.isReplacingCachedAddressPlayback = false
+            } catch {
+                guard self.cachedAddressPlaybackRetryID == retryID else { return }
+                self.cachedAddressPlaybackRetryTask = nil
+                self.cachedAddressPlaybackRetryID = nil
+                self.isReplacingCachedAddressPlayback = false
+                self.setState(.failed(error.localizedDescription))
+            }
         }
+        return true
     }
 
-    private static func makeNativeHTSPMedia(url: URL) -> VLCMedia {
-        guard let media = VLCMedia(url: url) else {
-            preconditionFailure("VLC 4 rejected the local HTTP transport URL")
+    private static func makeNativeHTSPMedia(stream: InputStream) -> VLCMedia {
+        guard let media = VLCMedia(stream: stream) else {
+            preconditionFailure("VLC 4 rejected the native input stream")
         }
         media.addOption(":demux=ts")
         return media
@@ -1634,13 +1721,13 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 
     private static func makeMedia(
         url: URL,
-        proxy: CachedAddressProxy?
+        proxyOption: String? = nil
     ) -> VLCMedia {
         guard let media = VLCMedia(url: url) else {
             preconditionFailure("VLC 4 rejected the media URL")
         }
-        if let option = proxy?.vlcHTTPProxyOption(for: url) {
-            media.addOption(option)
+        if let proxyOption {
+            media.addOption(proxyOption)
         }
         return media
     }
@@ -1719,14 +1806,11 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
     }
 
     private func replaceLocalVLCPipeline() async -> Bool {
-        guard let stream = nativeInputStream,
-              let transport = nativeHTTPTransport,
-              activeRequest != nil
-        else { return false }
+        guard let stream = nativeInputStream, activeRequest != nil else { return false }
 #if DEBUG
         let replacementStartedAt = ProcessInfo.processInfo.systemUptime
 #endif
-        transport.disconnectClients()
+        closeActiveNativeVLCReader()
         mediaPlayer.stop()
         // LibVLC 4 stops asynchronously. Installing and playing the fresh
         // media before the Stopped callback lets the old input teardown race
@@ -1750,7 +1834,9 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 #if DEBUG
         let stoppedAt = ProcessInfo.processInfo.systemUptime
 #endif
-        let media = Self.makeNativeHTSPMedia(url: transport.mediaURL)
+        let reader = stream.makeVLCReader()
+        retainNativeVLCReader(reader)
+        let media = Self.makeNativeHTSPMedia(stream: reader)
         let cachingMilliseconds = stream.tuningPolicy.vlcCacheMilliseconds
         addCachingOptions(to: media, milliseconds: cachingMilliseconds)
         mediaPlayer.media = media

@@ -1033,6 +1033,8 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
     private var lastProfileSaveAt: Date?
     private(set) var channelID: String?
     private var cachedAddressProxy: CachedAddressProxy?
+    private var playbackURL: URL?
+    private var vlcURLPlaybackRouting = VLCURLPlaybackRouting()
 
     override init() {
         var libraryOptions = [
@@ -1069,8 +1071,10 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
         channelContext = context
         cachedAddressProxy = CachedAddressProxy(
             routes: cachedAddressRoutes,
-            connectionOrder: .logicalHostFirst
+            connectionOrder: .cachedAddressesFirst
         )
+        playbackURL = url
+        vlcURLPlaybackRouting = VLCURLPlaybackRouting()
         artworkTask?.cancel()
         if let iconURL = context.channelIconURL {
             artworkTask = Task { @MainActor [weak self] in
@@ -1108,12 +1112,7 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
                 : "Waiting for a trusted channel logo"
         )
         guard let media = VLCMedia(url: url) else { return }
-        if let option = cachedAddressProxy?.vlcHTTPProxyOption(for: url) {
-            media.addOption(option)
-        }
-        media.addOption(":no-audio")
-        media.addOption(":network-caching=300")
-        media.addOption(":live-caching=300")
+        configure(media)
         mediaPlayer.media = media
         enforceSilence()
         mediaPlayer.play()
@@ -1136,6 +1135,8 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
         mediaPlayer.stop()
         mediaPlayer.media = nil
         cachedAddressProxy = nil
+        playbackURL = nil
+        vlcURLPlaybackRouting = VLCURLPlaybackRouting()
         diagnostics = .inactive
         if resetMarkers {
             cacheLearnedLogo()
@@ -1170,8 +1171,39 @@ final class CommercialLiveAnalyzer: NSObject, ObservableObject,
 
     nonisolated func mediaPlayerStateChanged(_ newState: VLCMediaPlayerState) {
         Task { @MainActor [weak self] in
-            self?.enforceSilence()
+            self?.applyPlayerState(newState.rawValue)
         }
+    }
+
+    private func applyPlayerState(_ rawState: Int) {
+        enforceSilence()
+        guard let state = VLCMediaPlayerState(rawValue: rawState) else { return }
+        if state == .playing {
+            vlcURLPlaybackRouting.markPlaybackStarted()
+            return
+        }
+        guard state == .error,
+              let playbackURL,
+              let proxyOption = vlcURLPlaybackRouting.takeStartupFallbackOption(
+                  proxy: cachedAddressProxy,
+                  url: playbackURL
+              ),
+              let media = VLCMedia(url: playbackURL)
+        else { return }
+
+        logger.info("Retrying commercial analysis through the cached-address proxy")
+        media.addOption(proxyOption)
+        configure(media)
+        mediaPlayer.stop()
+        mediaPlayer.media = media
+        enforceSilence()
+        mediaPlayer.play()
+    }
+
+    private func configure(_ media: VLCMedia) {
+        media.addOption(":no-audio")
+        media.addOption(":network-caching=300")
+        media.addOption(":live-caching=300")
     }
 
     private func captureSnapshot() {
