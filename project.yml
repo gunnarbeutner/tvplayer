@@ -36,7 +36,6 @@ targetTemplates:
         PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer
         PRODUCT_MODULE_NAME: TVApp
         PRODUCT_NAME: TVApp
-        INFOPLIST_KEY_NSHumanReadableCopyright: ""
 
   SharedTests:
     type: bundle.unit-test
@@ -189,7 +188,10 @@ targets:
       path: TVApp/Resources/Info-macOS.plist
       properties:
         CFBundleDisplayName: TV Player
+        CFBundleName: TV Player
         ITSAppUsesNonExemptEncryption: false
+        LSApplicationCategoryType: public.app-category.video
+        NSHumanReadableCopyright: Copyright © 2026 Gunnar Beutner
         NSLocalNetworkUsageDescription: TV Player discovers and connects to your Tvheadend server on the local network.
         NSBonjourServices:
           - _tvplayer._tcp
