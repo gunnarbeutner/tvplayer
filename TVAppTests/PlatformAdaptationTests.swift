@@ -280,6 +280,36 @@ final class PlatformAdaptationTests: XCTestCase {
         )
     }
 
+    func testGoLiveButtonVisibilityIgnoresNearLiveDelayJitter() {
+        var isVisible = false
+
+        for liveDelay in [2.3, 2.7, 2.9, 2.4] {
+            isVisible = GoLiveButtonVisibilityPolicy.isVisible(
+                liveDelay: liveDelay,
+                wasVisible: isVisible
+            )
+            XCTAssertFalse(isVisible)
+        }
+
+        isVisible = GoLiveButtonVisibilityPolicy.isVisible(
+            liveDelay: 3.1,
+            wasVisible: isVisible
+        )
+        XCTAssertTrue(isVisible)
+
+        isVisible = GoLiveButtonVisibilityPolicy.isVisible(
+            liveDelay: 2.5,
+            wasVisible: isVisible
+        )
+        XCTAssertTrue(isVisible)
+
+        isVisible = GoLiveButtonVisibilityPolicy.isVisible(
+            liveDelay: 2.2,
+            wasVisible: isVisible
+        )
+        XCTAssertFalse(isVisible)
+    }
+
 #if os(macOS)
     func testMacOSPlayerPlaybackShortcuts() {
         XCTAssertEqual(

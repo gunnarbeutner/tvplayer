@@ -173,6 +173,19 @@ enum LiveTimelinePosition {
     }
 }
 
+enum GoLiveButtonVisibilityPolicy {
+    private static let revealDelay = NativeTimeshiftActionPlan.preferredLiveDelay + 1
+    private static let concealDelay = NativeTimeshiftActionPlan.preferredLiveDelay
+        + NativeTimeshiftActionPlan.liveEdgeTolerance
+
+    static func isVisible(
+        liveDelay: TimeInterval,
+        wasVisible: Bool
+    ) -> Bool {
+        liveDelay > (wasVisible ? concealDelay : revealDelay)
+    }
+}
+
 #if os(macOS)
 enum MacOSPlayerKeyboardCommand: Equatable {
     case togglePlayback
@@ -2021,6 +2034,7 @@ private struct ProgrammePlaybackTimeline: View {
     let showPanel: () -> Void
 
     @FocusState private var isFocused: Bool
+    @State private var showsGoLive = false
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -2049,6 +2063,9 @@ private struct ProgrammePlaybackTimeline: View {
             liveEdge: liveDate,
             bufferStartedAt: bufferStartedAt
         )
+        let goLiveDelay = canSeek
+            ? max(0, liveDate.timeIntervalSince(playbackDate))
+            : 0
         let program = channel.programs.first { $0.start <= playbackDate && playbackDate < $0.end } ?? fallbackProgram
         let next = program.flatMap { current in
             channel.programs.first { $0.start >= current.end && $0.id != current.id }
@@ -2140,10 +2157,7 @@ private struct ProgrammePlaybackTimeline: View {
                 usesCompactLayout: usesCompactLayout,
                 seekBackward: { seekBackward(PlayerNavigationPolicy.skipInterval) },
                 seekForward: { seekForward(PlayerNavigationPolicy.skipInterval) },
-                showsGoLive: canSeek
-                    && liveDate.timeIntervalSince(playbackDate)
-                        > NativeTimeshiftActionPlan.preferredLiveDelay
-                            + NativeTimeshiftActionPlan.liveEdgeTolerance,
+                showsGoLive: showsGoLive,
                 goLive: returnToLive,
                 togglePlayback: togglePlayback,
                 showPanel: showPanel
@@ -2174,6 +2188,12 @@ private struct ProgrammePlaybackTimeline: View {
                 ? "Timeshift is available from \(bufferStartedAt.map(clock) ?? "the start of playback"). Swipe left or right to move 10 seconds"
                 : "Live playback without timeshift"
         )
+        .onChange(of: goLiveDelay, initial: true) { _, liveDelay in
+            showsGoLive = GoLiveButtonVisibilityPolicy.isVisible(
+                liveDelay: liveDelay,
+                wasVisible: showsGoLive
+            )
+        }
     }
 
     private func clock(_ date: Date) -> String {
