@@ -573,6 +573,40 @@ final class TopShelfOnNowPolicyTests: XCTestCase {
         XCTAssertEqual(identifiers, expected)
     }
 
+    func testArtworkCoversTheCompleteAvailableFavoriteSchedule() {
+        let now = Date(timeIntervalSince1970: 5_000)
+        let programs = (0..<6).map { index in
+            let start = now.addingTimeInterval(TimeInterval(index * 1_800))
+            return candidate(
+                channelID: "favorite",
+                programID: "event-\(index)",
+                title: "Programme \(index)",
+                start: start,
+                end: start.addingTimeInterval(1_800)
+            ).program
+        }
+        let channel = GuideChannel(
+            id: "favorite",
+            number: 1,
+            name: "Favorite",
+            monogram: "F",
+            tint: .blue,
+            iconURL: nil,
+            programs: programs
+        )
+
+        let identifiers = TopShelfOnNowPolicy.artworkIdentifiersForSnapshot(
+            from: [channel],
+            favoriteChannelIDs: ["favorite"],
+            after: now
+        )
+
+        XCTAssertEqual(
+            identifiers,
+            Set((0..<6).map { "favorite:event-\($0)" })
+        )
+    }
+
     func testSimulcastsAreDeduplicatedBeforeTheLimit() {
         let start = Date(timeIntervalSince1970: 10_000)
         let end = start.addingTimeInterval(3_600)

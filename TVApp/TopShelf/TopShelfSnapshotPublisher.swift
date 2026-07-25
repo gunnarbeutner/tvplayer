@@ -44,6 +44,20 @@ enum TopShelfOnNowPolicy {
             }
     }
 
+    static func artworkIdentifiersForSnapshot(
+        from channels: [GuideChannel],
+        favoriteChannelIDs: Set<GuideChannel.ID>,
+        after date: Date
+    ) -> Set<String> {
+        Set(
+            programsForSnapshot(
+                from: channels,
+                favoriteChannelIDs: favoriteChannelIDs,
+                after: date
+            ).map { "\($0.channel.id):\($0.program.id)" }
+        )
+    }
+
     private static func identity(for program: GuideProgram) -> Identity {
         if let episodeURI = program.metadata.episodeURI?
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -202,6 +216,12 @@ actor TopShelfSnapshotPublisher {
         let configuration: TVHeadendConfiguration
     }
 
+    private struct ProgramArtworkRequest: Sendable {
+        let key: String
+        let urlString: String
+        let identifier: String
+    }
+
     private var thumbnailGenerationTask: Task<Void, Never>?
     private var thumbnailWorkQueue = RecordingThumbnailWorkQueue<ThumbnailWork>()
     private var nextThumbnailAttempt: [String: Date] = [:]
@@ -241,15 +261,16 @@ actor TopShelfSnapshotPublisher {
             }
             .prefix(12)
         let artworkClient = TVHeadendClient(configuration: configuration)
-        let detailedArtworkIDs = Set(
-            channels
-                .filter { favoriteChannelIDs.contains($0.id) }
-                .flatMap { channel in
-                    channel.programs
-                        .filter { $0.end > now }
-                        .prefix(3)
-                        .map { "\(channel.id):\($0.id)" }
-                }
+        let artworkIDs = TopShelfOnNowPolicy.artworkIdentifiersForSnapshot(
+            from: channels,
+            favoriteChannelIDs: favoriteChannelIDs,
+            after: now
+        )
+        let programArtwork = await cacheProgramArtwork(
+            for: favoriteProgramCandidates.filter {
+                artworkIDs.contains("\($0.channel.id):\($0.program.id)")
+            },
+            client: artworkClient
         )
 
         var referencedArtwork = Set<String>()
@@ -261,24 +282,18 @@ actor TopShelfSnapshotPublisher {
                 channel: channel,
                 program: program
             )
-            let filename: String?
-            if detailedArtworkIDs.contains("\(channel.id):\(program.id)") {
-                filename = await cacheArtwork(
-                    urlString: program.metadata.imageURL,
-                    identifier: "channel-\(channel.id)-\(program.id)",
-                    client: artworkClient
-                )
-            } else if let cached = channelArtwork[channel.id] {
-                filename = cached
-            } else if attemptedChannelArtwork.insert(channel.id).inserted {
-                filename = await cacheArtwork(
-                    urlString: channel.iconURL?.absoluteString,
-                    identifier: "channel-\(channel.id)-fallback",
-                    client: artworkClient
-                )
-                channelArtwork[channel.id] = filename
-            } else {
-                filename = nil
+            var filename = programArtwork["\(channel.id):\(program.id)"]
+            if filename == nil {
+                if let cached = channelArtwork[channel.id] {
+                    filename = cached
+                } else if attemptedChannelArtwork.insert(channel.id).inserted {
+                    filename = await cacheArtwork(
+                        urlString: channel.iconURL?.absoluteString,
+                        identifier: "channel-\(channel.id)-fallback",
+                        client: artworkClient
+                    )
+                    channelArtwork[channel.id] = filename
+                }
             }
             if let filename { referencedArtwork.insert(filename) }
             onNowItems.append(
@@ -525,6 +540,56 @@ actor TopShelfSnapshotPublisher {
             logger.error(
                 "Could not update the Top Shelf snapshot: \(error.localizedDescription, privacy: .public)"
             )
+        }
+    }
+
+    private func cacheProgramArtwork(
+        for candidates: [TopShelfOnNowPolicy.Candidate],
+        client: TVHeadendClient
+    ) async -> [String: String] {
+        let requests = candidates.compactMap { channel, program -> ProgramArtworkRequest? in
+            guard let urlString = program.metadata.imageURL else { return nil }
+            return ProgramArtworkRequest(
+                key: "\(channel.id):\(program.id)",
+                urlString: urlString,
+                identifier: "channel-\(channel.id)-\(program.id)"
+            )
+        }
+        guard !requests.isEmpty else { return [:] }
+
+        return await withTaskGroup(
+            of: (String, String?).self,
+            returning: [String: String].self
+        ) { group in
+            let maximumConcurrentRequests = 6
+            var nextRequestIndex = 0
+            var artwork: [String: String] = [:]
+
+            func enqueue(_ request: ProgramArtworkRequest) {
+                group.addTask {
+                    let filename = await self.cacheArtwork(
+                        urlString: request.urlString,
+                        identifier: request.identifier,
+                        client: client
+                    )
+                    return (request.key, filename)
+                }
+            }
+
+            while nextRequestIndex < min(maximumConcurrentRequests, requests.count) {
+                enqueue(requests[nextRequestIndex])
+                nextRequestIndex += 1
+            }
+            while let (key, filename) = await group.next() {
+                if let filename {
+                    artwork[key] = filename
+                }
+                if nextRequestIndex < requests.count {
+                    enqueue(requests[nextRequestIndex])
+                    nextRequestIndex += 1
+                }
+            }
+            return artwork
         }
     }
 
