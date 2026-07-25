@@ -647,6 +647,7 @@ final class GuideTimelineTests: XCTestCase {
             <title>Tagesschau</title>
             <sub-title>Nachrichten</sub-title>
             <desc>Die Nachrichten des Tages.</desc>
+            <date>20240115</date>
             <icon src="https://example.test/tagesschau.jpg" />
           </programme>
         </tv>
@@ -662,7 +663,53 @@ final class GuideTimelineTests: XCTestCase {
         XCTAssertEqual(document.programmes.first?.subtitle, "Nachrichten")
         XCTAssertEqual(document.programmes.first?.description, "Die Nachrichten des Tages.")
         XCTAssertEqual(document.programmes.first?.imageURL, "https://example.test/tagesschau.jpg")
+        XCTAssertEqual(
+            document.programmes.first?.firstAired.map {
+                Calendar(identifier: .gregorian).dateComponents(
+                    in: .current,
+                    from: $0
+                )
+            }?.year,
+            2024
+        )
+        XCTAssertEqual(
+            document.programmes.first?.firstAired.map {
+                Calendar(identifier: .gregorian).dateComponents(
+                    in: .current,
+                    from: $0
+                )
+            }?.month,
+            1
+        )
+        XCTAssertEqual(
+            document.programmes.first?.firstAired.map {
+                Calendar(identifier: .gregorian).dateComponents(
+                    in: .current,
+                    from: $0
+                )
+            }?.day,
+            15
+        )
         XCTAssertEqual(document.programmes.first?.end.timeIntervalSince(document.programmes.first!.start), 3_600)
+    }
+
+    func testXMLTVParserReadsTimestampProductionDate() throws {
+        let xml = """
+        <tv>
+          <programme start="20260719140000 +0200" stop="20260719150000 +0200" channel="ard.de">
+            <title>Tagesschau</title>
+            <date>20240115183000 +0200</date>
+          </programme>
+        </tv>
+        """
+
+        let document = try XMLTVParser.parse(Data(xml.utf8))
+        let firstAired = try XCTUnwrap(document.programmes.first?.firstAired)
+
+        XCTAssertEqual(
+            firstAired,
+            Date(timeIntervalSince1970: 1_705_336_200)
+        )
     }
 
     func testLiveStreamURLUsesConfiguredPassProfile() throws {

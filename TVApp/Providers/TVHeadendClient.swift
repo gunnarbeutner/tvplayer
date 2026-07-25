@@ -623,6 +623,7 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
                     partNumber: event.partNumber,
                     partCount: event.partCount,
                     firstAired: event.firstAired,
+                    copyrightYear: event.copyrightYear,
                     genres: event.genres,
                     categories: event.categories,
                     summary: event.summary,
@@ -682,6 +683,9 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
                 start: programme.start,
                 end: programme.end,
                 metadata: GuideProgramMetadata(
+                    firstAired: programme.firstAired.map {
+                        Int64($0.timeIntervalSince1970)
+                    },
                     imageURL: resolvedArtworkURLString(
                         programme.imageURL,
                         relativeTo: sourceURL?.deletingLastPathComponent()

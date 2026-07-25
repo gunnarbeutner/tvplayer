@@ -71,6 +71,7 @@ struct TVHeadendEPGEvent: Codable, Sendable {
     let partNumber: String?
     let partCount: String?
     let firstAired: Int64?
+    let copyrightYear: Int?
     let genres: [Int]
     let categories: [String]
     let ageRating: String?
@@ -91,6 +92,8 @@ struct TVHeadendEPGEvent: Codable, Sendable {
         case title, subtitle, summary, description, extraText, start, stop
         case seasonNumber, seasonCount, episodeNumber, episodeCount, episodeOnscreen
         case partNumber, partCount, firstAired, categories, category
+        case copyrightYear = "copyright_year"
+        case camelCaseCopyrightYear = "copyrightYear"
         case genre, ageRating, ratingLabel, ratingLabelIcon, ratingCountry, ratingAuthority
         case starRating, image
         case hd, widescreen, subtitled, new
@@ -124,6 +127,10 @@ struct TVHeadendEPGEvent: Codable, Sendable {
         partNumber = values.flexibleString(forKey: .partNumber)
         partCount = values.flexibleString(forKey: .partCount)
         firstAired = values.flexibleInt64(forKey: .firstAired)
+        copyrightYear = (
+            values.flexibleInt64(forKey: .copyrightYear)
+                ?? values.flexibleInt64(forKey: .camelCaseCopyrightYear)
+        ).map(Int.init)
         var decodedGenres = (try? values.decodeIfPresent([Int].self, forKey: .genre)) ?? []
         if decodedGenres.isEmpty, let genre = values.flexibleInt64(forKey: .genre) {
             decodedGenres = [Int(genre)]
@@ -176,6 +183,7 @@ struct TVHeadendEPGEvent: Codable, Sendable {
         try values.encodeIfPresent(partNumber, forKey: .partNumber)
         try values.encodeIfPresent(partCount, forKey: .partCount)
         try values.encodeIfPresent(firstAired, forKey: .firstAired)
+        try values.encodeIfPresent(copyrightYear, forKey: .copyrightYear)
         if !genres.isEmpty { try values.encode(genres, forKey: .genre) }
         if !categories.isEmpty { try values.encode(categories, forKey: .categories) }
         try values.encodeIfPresent(ageRating, forKey: .ageRating)

@@ -21,6 +21,7 @@ struct GuideProgramMetadata: Hashable, Codable, Sendable {
     let partNumber: String?
     let partCount: String?
     let firstAired: Int64?
+    let copyrightYear: Int?
     let genres: [Int]
     let categories: [String]
     let summary: String?
@@ -49,6 +50,7 @@ struct GuideProgramMetadata: Hashable, Codable, Sendable {
         partNumber: String? = nil,
         partCount: String? = nil,
         firstAired: Int64? = nil,
+        copyrightYear: Int? = nil,
         genres: [Int] = [],
         categories: [String] = [],
         summary: String? = nil,
@@ -76,6 +78,7 @@ struct GuideProgramMetadata: Hashable, Codable, Sendable {
         self.partNumber = partNumber
         self.partCount = partCount
         self.firstAired = firstAired
+        self.copyrightYear = copyrightYear
         self.genres = genres
         self.categories = categories
         self.summary = summary
@@ -159,6 +162,9 @@ struct GuideProgramMetadata: Hashable, Codable, Sendable {
         if let firstAired, firstAired > 0 {
             let date = Date(timeIntervalSince1970: TimeInterval(firstAired))
             facts.append("First aired \(date.formatted(date: .abbreviated, time: .omitted))")
+        }
+        if let copyrightYear, copyrightYear > 0 {
+            facts.append("Year \(copyrightYear)")
         }
         if let episodeOnscreen = Self.nonEmpty(episodeOnscreen),
            !Self.isRedundantEpisodeOnscreen(

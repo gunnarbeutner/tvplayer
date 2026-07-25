@@ -12,6 +12,7 @@ struct XMLTVProgramme: Sendable {
     let subtitle: String?
     let description: String?
     let imageURL: String?
+    let firstAired: Date?
     let start: Date
     let end: Date
 }
@@ -59,6 +60,7 @@ private final class XMLTVParserDelegate: NSObject, XMLParserDelegate {
         var subtitle: String?
         var description: String?
         var imageURL: String?
+        var firstAired: Date?
     }
 
     private(set) var channels: [XMLTVChannel] = []
@@ -121,6 +123,8 @@ private final class XMLTVParserDelegate: NSObject, XMLParserDelegate {
             programme?.subtitle = value
         case "desc" where programme != nil:
             programme?.description = value
+        case "date" where programme != nil:
+            programme?.firstAired = Self.productionDate(from: value)
         case "channel":
             if let channel {
                 channels.append(XMLTVChannel(id: channel.id, displayName: channel.displayName, iconURL: channel.iconURL))
@@ -135,6 +139,7 @@ private final class XMLTVParserDelegate: NSObject, XMLParserDelegate {
                         subtitle: programme.subtitle,
                         description: programme.description,
                         imageURL: programme.imageURL,
+                        firstAired: programme.firstAired,
                         start: programme.start,
                         end: programme.end
                     )
@@ -159,5 +164,17 @@ private final class XMLTVParserDelegate: NSObject, XMLParserDelegate {
             if let date = formatter.date(from: value) { return date }
         }
         return nil
+    }
+
+    private static func productionDate(from value: String) -> Date? {
+        if value.count == 8, value.allSatisfy(\.isNumber) {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.timeZone = .current
+            formatter.dateFormat = "yyyyMMdd"
+            return formatter.date(from: value)
+        }
+        return date(from: value)
     }
 }

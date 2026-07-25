@@ -32,6 +32,7 @@ final class TVHeadendClientTests: XCTestCase {
           "partNumber": 1,
           "partCount": 2,
           "firstAired": 1700000000,
+          "copyright_year": 1999,
           "genre": [16, 64],
           "ratingLabel": "FSK 12",
           "ratingCountry": "DE",
@@ -49,6 +50,7 @@ final class TVHeadendClientTests: XCTestCase {
             partNumber: event.partNumber,
             partCount: event.partCount,
             firstAired: event.firstAired,
+            copyrightYear: event.copyrightYear,
             genres: event.genres,
             summary: event.summary,
             extraText: event.extraText,
@@ -63,6 +65,7 @@ final class TVHeadendClientTests: XCTestCase {
         XCTAssertTrue(metadata.displayLabels.contains("Sports"))
         XCTAssertTrue(metadata.displayLabels.contains("FSK 12"))
         XCTAssertFalse(metadata.displayFacts.contains("Broadcast episode S02E03"))
+        XCTAssertTrue(metadata.displayFacts.contains("Year 1999"))
         XCTAssertTrue(metadata.displayFacts.contains("Rating source FSK · DE"))
         XCTAssertEqual(
             metadata.supplementaryDescriptions(excluding: "A concise summary."),
