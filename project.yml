@@ -18,7 +18,6 @@ targetTemplates:
     sources:
       - path: TVApp
         excludes:
-          - Resources/Info.plist
           - Resources/Info-tvOS.plist
           - Resources/Info-iOS.plist
           - Resources/Info-macOS.plist
@@ -68,7 +67,8 @@ targets:
       path: TVApp/Resources/Info-tvOS.plist
       properties:
         CFBundleDisplayName: TV Player
-        NSLocalNetworkUsageDescription: TV Player discovers and connects to your TVHeadend server on the local network.
+        ITSAppUsesNonExemptEncryption: false
+        NSLocalNetworkUsageDescription: TV Player discovers and connects to your Tvheadend server on the local network.
         NSBonjourServices:
           - _tvplayer._tcp
           - _tvplayer-guide._tcp
@@ -142,7 +142,8 @@ targets:
       path: TVApp/Resources/Info-iOS.plist
       properties:
         CFBundleDisplayName: TV Player
-        NSLocalNetworkUsageDescription: TV Player discovers and connects to your TVHeadend server on the local network.
+        ITSAppUsesNonExemptEncryption: false
+        NSLocalNetworkUsageDescription: TV Player discovers and connects to your Tvheadend server on the local network.
         NSBonjourServices:
           - _tvplayer._tcp
           - _tvplayer-guide._tcp
@@ -188,7 +189,8 @@ targets:
       path: TVApp/Resources/Info-macOS.plist
       properties:
         CFBundleDisplayName: TV Player
-        NSLocalNetworkUsageDescription: TV Player discovers and connects to your TVHeadend server on the local network.
+        ITSAppUsesNonExemptEncryption: false
+        NSLocalNetworkUsageDescription: TV Player discovers and connects to your Tvheadend server on the local network.
         NSBonjourServices:
           - _tvplayer._tcp
           - _tvplayer-guide._tcp

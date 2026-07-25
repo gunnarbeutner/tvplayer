@@ -24,6 +24,8 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
@@ -37,7 +39,7 @@
 		<string>_tvplayer-guide._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>TV Player discovers and connects to your TVHeadend server on the local network.</string>
+	<string>TV Player discovers and connects to your Tvheadend server on the local network.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
