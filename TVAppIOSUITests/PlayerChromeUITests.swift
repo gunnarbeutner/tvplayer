@@ -55,6 +55,36 @@ final class PlayerChromeUITests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testIPadGuidePreviewIsEmbeddedAndOtherTabsUseTopMiniPlayerBar() {
+        let closePlayer = app.buttons["Close Player"]
+        XCTAssertTrue(
+            closePlayer.waitForExistence(timeout: 12),
+            "The player close control never appeared."
+        )
+        closePlayer.tap()
+
+        tabButton(named: "Guide").tap()
+        let miniPlayer = app.descendants(matching: .any)
+            .matching(identifier: "tvplayer.mini-player")
+            .element(boundBy: 0)
+        XCTAssertFalse(
+            miniPlayer.waitForExistence(timeout: 2),
+            "A separate mini-player obscured the Guide's embedded preview."
+        )
+
+        tabButton(named: "Channels").tap()
+        XCTAssertTrue(
+            miniPlayer.waitForExistence(timeout: 5),
+            "The retained playback mini-player did not appear on Channels."
+        )
+        XCTAssertLessThan(
+            miniPlayer.frame.midY,
+            app.frame.height * 0.35,
+            "The iPad mini-player is not presented as a bar at the top."
+        )
+    }
+
     private func waitForDisappearance(
         of element: XCUIElement,
         timeout: TimeInterval
@@ -67,5 +97,12 @@ final class PlayerChromeUITests: XCTestCase {
             for: [expectation],
             timeout: timeout
         ) == .completed
+    }
+
+    @MainActor
+    private func tabButton(named name: String) -> XCUIElement {
+        app.buttons
+            .matching(NSPredicate(format: "label == %@", name))
+            .element(boundBy: 0)
     }
 }

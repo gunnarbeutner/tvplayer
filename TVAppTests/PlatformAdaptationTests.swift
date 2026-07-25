@@ -58,8 +58,8 @@ final class PlatformAdaptationTests: XCTestCase {
         XCTAssertEqual(IOSRootTabPresentation.preferred, .tabBar)
     }
 
-    func testIPadUsesWideMiniPlayerOutsideGuide() {
-        for tab in AppTab.allCases where tab != .guide {
+    func testIPadUsesWideMiniPlayerAcrossTabs() {
+        for tab in AppTab.allCases {
             XCTAssertEqual(
                 IOSMiniPlayerLayoutPolicy.layout(isPad: true, selectedTab: tab),
                 .wideBanner
@@ -67,10 +67,32 @@ final class PlatformAdaptationTests: XCTestCase {
         }
     }
 
-    func testIPadGuideKeepsExistingFloatingMiniPlayer() {
+    func testIPadGuideUsesEmbeddedPreviewInsteadOfMiniPlayerOverlay() {
+        XCTAssertTrue(IOSPlaybackLayoutPolicy.supportsGuidePreview(isPad: true))
+        XCTAssertFalse(IOSPlaybackLayoutPolicy.supportsGuidePreview(isPad: false))
+    }
+
+    func testIPadMiniPlayerReservesATopBarOutsideGuide() {
         XCTAssertEqual(
-            IOSMiniPlayerLayoutPolicy.layout(isPad: true, selectedTab: .guide),
-            .floatingOverlay
+            IOSPlaybackLayoutPolicy.reservedTopBarHeight(
+                isPad: true,
+                presentation: .miniPlayer
+            ),
+            TVMiniPlayerLayout.reservedContentHeight
+        )
+        XCTAssertEqual(
+            IOSPlaybackLayoutPolicy.reservedTopBarHeight(
+                isPad: true,
+                presentation: .guidePreview
+            ),
+            0
+        )
+        XCTAssertEqual(
+            IOSPlaybackLayoutPolicy.reservedTopBarHeight(
+                isPad: false,
+                presentation: .miniPlayer
+            ),
+            0
         )
     }
 

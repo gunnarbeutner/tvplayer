@@ -87,10 +87,22 @@ enum MiniPlayerLayout: Equatable {
 
 enum IOSMiniPlayerLayoutPolicy {
     static func layout(isPad: Bool, selectedTab: AppTab) -> MiniPlayerLayout {
-        if isPad, selectedTab != .guide {
-            return .wideBanner
-        }
-        return isPad ? .floatingOverlay : .compactBanner
+        isPad ? .wideBanner : .compactBanner
+    }
+}
+
+enum IOSPlaybackLayoutPolicy {
+    static func supportsGuidePreview(isPad: Bool) -> Bool {
+        isPad
+    }
+
+    static func reservedTopBarHeight(
+        isPad: Bool,
+        presentation: RetainedPlaybackPresentation
+    ) -> CGFloat {
+        isPad && presentation == .miniPlayer
+            ? TVMiniPlayerLayout.reservedContentHeight
+            : 0
     }
 }
 
@@ -974,6 +986,22 @@ struct RootTabView: View {
             .frame(width: GuideArtworkStyle.televisionCanvasWidth, height: 84)
         }
         .ignoresSafeArea(.container, edges: .top)
+#elseif os(iOS)
+        if isPad {
+            VStack(spacing: 0) {
+                Color.clear
+                    .frame(
+                        height: IOSPlaybackLayoutPolicy.reservedTopBarHeight(
+                            isPad: true,
+                            presentation: retainedPlaybackPresentation
+                        )
+                    )
+
+                tabs
+            }
+        } else {
+            tabs
+        }
 #else
         tabs
 #endif
@@ -1018,8 +1046,10 @@ struct RootTabView: View {
 
     private var showsGuideLivePreview: Bool {
 #if os(iOS)
-        false
-#else
+        guard IOSPlaybackLayoutPolicy.supportsGuidePreview(isPad: isPad) else {
+            return false
+        }
+#endif
         guard selection == .guide,
               !playback.isPlayerPresented,
               playback.isUserInitiatedLivePlayback,
@@ -1035,12 +1065,11 @@ struct RootTabView: View {
         case .idle, .paused, .failed:
             return false
         }
-#endif
     }
 
     private var platformSupportsGuideLivePreview: Bool {
 #if os(iOS)
-        false
+        IOSPlaybackLayoutPolicy.supportsGuidePreview(isPad: isPad)
 #else
         true
 #endif
@@ -1082,6 +1111,12 @@ struct RootTabView: View {
         .floatingOverlay
 #endif
     }
+
+#if os(iOS)
+    private var isPad: Bool {
+        UIDevice.current.userInterfaceIdiom == .pad
+    }
+#endif
 
 #if os(tvOS)
     private var exitToSectionNavigator: (() -> Void)? {
@@ -1193,9 +1228,7 @@ struct RootTabView: View {
         return switch miniPlayerLayout {
         case .compactBanner:
             72
-        case .wideBanner:
-            TVMiniPlayerLayout.height
-        case .floatingOverlay:
+        case .wideBanner, .floatingOverlay:
             0
         }
     }
@@ -1593,7 +1626,8 @@ private struct PersistentPlaybackSurface: View {
             )
             let position = renderedPosition(
                 proxySize: proxy.size,
-                containerSize: containerSize
+                containerSize: containerSize,
+                safeAreaTop: proxy.safeAreaInsets.top
             )
 
             Group {
@@ -1655,6 +1689,11 @@ private struct PersistentPlaybackSurface: View {
         .ignoresSafeArea(.container, edges: ignoredSafeAreaEdges)
         .opacity(presentationMode == .hidden ? 0 : 1)
         .allowsHitTesting(showsMiniPlayer)
+        .accessibilityIdentifier(
+            showsMiniPlayer
+                ? "tvplayer.mini-player"
+                : "tvplayer.embedded-player"
+        )
         .accessibilityHidden(!showsMiniPlayer)
 #if os(iOS)
         .onChange(of: scenePhase) { _, phase in
@@ -1727,14 +1766,22 @@ private struct PersistentPlaybackSurface: View {
 
     private func renderedPosition(
         proxySize: CGSize,
-        containerSize: CGSize
+        containerSize: CGSize,
+        safeAreaTop: CGFloat
     ) -> CGPoint {
         switch presentationMode {
         case .hidden, .guidePreview:
+#if os(iOS)
+            CGPoint(
+                x: proxySize.width - containerSize.width / 2,
+                y: safeAreaTop + containerSize.height / 2
+            )
+#else
             CGPoint(
                 x: proxySize.width - containerSize.width / 2,
                 y: containerSize.height / 2
             )
+#endif
         case .fullPlayer:
             CGPoint(x: proxySize.width / 2, y: proxySize.height / 2)
         case .miniPlayer:
@@ -1751,7 +1798,14 @@ private struct PersistentPlaybackSurface: View {
                 y: proxySize.height - containerSize.height / 2 - 24
             )
 #else
-            if usesBannerMiniPlayer {
+            if miniPlayerLayout == .wideBanner {
+                CGPoint(
+                    x: proxySize.width / 2,
+                    y: safeAreaTop
+                        + TVMiniPlayerLayout.verticalSpacing
+                        + containerSize.height / 2
+                )
+            } else if usesBannerMiniPlayer {
                 CGPoint(
                     x: proxySize.width / 2,
                     y: proxySize.height - containerSize.height / 2 - 92
