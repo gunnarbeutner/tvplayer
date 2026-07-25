@@ -69,7 +69,7 @@ struct TVHeadendConfiguration: Equatable, Sendable {
         ].joined(separator: "|")
     }
 
-    /// Keeps device-local channel preferences isolated by TVHeadend server and
+    /// Keeps device-local channel preferences isolated by Tvheadend server and
     /// account without including the password or guide-source overrides.
     var channelPreferencesIdentifier: String? {
         if let serverProfileID { return "profile:\(serverProfileID)" }
@@ -145,7 +145,7 @@ enum ConfigurationError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidServerURL:
-            return "Enter a valid HTTP or HTTPS TVHeadend URL."
+            return "Enter a valid HTTP or HTTPS Tvheadend URL."
         case .invalidHTSPPort:
             return "The HTSP port must be a number between 1 and 65535."
         case .invalidGuideCacheURL:

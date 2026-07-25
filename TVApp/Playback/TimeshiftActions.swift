@@ -1097,10 +1097,10 @@ enum HTSPNavigationError: LocalizedError, Equatable, Sendable {
 
     var errorDescription: String? {
         switch self {
-        case .rejected: "TVHeadend rejected the timeshift seek."
-        case .timedOut: "TVHeadend did not finish the timeshift seek in time."
-        case .invalidResponse: "TVHeadend returned an invalid timeshift position."
-        case let .controlFailed(message): "TVHeadend timeshift control failed: \(message)"
+        case .rejected: "Tvheadend rejected the timeshift seek."
+        case .timedOut: "Tvheadend did not finish the timeshift seek in time."
+        case .invalidResponse: "Tvheadend returned an invalid timeshift position."
+        case let .controlFailed(message): "Tvheadend timeshift control failed: \(message)"
         }
     }
 }
@@ -1503,7 +1503,7 @@ struct HTSPPostSeekBufferTracker {
         }
         guard let duration, duration >= 0 else {
             // Initial tuning has to reject a clearly old, timestamped audio
-            // backlog even when TVHeadend omitted the access-unit duration.
+            // backlog even when Tvheadend omitted the access-unit duration.
             // Keep a small inferred-duration window so a packet immediately
             // preceding the video DTS can still overlap the retained GOP.
             guard isInitialTune else { return true }

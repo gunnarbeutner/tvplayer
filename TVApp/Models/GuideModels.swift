@@ -307,7 +307,7 @@ struct GuideProgram: Identifiable, Hashable, Codable, Sendable {
     }
 
     let id: String
-    /// The native TVheadend EPG event identifier. This is absent when an
+    /// The native Tvheadend EPG event identifier. This is absent when an
     /// external XMLTV document supplied the programme.
     let providerEventID: Int64?
     let seriesLink: String?

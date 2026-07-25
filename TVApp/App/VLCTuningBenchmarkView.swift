@@ -145,7 +145,7 @@ private struct VLCTuningEventRow: View {
 @MainActor
 final class VLCTuningBenchmarkModel: ObservableObject {
     @Published private(set) var events: [VLCTuningEvent] = []
-    @Published private(set) var phase = "Discovering TVHeadend…"
+    @Published private(set) var phase = "Discovering Tvheadend…"
     @Published private(set) var channelName = "—"
     @Published private(set) var completedAttempts = 0
     @Published private(set) var totalAttempts = 0
@@ -323,7 +323,7 @@ final class VLCTuningBenchmarkModel: ObservableObject {
         discoveredSettings = settings
         discovery?.stop()
         discovery = nil
-        append(.success, "Discovered TVHeadend", settings.baseURL.host)
+        append(.success, "Discovered Tvheadend", settings.baseURL.host)
         startRun(settings: settings)
     }
 
@@ -983,7 +983,7 @@ final class VLCTuningBenchmarkModel: ObservableObject {
                     append(
                         .warning,
                         "Could not stage \(channel.name)'s HTSP transport",
-                        "The playback request does not use native TVHeadend timeshift."
+                        "The playback request does not use native Tvheadend timeshift."
                     )
                 }
             }
@@ -1622,7 +1622,7 @@ final class VLCTuningBenchmarkModel: ObservableObject {
 
         var errorDescription: String? {
             switch self {
-            case .noChannels: "TVHeadend returned no numeric channel IDs."
+            case .noChannels: "Tvheadend returned no numeric channel IDs."
             }
         }
     }

@@ -1,6 +1,6 @@
 # TV Player for Apple Platforms
 
-TV Player is a native TVheadend client for Apple TV, iPhone, iPad, and Mac.
+TV Player is a native Tvheadend client for Apple TV, iPhone, iPad, and Mac.
 Browse the programme guide, watch and pause live television, schedule
 recordings, and manage your library from an interface designed for each Apple
 platform.
@@ -15,7 +15,7 @@ platform.
 
 - A timeline guide with channel logos, programme artwork, descriptions, and a
   clear live-time indicator
-- Favourite channels pinned above the normal TVheadend channel order
+- Favourite channels pinned above the normal Tvheadend channel order
 - Immediate playback from Channels or Guide, without an extra details step
 - Programme details with **Watch Live**, **Record Once**, and **Record All**
 - Recording status shown directly in the guide
@@ -24,7 +24,7 @@ platform.
 ### Playback and time-shift
 
 - Live pause, resume, backward and forward seeking, and return to live when
-  TVheadend time-shift is available
+  Tvheadend time-shift is available
 - A programme-aware playback timeline showing the current position and
   available time-shift window
 - Audio and subtitle selection, stream-profile selection, and synchronization
@@ -33,7 +33,7 @@ platform.
 - Continued live playback without pause and seeking when native time-shift is
   unavailable
 
-Time-shift storage and retention follow the TVheadend server configuration;
+Time-shift storage and retention follow the Tvheadend server configuration;
 TV Player does not maintain a separate buffer on the device.
 
 ### Recordings
@@ -59,20 +59,20 @@ TV Player does not maintain a separate buffer on the device.
 
 TV Player can be configured manually in Settings or discover a server published
 over Bonjour/mDNS. An optional [Discovery container](Discovery/README.md) can
-advertise a complete TVheadend configuration and provide a richer guide with
+advertise a complete Tvheadend configuration and provide a richer guide with
 historical programmes and native event metadata.
 
 Discovery broadcasts configuration on the local network. Use it only on a
-trusted LAN and give its TVheadend account the minimum permissions it needs.
+trusted LAN and give its Tvheadend account the minimum permissions it needs.
 
 ## Requirements
 
-- A reachable TVheadend server
-- A TVheadend account with Web Interface and streaming access
+- A reachable Tvheadend server
+- A Tvheadend account with Web Interface and streaming access
 - **Basic recorder** permission to view and schedule recordings
 - **View All** and **Failed View** for the corresponding recording lists
 - **Manage All** when managing recordings created by other users
-- TVheadend time-shift and HTSP access for live pause and seeking
+- Tvheadend time-shift and HTSP access for live pause and seeking
 
 TV Player uses the account's default DVR profile, including padding, priority,
 retention, duplicate handling, and recording format.
@@ -80,7 +80,7 @@ retention, duplicate handling, and recording format.
 ## Getting started
 
 Open Settings and provide the server URL, username, password, stream profile,
-and HTSP port. The usual TVheadend ports are `9981` for HTTP and `9982` for
+and HTSP port. The usual Tvheadend ports are `9981` for HTTP and `9982` for
 HTSP. Optional guide-cache and XMLTV URLs can also be supplied.
 
 Settings shows connection and time-shift status so configuration problems are

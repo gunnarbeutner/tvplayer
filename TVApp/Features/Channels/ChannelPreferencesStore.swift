@@ -87,7 +87,7 @@ final class ChannelPreferencesStore: ObservableObject {
         revision &+= 1
     }
 
-    /// Preserves TVHeadend's order within both groups while keeping favourites
+    /// Preserves Tvheadend's order within both groups while keeping favourites
     /// together at the front of every channel-based view.
     func displayedChannels(from channels: [GuideChannel]) -> [GuideChannel] {
         let favorites = channels.filter { favoriteChannelIDs.contains($0.id) }

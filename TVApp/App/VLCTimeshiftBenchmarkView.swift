@@ -165,7 +165,7 @@ struct VLCTimeshiftBenchmarkEvent: Identifiable {
 @MainActor
 final class VLCTimeshiftBenchmarkModel: ObservableObject {
     @Published private(set) var events: [VLCTimeshiftBenchmarkEvent] = []
-    @Published private(set) var phase = "Discovering TVHeadend…"
+    @Published private(set) var phase = "Discovering Tvheadend…"
     @Published private(set) var progress = 0.0
     @Published private(set) var isFailed = false
     @Published private(set) var canRerun = false
@@ -279,7 +279,7 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
                 append(
                     .information,
                     "Buffer fill \(second)s / \(bufferFillSeconds)s",
-                    String(format: "TVHeadend reports a %.2fs window.", engine.timeshiftWindowSeconds)
+                    String(format: "Tvheadend reports a %.2fs window.", engine.timeshiftWindowSeconds)
                 )
             }
         }
@@ -331,7 +331,7 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
     }
 
     private func runSeekCycle(number: Int) async throws {
-        append(.navigation, "Starting seek cycle \(number)", "Reusing the existing TVHeadend buffer.")
+        append(.navigation, "Starting seek cycle \(number)", "Reusing the existing Tvheadend buffer.")
         engine.refreshPlaybackInformation()
         let seekableWindow = engine.timeshiftWindowSeconds
         let targetPercentages: [Double] = [0.10, 0.50, 0.90, 0.20, 0.80, 0]
@@ -383,7 +383,7 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
             }
         )
         appendSummary("Cycle \(number) player ready", samples.map(\.readyMilliseconds))
-        append(.success, "Seek cycle \(number) completed", "The TVHeadend session remains available for another run.")
+        append(.success, "Seek cycle \(number) completed", "The Tvheadend session remains available for another run.")
     }
 
     private func resetAtLiveEdge() async throws {
@@ -910,7 +910,7 @@ final class VLCTimeshiftBenchmarkModel: ObservableObject {
 
         var errorDescription: String? {
             switch self {
-            case .invalidPlaylist: "TVHeadend did not return a usable channel playlist."
+            case .invalidPlaylist: "Tvheadend did not return a usable channel playlist."
             case let .nativeTimeshiftUnavailable(reason):
                 "The player fell back instead of opening native timeshift. \(reason ?? "No reason reported.")"
             case .playbackDidNotStart: "VLC did not begin playback within 10 seconds."

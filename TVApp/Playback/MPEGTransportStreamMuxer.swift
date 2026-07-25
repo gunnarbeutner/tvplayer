@@ -26,7 +26,7 @@ struct HTSPMuxPacket: Sendable {
 }
 
 /// Holds the raw HTSP packets collected while a timeshift destination is being
-/// prepared. TVHeadend may deliver several seconds of one elementary stream
+/// prepared. Tvheadend may deliver several seconds of one elementary stream
 /// before another. Feeding that burst order directly to a fresh VLC pipeline
 /// can fill the video decoder before VLC has even discovered enough audio.
 ///
@@ -250,7 +250,7 @@ struct HTSPPostSeekPacketStager: Sendable {
 }
 
 /// Collects the first decodable, timestamp-aligned A/V window of a new live
-/// subscription before any bytes are exposed to VLC. TVHeadend can begin a
+/// subscription before any bytes are exposed to VLC. Tvheadend can begin a
 /// subscription with audio that predates the first video keyframe by more than
 /// a second; handing that backlog straight to VLC makes it display the
 /// keyframe as preroll and then hold video while its audio clock catches up.
@@ -884,7 +884,7 @@ struct HTSPRollingTunePacketBuffer: Sendable {
 }
 
 /// Continues the timestamp merge across the boundary between a staged seek
-/// batch and TVHeadend's subsequent packets. Only packets covered by both the
+/// batch and Tvheadend's subsequent packets. Only packets covered by both the
 /// primary video and primary audio watermarks are released. This prevents a
 /// video-heavy end of the staged batch from sitting in front of the next audio
 /// burst in VLC's byte stream.
@@ -1412,7 +1412,7 @@ final class MPEGTransportStreamMuxer {
 
     /// Inserts adaptation-only PCR packets on the PMT-declared PCR PID when
     /// elementary-stream ordering leaves a long run without video PES. This
-    /// commonly happens at live startup when TVHeadend sends two H.264
+    /// commonly happens at live startup when Tvheadend sends two H.264
     /// keyframes followed by an audio burst. Without these packets the staged
     /// output can contain a single PCR and VLC may create a video output and
     /// briefly decode audio without ever establishing a usable clock.

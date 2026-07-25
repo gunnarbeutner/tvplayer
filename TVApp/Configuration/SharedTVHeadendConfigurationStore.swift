@@ -1,7 +1,7 @@
 import Foundation
 import Security
 
-/// Persists the TVHeadend connection independently of the active Apple TV
+/// Persists the Tvheadend connection independently of the active Apple TV
 /// profile. Everything else in the app continues to use the current user's
 /// defaults and cache container.
 struct SharedTVHeadendConfigurationStore {

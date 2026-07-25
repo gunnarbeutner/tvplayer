@@ -114,9 +114,9 @@ private enum HTSPStreamFailure: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .packetStalled:
-            "TVHeadend delivered no stream packets for 10 seconds."
+            "Tvheadend delivered no stream packets for 10 seconds."
         case .interleaveBufferExceeded:
-            "TVHeadend's audio and video streams remained too far apart to interleave safely."
+            "Tvheadend's audio and video streams remained too far apart to interleave safely."
         }
     }
 }
@@ -604,7 +604,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         let thread = Thread { [weak self] in
             self?.receiveLoop()
         }
-        thread.name = "TVHeadend HTSP receiver"
+        thread.name = "Tvheadend HTSP receiver"
         thread.qualityOfService = .userInitiated
         receiverThread = thread
         thread.start()
@@ -657,7 +657,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         enqueueSpeed(0)
     }
 
-    /// Changes TVHeadend's resource priority for this subscription. The
+    /// Changes Tvheadend's resource priority for this subscription. The
     /// response is delivered by the stream's existing receiver so callers do
     /// not compete with it for reads from the HTSP socket.
     func changeSubscriptionWeight(
@@ -721,7 +721,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         controlQueue.async { [weak self] in
             guard let self else { return }
             // Prefer an absolute seek to the known live-edge timestamp. Some
-            // TVHeadend versions can flood stale packets after
+            // Tvheadend versions can flood stale packets after
             // subscriptionLive, which makes VLC fail and resets this session's
             // timeshift buffer. A rejected absolute live-edge seek is still
             // retried with subscriptionLive by recoverRejectedLiveEdgeSeek().
@@ -1135,7 +1135,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             }
 
         case "subscriptionStop":
-            let message = message["status"]?.stringValue ?? "TVHeadend stopped the HTSP stream."
+            let message = message["status"]?.stringValue ?? "Tvheadend stopped the HTSP stream."
             throw HTSPError.server(message)
 
         default:
@@ -1367,7 +1367,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             else { return false }
             buffer.removeAll(keepingCapacity: true)
             readOffset = 0
-            // TVHeadend continues to deliver elementary streams in bursts
+            // Tvheadend continues to deliver elementary streams in bursts
             // after initial tune. Retain the timestamp watermarks even when
             // this first batch drained completely so live packets cannot
             // advance PCR ahead of delayed audio.
@@ -1537,7 +1537,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                       self.navigationGeneration == interruptedNavigationGeneration
                 else { return }
                 self.failNavigation(
-                    .controlFailed("TVHeadend changed the subscription while seeking.")
+                    .controlFailed("Tvheadend changed the subscription while seeking.")
                 )
             }
         }
@@ -1729,7 +1729,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
     ) {
         cancelPostSeekPacketStagingLocked()
         initialTuneFlushesExistingDecoder = flushesExistingDecoder
-        // Hold only a short aligned window here. This removes TVHeadend's
+        // Hold only a short aligned window here. This removes Tvheadend's
         // stale pre-keyframe audio without making tune latency depend on
         // filling VLC's entire cache; the launch-output gate below VLC owns
         // concealment until presentation cadence is stable.
@@ -1739,7 +1739,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             primaryAudioStreamIndex: primaryAudioStreamIndex,
             requiredDuration: initialTuneHorizonDuration,
             maximumPayloadBytes: Self.maximumQueuedBytes,
-            // TVHeadend often delivers the initial video burst ahead of the
+            // Tvheadend often delivers the initial video burst ahead of the
             // selected audio PID. Give the next audio access unit time to
             // prove the half-second common horizon instead of publishing the
             // skewed fallback a few milliseconds early.
@@ -1752,7 +1752,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
     private func beginNavigation() {
         condition.withLock {
-            // Keep the current reader valid until TVHeadend has accepted and
+            // Keep the current reader valid until Tvheadend has accepted and
             // resolved the navigation. A rejected/timed-out seek can then
             // reopen this same pipeline instead of resuming an EOF reader.
             deliveryGate.beginNavigation()
@@ -1888,7 +1888,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                     self.sendSpeed(command)
                 }
                 self.logger.error(
-                    "TVHeadend speed \(speed, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
+                    "Tvheadend speed \(speed, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
                 )
                 if self.isNavigatingTimeshift
                     || self.bufferedNavigationCompletion != nil {
@@ -1958,7 +1958,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
 
     private func sendLiveNavigation() {
         pendingLiveCommand = false
-        // subscriptionLive changes TVHeadend back to normal playback speed as
+        // subscriptionLive changes Tvheadend back to normal playback speed as
         // it reaches the readable edge. Model that server-side transition so
         // the speed controller does not immediately fight it with a late pause.
         speedController.expectServerSpeed(100)
@@ -2115,7 +2115,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
         }
         // A rejected or timed-out navigation must not strand the subscription
         // at speed zero. Reopen delivery and continue from the last position
-        // TVHeadend still owns; the user can try the navigation again.
+        // Tvheadend still owns; the user can try the navigation again.
         requestSpeed(100)
         handler?(.failure(error))
     }
@@ -2182,7 +2182,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             request.succeeded()
         } catch {
             logger.error(
-                "TVHeadend \(request.method, privacy: .public) request failed: \(error.localizedDescription, privacy: .public)"
+                "Tvheadend \(request.method, privacy: .public) request failed: \(error.localizedDescription, privacy: .public)"
             )
             request.failed(error)
         }
@@ -2289,7 +2289,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
                     currentSourceInfo = subscription.sourceInfo
                     currentSignalStatus = nil
                 }
-                logger.info("Rebuilt TVHeadend subscription at the live edge")
+                logger.info("Rebuilt Tvheadend subscription at the live edge")
                 return true
             } catch {
                 attemptedReplacement?.setRawMessageObserver(nil)
@@ -2349,7 +2349,7 @@ final class HTSPLiveInputStream: InputStream, NativeTimeshiftCommandSink, @unche
             return hadNavigation ? condition.withLock({ navigationCompletionHandler }) : nil
         }
         navigationHandler?(
-            .failure(.controlFailed("The TVHeadend subscription restarted at the live edge."))
+            .failure(.controlFailed("The Tvheadend subscription restarted at the live edge."))
         )
     }
 

@@ -1,6 +1,6 @@
 import Foundation
 
-/// TVHeadend removes EPG events as soon as they finish. Keeping previously
+/// Tvheadend removes EPG events as soon as they finish. Keeping previously
 /// observed events locally lets the guide retain useful recent history.
 actor EPGHistoryStore {
     static let shared = EPGHistoryStore()
@@ -89,7 +89,7 @@ actor EPGHistoryStore {
         return cachedEvents.filter { cached in
             // A successful fetch is authoritative for current and future
             // events. Retain an absent event only after it has ended, when
-            // TVHeadend normally removes it from the live EPG response.
+            // Tvheadend normally removes it from the live EPG response.
             guard cached.stop <= nowTimestamp else { return false }
             if let eventID = cached.eventID, freshEventIDs.contains(eventID) {
                 return false
@@ -114,7 +114,7 @@ actor EPGHistoryStore {
         try? data.write(to: fileURL, options: .atomic)
     }
 
-    /// Identifies the same broadcast slot independent of TVHeadend's event
+    /// Identifies the same broadcast slot independent of Tvheadend's event
     /// id. Start times for the same broadcast have been observed to drift
     /// by a few seconds between grabber runs, so this rounds to the
     /// nearest minute.

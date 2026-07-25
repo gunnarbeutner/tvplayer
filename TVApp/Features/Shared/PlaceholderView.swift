@@ -97,16 +97,16 @@ struct TVSourceStateView: View {
         switch state {
         case .needsConfiguration:
             return (
-                "Connect to TVHeadend",
+                "Connect to Tvheadend",
                 "server.rack",
-                "Enter your TVHeadend server address and credentials in Settings to load channels and guide data."
+                "Enter your Tvheadend server address and credentials in Settings to load channels and guide data."
             )
         case .loading:
-            return ("Loading TVHeadend", "arrow.triangle.2.circlepath", "Fetching channels and guide data…")
+            return ("Loading Tvheadend", "arrow.triangle.2.circlepath", "Fetching channels and guide data…")
         case let .failed(message):
-            return ("TVHeadend unavailable", "exclamationmark.triangle", message)
+            return ("Tvheadend unavailable", "exclamationmark.triangle", message)
         case .loaded:
-            return ("No channels", "tv.slash", "TVHeadend did not return any channels.")
+            return ("No channels", "tv.slash", "Tvheadend did not return any channels.")
         }
     }
 

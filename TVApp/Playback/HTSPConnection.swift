@@ -47,8 +47,8 @@ enum HTSPCodecError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .malformedMessage: "TVHeadend returned a malformed HTSP message."
-        case let .unsupportedFieldType(type): "TVHeadend returned unsupported HTSP field type \(type)."
+        case .malformedMessage: "Tvheadend returned a malformed HTSP message."
+        case let .unsupportedFieldType(type): "Tvheadend returned unsupported HTSP field type \(type)."
         case .fieldTooLarge: "An HTSP message field is too large."
         }
     }
@@ -217,14 +217,14 @@ enum HTSPError: LocalizedError, Sendable {
 
     var errorDescription: String? {
         switch self {
-        case .invalidHost: "The TVHeadend server URL has no HTSP host."
+        case .invalidHost: "The Tvheadend server URL has no HTSP host."
         case let .connectionFailed(message): "HTSP connection failed: \(message)"
         case .disconnected: "The HTSP connection closed unexpectedly."
         case .readTimedOut: "The HTSP connection did not deliver a message in time."
-        case .authenticationFailed: "TVHeadend rejected HTSP authentication."
+        case .authenticationFailed: "Tvheadend rejected HTSP authentication."
         case .streamingUnavailable: "This account does not have HTSP streaming permission."
-        case .timeshiftUnavailable: "TVHeadend did not enable timeshift for this stream."
-        case .channelUnavailable: "TVHeadend could not map this channel to HTSP."
+        case .timeshiftUnavailable: "Tvheadend did not enable timeshift for this stream."
+        case .channelUnavailable: "Tvheadend could not map this channel to HTSP."
         case .unsupportedStream: "The HTSP stream has no supported video or audio track."
         case let .server(message): message
         }
@@ -564,7 +564,7 @@ final class HTSPConnection: HTSPConnectionTransport, @unchecked Sendable {
             if let error = message["error"]?.stringValue { throw HTSPError.server(error) }
             if message["method"]?.stringValue == "subscriptionStop" {
                 throw HTSPError.server(
-                    message["status"]?.stringValue ?? "TVHeadend stopped the subscription."
+                    message["status"]?.stringValue ?? "Tvheadend stopped the subscription."
                 )
             }
             guard message["method"]?.stringValue == "subscriptionStart" else { continue }

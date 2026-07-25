@@ -141,9 +141,9 @@ final class RecordingStore: ObservableObject {
         if let recording = recording(for: program), recording.state == .failed {
             let reason = recording.statusText?.trimmingCharacters(in: .whitespacesAndNewlines)
             errorMessage = if let reason, !reason.isEmpty {
-                "TVheadend could not record this programme: \(reason)."
+                "Tvheadend could not record this programme: \(reason)."
             } else {
-                "TVheadend could not record this programme. Check its DVR configuration and recording directory."
+                "Tvheadend could not record this programme. Check its DVR configuration and recording directory."
             }
         }
     }

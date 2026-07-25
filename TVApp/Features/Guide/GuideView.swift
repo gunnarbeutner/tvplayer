@@ -818,7 +818,7 @@ private struct GuideInformationPanel: View {
     private var status: (String, Color)? {
         switch loadState {
         case .needsConfiguration:
-            return ("Configure TVHeadend in Settings", .orange)
+            return ("Configure Tvheadend in Settings", .orange)
         case .loading:
             return ("Updating guide…", AppTheme.accent)
         case .loaded:

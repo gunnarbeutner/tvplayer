@@ -879,7 +879,7 @@ final class GuideTimelineTests: XCTestCase {
         XCTAssertEqual(state, .completed)
         XCTAssertEqual(
             TVHeadendClient.recordingWarning(for: entry, state: state),
-            "TVheadend requested a re-record because quality issues were detected."
+            "Tvheadend requested a re-record because quality issues were detected."
         )
     }
 

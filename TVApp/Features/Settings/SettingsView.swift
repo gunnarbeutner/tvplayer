@@ -37,7 +37,7 @@ struct SettingsView: View {
                             Text("Settings")
                                 .font(.largeTitle.bold())
 
-                            Text("Manage TVHeadend connections and playback behavior.")
+                            Text("Manage Tvheadend connections and playback behavior.")
                                 .font(.callout)
                                 .foregroundStyle(AppTheme.secondaryText)
                         }
@@ -570,7 +570,7 @@ private struct ServerEditorView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(editorTitle)
                                 .font(.largeTitle.bold())
-                            Text("Configure the TVHeadend connection used by TV Player.")
+                            Text("Configure the Tvheadend connection used by TV Player.")
                                 .font(.callout)
                                 .foregroundStyle(AppTheme.secondaryText)
                         }
@@ -703,7 +703,7 @@ private struct ServerEditorView: View {
 
                 SettingsField(
                     title: "HTSP port",
-                    hint: "Native TVHeadend timeshift normally uses port 9982."
+                    hint: "Native Tvheadend timeshift normally uses port 9982."
                 ) {
                     TextField(
                         "HTSP port",
@@ -728,7 +728,7 @@ private struct ServerEditorView: View {
 
             SettingsField(
                 title: "XMLTV URL fallback (optional)",
-                hint: "Used only when no rich guide cache is configured. Leave both empty to use TVHeadend directly."
+                hint: "Used only when no rich guide cache is configured. Leave both empty to use Tvheadend directly."
             ) {
                 TextField(
                     "XMLTV URL",
@@ -768,8 +768,8 @@ private struct ServerEditorView: View {
 
     private var streamProfileHint: String {
         isLoadingStreamProfiles
-            ? "Loading profiles from TVHeadend…"
-            : "TVHeadend profile used for live streams."
+            ? "Loading profiles from Tvheadend…"
+            : "Tvheadend profile used for live streams."
     }
 
     private func settingsPrompt(_ text: String) -> Text {
@@ -930,7 +930,7 @@ private struct ConnectionTestFeedbackView: View {
         case .checking:
             return Feedback(
                 title: "Testing connection…",
-                message: "Contacting TVHeadend.",
+                message: "Contacting Tvheadend.",
                 systemImage: "network",
                 color: AppTheme.accent,
                 showsProgress: true
@@ -949,7 +949,7 @@ private struct ConnectionTestFeedbackView: View {
     }
 
     private func connectedFeedback(server: String) -> Feedback {
-        let serverDescription = server.isEmpty ? "TVHeadend is reachable." : "Connected to \(server)."
+        let serverDescription = server.isEmpty ? "Tvheadend is reachable." : "Connected to \(server)."
         switch timeshiftStatus {
         case .checking:
             return Feedback(
@@ -1189,10 +1189,10 @@ private struct TimeshiftStatusView: View {
             switch mode {
             case .tvHeadend:
                 return (
-                    "Timeshift · TVHeadend",
+                    "Timeshift · Tvheadend",
                     "clock.arrow.circlepath",
                     .green,
-                    "TVHeadend timeshift is active for the current live stream."
+                    "Tvheadend timeshift is active for the current live stream."
                 )
             case let .liveOnly(reason):
                 return (
@@ -1208,9 +1208,9 @@ private struct TimeshiftStatusView: View {
         case .notTested:
             return ("Timeshift · Not tested", "questionmark.circle.fill", AppTheme.secondaryText, "Test the connection to check native timeshift.")
         case .checking:
-            return ("Timeshift · Checking…", "arrow.triangle.2.circlepath", AppTheme.accent, "Checking TVHeadend's HTSP service.")
+            return ("Timeshift · Checking…", "arrow.triangle.2.circlepath", AppTheme.accent, "Checking Tvheadend's HTSP service.")
         case .ready:
-            return ("Timeshift · TVHeadend", "clock.arrow.circlepath", .green, "Native timeshift will be used for live TV.")
+            return ("Timeshift · Tvheadend", "clock.arrow.circlepath", .green, "Native timeshift will be used for live TV.")
         case let .unavailable(reason):
             return ("Timeshift · Unavailable", "clock.badge.exclamationmark", .orange, reason)
         }
@@ -1254,7 +1254,7 @@ private struct ConnectionStatusView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
             .background(AppTheme.surface, in: Capsule())
-            .accessibilityLabel("TVHeadend connection: \(appearance.0)")
+            .accessibilityLabel("Tvheadend connection: \(appearance.0)")
     }
 }
 

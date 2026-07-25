@@ -136,9 +136,9 @@ struct RecordingsView: View {
         switch store.loadState {
         case .needsConfiguration:
             PlaceholderView(
-                title: "Configure TVheadend",
+                title: "Configure Tvheadend",
                 systemImage: "record.circle",
-                message: "Add a TVheadend server in Settings before using recordings.",
+                message: "Add a Tvheadend server in Settings before using recordings.",
                 actionTitle: "Open Settings",
                 action: onOpenSettings,
                 focusRequest: focusRequest
@@ -550,7 +550,7 @@ private struct RecordingDetailView: View {
                 PlaceholderView(
                     title: "Recording no longer available",
                     systemImage: "questionmark.folder",
-                    message: "It may have been removed on the TVheadend server.",
+                    message: "It may have been removed on the Tvheadend server.",
                     actionTitle: "Back",
                     action: { dismiss() }
                 )

@@ -815,7 +815,7 @@ struct PlaybackView: View {
         let resumeAt = engine.elapsedSeconds
 
         do {
-            // A growing file can report EOF before TVheadend has flushed the
+            // A growing file can report EOF before Tvheadend has flushed the
             // next segment. Avoid rapidly reopening the same temporary end.
             try await Task.sleep(for: .seconds(2))
 

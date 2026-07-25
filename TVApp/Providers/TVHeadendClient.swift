@@ -134,7 +134,7 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
         )
 
         let info = try await serverInfo
-        return TVProviderSnapshot(channels: channels, serverName: info.name ?? "TVHeadend")
+        return TVProviderSnapshot(channels: channels, serverName: info.name ?? "Tvheadend")
     }
 
     private static func makeChannels(
@@ -178,9 +178,9 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
         )
     }
 
-    /// Uses TVHeadend's ticketed playlist because it contains both the server's
+    /// Uses Tvheadend's ticketed playlist because it contains both the server's
     /// canonical numeric `channelid` stream path and a short-lived credential.
-    /// VLC can then open the stream without having to implement TVHeadend's
+    /// VLC can then open the stream without having to implement Tvheadend's
     /// Digest authentication flow itself.
     func canonicalLiveStreamURL(channelID: String, profile: String? = nil) async throws -> URL {
         let selectedProfile = profile ?? configuration.streamProfile
@@ -259,10 +259,10 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
                     )
                 )
             } else {
-                mode = .liveOnly(reason: "TVHeadend did not provide an HTSP channel identifier")
+                mode = .liveOnly(reason: "Tvheadend did not provide an HTSP channel identifier")
             }
         } else {
-            mode = .liveOnly(reason: "Native timeshift is disabled on TVHeadend")
+            mode = .liveOnly(reason: "Native timeshift is disabled on Tvheadend")
         }
         return LiveStreamRequest(
             url: url,
@@ -285,8 +285,8 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
         return UInt32(components[marker + 1])
     }
 
-    /// Loads artwork exposed by TVHeadend's protected `/imagecache` endpoint.
-    /// `AsyncImage` uses the shared URL session and cannot answer TVHeadend's
+    /// Loads artwork exposed by Tvheadend's protected `/imagecache` endpoint.
+    /// `AsyncImage` uses the shared URL session and cannot answer Tvheadend's
     /// authentication challenge, so channel badges must use the client's
     /// credential-aware session instead.
     func fetchChannelIcon(at url: URL) async throws -> Data {
@@ -294,7 +294,7 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
             return try await fetchData(at: url)
         }
 
-        // TVHeadend may advertise an externally hosted public icon. Do not
+        // Tvheadend may advertise an externally hosted public icon. Do not
         // offer the server password to authentication challenges from a
         // different origin.
         let (data, response) = try await URLSession.shared.data(from: url)
@@ -310,7 +310,7 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
     func fetchRecordings() async throws -> TVRecordingSnapshot {
         guard configuration.isComplete else { throw TVProviderError.incompleteConfiguration }
 
-        // TVheadend's convenience grids are not exhaustive. In particular,
+        // Tvheadend's convenience grids are not exhaustive. In particular,
         // some versions omit completedError and completedRerecord entries from
         // grid_failed as well as from the finished grid. The complete grid is
         // the only reliable source for everything the user has scheduled.
@@ -394,7 +394,7 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
                 return
             } catch let TVProviderError.httpStatus(status) where status == 400 || status == 404 {
                 // Some grabbers expose a series URI that the installed
-                // TVheadend version cannot turn into an autorec. Preserve the
+                // Tvheadend version cannot turn into an autorec. Preserve the
                 // user action with the exact-title/channel fallback below.
             }
         }
@@ -433,7 +433,7 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
             )
             if let url = Self.firstMediaURL(in: data) { return url }
         } catch let TVProviderError.httpStatus(status) where status == 400 || status == 404 {
-            // Older TVheadend versions only expose the aggregate playlist.
+            // Older Tvheadend versions only expose the aggregate playlist.
         }
 
         let data = try await fetchData(at: endpointURL(path: "/playlist/ticket/recordings"))
@@ -720,7 +720,7 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
 
             // XMLTV providers commonly publish artwork as plain HTTP even
             // when the same resource is available over HTTPS. External HTTP
-            // is rejected by App Transport Security; same-origin TVHeadend
+            // is rejected by App Transport Security; same-origin Tvheadend
             // image-cache URLs remain HTTP so local authenticated servers
             // continue to work.
             secureComponents.scheme = "https"
@@ -829,8 +829,8 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
         }
         if scheduleStatus.contains("completed") {
             // completedError can describe a usable recording with a quality
-            // warning (for example, TVHeadend's "Weak stream"). Likewise,
-            // completedRerecord is the retained first copy after TVHeadend
+            // warning (for example, Tvheadend's "Weak stream"). Likewise,
+            // completedRerecord is the retained first copy after Tvheadend
             // requested another attempt. A real recording file is therefore
             // authoritative; these states must not make that file unplayable.
             if hasRecordingFile {
@@ -869,10 +869,10 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
 
         let scheduleStatus = entry.scheduleStatus?.lowercased() ?? ""
         if scheduleStatus.contains("rerecord") {
-            return "TVheadend requested a re-record because quality issues were detected."
+            return "Tvheadend requested a re-record because quality issues were detected."
         }
         if scheduleStatus.contains("error") {
-            return entry.status?.nonEmpty ?? "TVheadend completed this recording with a warning."
+            return entry.status?.nonEmpty ?? "Tvheadend completed this recording with a warning."
         }
         return nil
     }
@@ -926,7 +926,7 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
             channelID: channelID,
             title: "Earlier programme",
             subtitle: "Guide history unavailable",
-            overview: "TVHeadend removes finished EPG events. TV Guide will retain programme names locally after it has observed them.",
+            overview: "Tvheadend removes finished EPG events. TV Guide will retain programme names locally after it has observed them.",
             start: timeline.start,
             end: gapEnd
         )

@@ -26,7 +26,7 @@ enum PlaybackRecoveryReason: Equatable {
 
     var message: String {
         switch self {
-        case .tvHeadend: "Reconnecting to TVHeadend…"
+        case .tvHeadend: "Reconnecting to Tvheadend…"
         case .player: "Restarting video playback…"
         }
     }
@@ -517,7 +517,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
                     configureNativeCallbacks(for: stream, sessionID: sessionID)
                     activeLivePlaybackMode = .tvHeadend
                     mediaCachingMilliseconds = htsp.tuningPolicy.vlcCacheMilliseconds
-                    logger.info("Using TVHeadend native timeshift over HTSP")
+                    logger.info("Using Tvheadend native timeshift over HTSP")
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
@@ -579,7 +579,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
 
     func play() {
         guard nativeInputStream?.isNavigatingTimeshift != true else {
-            logger.info("Playback remains paused until TVHeadend completes the timeshift seek")
+            logger.info("Playback remains paused until Tvheadend completes the timeshift seek")
             navigationShouldResume = true
             pauseRequested = true
             setState(.paused)
@@ -638,7 +638,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         if nativeInputStream == nil {
             logger.info("Paused VLC recording")
         } else {
-            logger.info("Paused TVHeadend timeshift subscription")
+            logger.info("Paused Tvheadend timeshift subscription")
         }
         if let recoveryReason {
             setState(.recovering(recoveryReason, attempt: recoveryAttempt))
@@ -1120,7 +1120,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             let expectsVideo = health.expectsVideo
             let expectsAudio = health.expectsAudio
             // An empty subscription is not an audio-only service. It means
-            // TVHeadend did not expose a playable elementary stream (as with
+            // Tvheadend did not expose a playable elementary stream (as with
             // an unavailable input), so it must not satisfy the launch gate.
             guard expectsVideo || expectsAudio else {
                 if case .failed = state { return false }
@@ -1254,7 +1254,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             } else if scheduleCachedAddressPlaybackRetry() {
                 logger.info("Retrying VLC URL playback through the cached-address proxy")
             } else {
-                setState(.failed(detail ?? "VLC could not play this TVHeadend stream."))
+                setState(.failed(detail ?? "VLC could not play this Tvheadend stream."))
             }
         } else if isStopped,
                   recoveryReason == nil,
@@ -1357,7 +1357,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         // `stop()` cannot finish while VLC's custom-access thread is blocked
         // inside InputStream.read(). Closing only this disposable reader
         // invalidates its generation and wakes the read without touching the
-        // long-lived TVHeadend subscription or its timeshift buffer.
+        // long-lived Tvheadend subscription or its timeshift buffer.
         closeActiveNativeVLCReader()
         mediaPlayer.stop()
         // VLC 4's stop operation is asynchronous. Replacing its media or
@@ -1408,7 +1408,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         case let .reconnecting(reason, attempt):
             nativeTimeshiftRecoveryCount += 1
             logger.error(
-                "Recovering TVHeadend stream (attempt \(attempt, privacy: .public)): \(reason, privacy: .public)"
+                "Recovering Tvheadend stream (attempt \(attempt, privacy: .public)): \(reason, privacy: .public)"
             )
             anchorLivePlaybackPositionIfNeeded()
             publishLivePlaybackMarker()
@@ -1834,7 +1834,7 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
             timeshiftNavigationDebugState = "pipeline replacement timed out"
             cancelPostSeekOutputGate()
             // This is a local VLC teardown failure, not an HTSP failure.
-            // Reconnecting TVHeadend here discards a healthy timeshift buffer.
+            // Reconnecting Tvheadend here discards a healthy timeshift buffer.
             // Leave the server session paused so another local replacement or
             // an explicit channel change can recover without losing history.
             lastNativePipelineDiagnostic = nativePipelineDiagnostic(detail: detail)
@@ -2276,12 +2276,12 @@ final class VLCPlaybackEngine: NSObject, ObservableObject, PlaybackEngine, @prec
         let delivery: String
         if activeRequest?.kind.isLive == true {
             if activeLivePlaybackMode == .tvHeadend {
-                delivery = "TVheadend HTSP · timeshift · \(activeProfile)"
+                delivery = "Tvheadend HTSP · timeshift · \(activeProfile)"
             } else {
-                delivery = "TVheadend HTTP · live only · \(activeProfile)"
+                delivery = "Tvheadend HTTP · live only · \(activeProfile)"
             }
         } else {
-            delivery = "TVheadend recording"
+            delivery = "Tvheadend recording"
         }
         var details = [
             PlaybackTechnicalDetail(label: "Delivery", value: delivery),

@@ -430,7 +430,7 @@ final class ServerSettingsStore: ObservableObject {
             let version = [info.name, info.version].compactMap { $0 }.joined(separator: " ")
             connectionStatus = .connected(version)
             guard info.capabilities.contains("timeshift") else {
-                timeshiftStatus = .unavailable("Disabled on the TVHeadend server")
+                timeshiftStatus = .unavailable("Disabled on the Tvheadend server")
                 return
             }
             do {
@@ -830,7 +830,7 @@ final class ServerSettingsStore: ObservableObject {
     }
 
     private static func defaultName(for url: URL) -> String {
-        url.host ?? "TVHeadend"
+        url.host ?? "Tvheadend"
     }
 
     private static func optionalHTTPURL(from value: String) -> URL? {
