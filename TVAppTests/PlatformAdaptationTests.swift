@@ -5,6 +5,84 @@ import SwiftUI
 @testable import TVApp
 
 final class PlatformAdaptationTests: XCTestCase {
+    func testGuideHeaderBadgesRetainSingleLineIntrinsicWidth() {
+        XCTAssertEqual(GuideHeaderBadgeLayout.lineLimit, 1)
+        XCTAssertTrue(GuideHeaderBadgeLayout.usesFixedHorizontalSize)
+    }
+
+    func testGuideArtworkTunesOnlyCurrentlyAiringProgrammes() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let current = GuideProgram(
+            id: "current",
+            channelID: "channel",
+            title: "Current",
+            subtitle: nil,
+            overview: "",
+            start: now.addingTimeInterval(-60),
+            end: now.addingTimeInterval(60)
+        )
+        let past = GuideProgram(
+            id: "past",
+            channelID: "channel",
+            title: "Past",
+            subtitle: nil,
+            overview: "",
+            start: now.addingTimeInterval(-120),
+            end: now
+        )
+        let future = GuideProgram(
+            id: "future",
+            channelID: "channel",
+            title: "Future",
+            subtitle: nil,
+            overview: "",
+            start: now.addingTimeInterval(60),
+            end: now.addingTimeInterval(120)
+        )
+
+        XCTAssertEqual(
+            GuideArtworkActivationPolicy.action(for: current, at: now),
+            .tuneChannel
+        )
+        XCTAssertEqual(
+            GuideArtworkActivationPolicy.action(for: past, at: now),
+            .showDetails
+        )
+        XCTAssertEqual(
+            GuideArtworkActivationPolicy.action(for: future, at: now),
+            .showDetails
+        )
+    }
+
+    func testIPadNavigationUsesTabBarInsteadOfSidebar() {
+        XCTAssertEqual(IOSRootTabPresentation.preferred, .tabBar)
+    }
+
+    func testIPadUsesWideMiniPlayerOutsideGuide() {
+        for tab in AppTab.allCases where tab != .guide {
+            XCTAssertEqual(
+                IOSMiniPlayerLayoutPolicy.layout(isPad: true, selectedTab: tab),
+                .wideBanner
+            )
+        }
+    }
+
+    func testIPadGuideKeepsExistingFloatingMiniPlayer() {
+        XCTAssertEqual(
+            IOSMiniPlayerLayoutPolicy.layout(isPad: true, selectedTab: .guide),
+            .floatingOverlay
+        )
+    }
+
+    func testIPhoneKeepsCompactMiniPlayerAcrossTabs() {
+        for tab in AppTab.allCases {
+            XCTAssertEqual(
+                IOSMiniPlayerLayoutPolicy.layout(isPad: false, selectedTab: tab),
+                .compactBanner
+            )
+        }
+    }
+
     func testTimelineScrubbingClampsRecordingTargetsToAvailableContent() {
         XCTAssertEqual(
             TimelineScrubbing.recordingTarget(

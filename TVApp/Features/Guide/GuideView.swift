@@ -149,7 +149,8 @@ struct GuideView: View {
                             now: model.now,
                             loadState: model.loadState,
                             recordingState: presentedProgram.flatMap { recordings.scheduledRecording(for: $0)?.state },
-                            usesCompactLayout: usesLandscapeGuide
+                            usesCompactLayout: usesLandscapeGuide,
+                            onArtworkActivate: activateArtwork
                         )
 
                         GuideGridView(
@@ -335,6 +336,15 @@ struct GuideView: View {
             program: program,
             configuration: settings.configuration
         )
+    }
+
+    private func activateArtwork(_ program: GuideProgram) {
+        switch GuideArtworkActivationPolicy.action(for: program, at: model.now) {
+        case .tuneChannel:
+            play(program)
+        case .showDetails:
+            presentDetails(program)
+        }
     }
 
     private func playFromDetails(_ channel: GuideChannel, _ program: GuideProgram?) {
@@ -797,6 +807,25 @@ private struct GuideLoadingSkeleton: View {
     }
 }
 
+enum GuideHeaderBadgeLayout {
+    static let lineLimit = 1
+    static let usesFixedHorizontalSize = true
+}
+
+enum GuideArtworkActivationAction: Equatable {
+    case tuneChannel
+    case showDetails
+}
+
+enum GuideArtworkActivationPolicy {
+    static func action(
+        for program: GuideProgram,
+        at date: Date
+    ) -> GuideArtworkActivationAction {
+        program.isAiring(at: date) ? .tuneChannel : .showDetails
+    }
+}
+
 private struct GuideInformationPanel: View {
     let program: GuideProgram?
     let channel: GuideChannel?
@@ -804,6 +833,7 @@ private struct GuideInformationPanel: View {
     let loadState: GuideLoadState
     let recordingState: TVRecordingState?
     let usesCompactLayout: Bool
+    let onArtworkActivate: (GuideProgram) -> Void
 
     @EnvironmentObject private var playback: PlaybackCoordinator
 
@@ -919,6 +949,11 @@ private struct GuideInformationPanel: View {
                     if let program, program.isAiring(at: now) {
                         Text("LIVE")
                             .font(.caption2.weight(.black))
+                            .lineLimit(GuideHeaderBadgeLayout.lineLimit)
+                            .fixedSize(
+                                horizontal: GuideHeaderBadgeLayout.usesFixedHorizontalSize,
+                                vertical: false
+                            )
                             .padding(.horizontal, 7)
                             .padding(.vertical, 3)
                             .foregroundStyle(.white)
@@ -991,34 +1026,7 @@ private struct GuideInformationPanel: View {
                     .frame(width: 64, height: 64, alignment: .topLeading)
 
                     VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 12) {
-                            Text(program?.title ?? "Choose a programme")
-                                .font(regularTitleFont)
-                                .lineLimit(2)
-                                .layoutPriority(1)
-
-                            if let program, program.isAiring(at: now) {
-                                Text("LIVE")
-                                    .font(.caption2.weight(.black))
-                                    .padding(.horizontal, 9)
-                                    .padding(.vertical, 4)
-                                    .foregroundStyle(.white)
-                                    .background(.red, in: Capsule())
-                                    .accessibilityLabel("Currently airing")
-                            }
-
-                            if let recordingState {
-                                Label(
-                                    recordingState == .recording ? "RECORDING" : "SCHEDULED",
-                                    systemImage: recordingState == .recording ? "record.circle.fill" : "clock.fill"
-                                )
-                                .font(.caption2.weight(.black))
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 4)
-                                .foregroundStyle(.white)
-                                .background(recordingState == .recording ? Color.red : AppTheme.focused, in: Capsule())
-                            }
-                        }
+                        regularTitleAndBadges
 
                         if let subtitle = program?.subtitle, !subtitle.isEmpty {
                             Text(subtitle)
@@ -1075,14 +1083,7 @@ private struct GuideInformationPanel: View {
             .padding(.vertical, 20)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-            ProgrammeArtworkView(
-                url: artworkURL,
-                engine: playback.engine,
-                selectedChannelID: channel?.id,
-                playerChannelID: playback.presentation?.channel.id,
-                isPlayerPresented: playback.isPlayerPresented,
-                isLivePlayback: playback.isUserInitiatedLivePlayback
-            )
+            regularArtwork
                 .frame(
                     width: regularArtworkWidth,
                     height: regularPanelHeight + artworkTopBleed
@@ -1094,6 +1095,110 @@ private struct GuideInformationPanel: View {
             minHeight: regularPanelHeight,
             maxHeight: regularPanelHeight,
             alignment: .topLeading
+        )
+    }
+
+    @ViewBuilder
+    private var regularArtwork: some View {
+#if os(iOS)
+        Button {
+            guard let program else { return }
+            onArtworkActivate(program)
+        } label: {
+            artwork
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(program == nil)
+        .accessibilityLabel(artworkAccessibilityLabel)
+#else
+        artwork
+#endif
+    }
+
+    private var artwork: some View {
+        ProgrammeArtworkView(
+            url: artworkURL,
+            engine: playback.engine,
+            selectedChannelID: channel?.id,
+            playerChannelID: playback.presentation?.channel.id,
+            isPlayerPresented: playback.isPlayerPresented,
+            isLivePlayback: playback.isUserInitiatedLivePlayback
+        )
+    }
+
+    private var artworkAccessibilityLabel: String {
+        guard let program else { return "Programme artwork" }
+        switch GuideArtworkActivationPolicy.action(for: program, at: now) {
+        case .tuneChannel:
+            return "Watch \(program.title)"
+        case .showDetails:
+            return "Show details for \(program.title)"
+        }
+    }
+
+    @ViewBuilder
+    private var regularTitleAndBadges: some View {
+#if os(iOS)
+        VStack(alignment: .leading, spacing: 6) {
+            regularTitle
+            regularBadges
+        }
+#else
+        HStack(spacing: 12) {
+            regularTitle
+                .layoutPriority(1)
+            regularBadges
+        }
+#endif
+    }
+
+    private var regularTitle: some View {
+        Text(program?.title ?? "Choose a programme")
+            .font(regularTitleFont)
+            .lineLimit(2)
+    }
+
+    private var regularBadges: some View {
+        HStack(spacing: 8) {
+            if let program, program.isAiring(at: now) {
+                Text("LIVE")
+                    .font(.caption2.weight(.black))
+                    .lineLimit(GuideHeaderBadgeLayout.lineLimit)
+                    .fixedSize(
+                        horizontal: GuideHeaderBadgeLayout.usesFixedHorizontalSize,
+                        vertical: false
+                    )
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .foregroundStyle(.white)
+                    .background(.red, in: Capsule())
+                    .accessibilityLabel("Currently airing")
+            }
+
+            if let recordingState {
+                Label(
+                    recordingState == .recording ? "RECORDING" : "SCHEDULED",
+                    systemImage: recordingState == .recording ? "record.circle.fill" : "clock.fill"
+                )
+                .font(.caption2.weight(.black))
+                .lineLimit(GuideHeaderBadgeLayout.lineLimit)
+                .fixedSize(
+                    horizontal: GuideHeaderBadgeLayout.usesFixedHorizontalSize,
+                    vertical: false
+                )
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .foregroundStyle(.white)
+                .background(
+                    recordingState == .recording ? Color.red : AppTheme.focused,
+                    in: Capsule()
+                )
+            }
+        }
+        .fixedSize(
+            horizontal: GuideHeaderBadgeLayout.usesFixedHorizontalSize,
+            vertical: false
         )
     }
 }

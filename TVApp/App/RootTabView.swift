@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(iOS)
+import UIKit
+#endif
 #if os(tvOS)
 import TVServices
 #endif
@@ -30,6 +33,23 @@ enum AppTab: Hashable, CaseIterable {
     }
 }
 
+enum IOSRootTabPresentation: Equatable {
+    case tabBar
+
+    static let preferred: Self = .tabBar
+}
+
+#if os(iOS)
+private extension View {
+    func iosRootTabPresentation(_ presentation: IOSRootTabPresentation) -> some View {
+        switch presentation {
+        case .tabBar:
+            tabViewStyle(.tabBarOnly)
+        }
+    }
+}
+#endif
+
 enum RetainedPlaybackPresentation: Equatable {
     case hidden
     case fullPlayer
@@ -57,6 +77,21 @@ enum TVMiniPlayerLayout {
     static let verticalSpacing: CGFloat = 18
     static let horizontalInset: CGFloat = 54
     static let reservedContentHeight = height + verticalSpacing * 2
+}
+
+enum MiniPlayerLayout: Equatable {
+    case compactBanner
+    case wideBanner
+    case floatingOverlay
+}
+
+enum IOSMiniPlayerLayoutPolicy {
+    static func layout(isPad: Bool, selectedTab: AppTab) -> MiniPlayerLayout {
+        if isPad, selectedTab != .guide {
+            return .wideBanner
+        }
+        return isPad ? .floatingOverlay : .compactBanner
+    }
 }
 
 enum TVSectionDownFocusDestination: Equatable {
@@ -353,6 +388,7 @@ struct RootTabView: View {
                 engine: playback.engine,
                 presentation: playback.presentation,
                 presentationMode: retainedPlaybackPresentation,
+                miniPlayerLayout: miniPlayerLayout,
                 onExpand: playback.returnToPlayer,
                 onTogglePlayback: playback.toggleRetainedPlayback,
                 onStop: playback.stopRetainedPlayback,
@@ -1034,6 +1070,19 @@ struct RootTabView: View {
         }
     }
 
+    private var miniPlayerLayout: MiniPlayerLayout {
+#if os(tvOS)
+        .wideBanner
+#elseif os(iOS)
+        IOSMiniPlayerLayoutPolicy.layout(
+            isPad: UIDevice.current.userInterfaceIdiom == .pad,
+            selectedTab: selection
+        )
+#else
+        .floatingOverlay
+#endif
+    }
+
 #if os(tvOS)
     private var exitToSectionNavigator: (() -> Void)? {
         guard !isSectionNavigatorFocused, !playback.isPlayerPresented else { return nil }
@@ -1134,16 +1183,21 @@ struct RootTabView: View {
                 }
                 .tag(AppTab.settings)
         }
-        .tabViewStyle(.sidebarAdaptable)
+        .iosRootTabPresentation(IOSRootTabPresentation.preferred)
 #endif
     }
 
 #if os(iOS)
     private var compactMiniPlayerContentInset: CGFloat {
-        retainedPlaybackPresentation == .miniPlayer
-            && horizontalSizeClass == .compact
-            ? 72
-            : 0
+        guard retainedPlaybackPresentation == .miniPlayer else { return 0 }
+        return switch miniPlayerLayout {
+        case .compactBanner:
+            72
+        case .wideBanner:
+            TVMiniPlayerLayout.height
+        case .floatingOverlay:
+            0
+        }
     }
 #endif
 
@@ -1433,6 +1487,7 @@ private struct PersistentPlaybackSurface: View {
     @ObservedObject var engine: VLCPlaybackEngine
     let presentation: PlaybackPresentation?
     let presentationMode: RetainedPlaybackPresentation
+    let miniPlayerLayout: MiniPlayerLayout
     let onExpand: () -> Void
     let onTogglePlayback: () -> Void
     let onStop: () -> Void
@@ -1492,36 +1547,29 @@ private struct PersistentPlaybackSurface: View {
 #endif
     }
 
-    private var usesCompactMiniPlayer: Bool {
-#if os(tvOS)
-        showsMiniPlayer
-#elseif os(iOS)
-        showsMiniPlayer && horizontalSizeClass == .compact
-#else
-        false
-#endif
+    private var usesBannerMiniPlayer: Bool {
+        showsMiniPlayer && miniPlayerLayout != .floatingOverlay
     }
 
     private var miniVideoSize: CGSize {
-#if os(tvOS)
-        CGSize(
-            width: TVMiniPlayerLayout.height * 16 / 9,
-            height: TVMiniPlayerLayout.height
-        )
-#elseif os(macOS)
-        CGSize(width: 320, height: 180)
-#else
-        usesCompactMiniPlayer
-            ? CGSize(width: 128, height: 72)
-            : CGSize(width: 320, height: 180)
-#endif
+        switch miniPlayerLayout {
+        case .compactBanner:
+            CGSize(width: 128, height: 72)
+        case .wideBanner:
+            CGSize(
+                width: TVMiniPlayerLayout.height * 16 / 9,
+                height: TVMiniPlayerLayout.height
+            )
+        case .floatingOverlay:
+            CGSize(width: 320, height: 180)
+        }
     }
 
     private var miniCornerRadius: CGFloat {
 #if os(tvOS)
         22
 #else
-        14
+        miniPlayerLayout == .wideBanner ? 22 : 14
 #endif
     }
 
@@ -1671,7 +1719,7 @@ private struct PersistentPlaybackSurface: View {
 #if os(tvOS)
         max(0, availableWidth - TVMiniPlayerLayout.horizontalInset * 2)
 #else
-        usesCompactMiniPlayer
+        usesBannerMiniPlayer
             ? max(0, availableWidth - 24)
             : miniVideoSize.width
 #endif
@@ -1703,7 +1751,7 @@ private struct PersistentPlaybackSurface: View {
                 y: proxySize.height - containerSize.height / 2 - 24
             )
 #else
-            if usesCompactMiniPlayer {
+            if usesBannerMiniPlayer {
                 CGPoint(
                     x: proxySize.width / 2,
                     y: proxySize.height - containerSize.height / 2 - 92
@@ -1720,14 +1768,14 @@ private struct PersistentPlaybackSurface: View {
 
     @ViewBuilder
     private func miniPlayerChrome(videoWidth: CGFloat) -> some View {
-        if usesCompactMiniPlayer {
-            compactMiniPlayerChrome(videoWidth: videoWidth)
+        if usesBannerMiniPlayer {
+            bannerMiniPlayerChrome(videoWidth: videoWidth)
         } else {
             regularMiniPlayerChrome
         }
     }
 
-    private func compactMiniPlayerChrome(videoWidth: CGFloat) -> some View {
+    private func bannerMiniPlayerChrome(videoWidth: CGFloat) -> some View {
         HStack(spacing: 0) {
             AppActionButton(
                 action: onExpand,
