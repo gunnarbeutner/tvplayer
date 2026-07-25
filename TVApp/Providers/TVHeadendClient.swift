@@ -926,7 +926,7 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
             channelID: channelID,
             title: "Earlier programme",
             subtitle: "Guide history unavailable",
-            overview: "Tvheadend removes finished EPG events. TV Guide will retain programme names locally after it has observed them.",
+            overview: "Tvheadend removes finished EPG events. TV Player will retain programme names locally after it has observed them.",
             start: timeline.start,
             end: gapEnd
         )
