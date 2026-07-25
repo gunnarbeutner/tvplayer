@@ -195,6 +195,7 @@ struct RootTabView: View {
     @State private var settingsFocusRequest: UUID?
     @State private var guideHeaderChannelID: GuideChannel.ID?
     @State private var allowsSectionNavigatorFocus = false
+    @State private var isMiniPlayerFocused = false
 #endif
 
     init() {
@@ -356,6 +357,11 @@ struct RootTabView: View {
                 onTogglePlayback: playback.toggleRetainedPlayback,
                 onStop: playback.stopRetainedPlayback,
                 miniPlayerFocusRequest: miniPlayerFocusRequest,
+                onMiniPlayerFocusChanged: {
+#if os(tvOS)
+                    isMiniPlayerFocused = $0
+#endif
+                },
                 onMoveDownFromMiniPlayer: {
 #if os(tvOS)
                     requestContentFocus(for: selection)
@@ -882,6 +888,12 @@ struct RootTabView: View {
 
     @MainActor
     private func handlePlayPauseCommand() -> Bool {
+        if retainedPlaybackPresentation == .miniPlayer,
+           isMiniPlayerFocused {
+            playback.toggleRetainedPlayback()
+            return true
+        }
+
         guard selection == .guide,
               !playback.isPlayerPresented,
               !playback.pictureInPicture.isActive,
@@ -1425,6 +1437,7 @@ private struct PersistentPlaybackSurface: View {
     let onTogglePlayback: () -> Void
     let onStop: () -> Void
     let miniPlayerFocusRequest: UUID?
+    let onMiniPlayerFocusChanged: (Bool) -> Void
     let onMoveDownFromMiniPlayer: () -> Void
 #if os(tvOS)
     @State private var miniPlayerHasFocus = false
@@ -1610,6 +1623,16 @@ private struct PersistentPlaybackSurface: View {
                 break
             @unknown default:
                 break
+            }
+        }
+#endif
+#if os(tvOS)
+        .onChange(of: presentationMode) { _, mode in
+            guard mode != .miniPlayer else { return }
+            focusedMiniPlayerTargets.removeAll()
+            if miniPlayerHasFocus {
+                miniPlayerHasFocus = false
+                onMiniPlayerFocusChanged(false)
             }
         }
 #endif
@@ -1858,13 +1881,17 @@ private struct PersistentPlaybackSurface: View {
 #if os(tvOS)
         if isFocused {
             focusedMiniPlayerTargets.insert(target)
-            miniPlayerHasFocus = true
+            if !miniPlayerHasFocus {
+                miniPlayerHasFocus = true
+                onMiniPlayerFocusChanged(true)
+            }
         } else {
             focusedMiniPlayerTargets.remove(target)
             Task { @MainActor in
                 await Task.yield()
                 if focusedMiniPlayerTargets.isEmpty {
                     miniPlayerHasFocus = false
+                    onMiniPlayerFocusChanged(false)
                 }
             }
         }
