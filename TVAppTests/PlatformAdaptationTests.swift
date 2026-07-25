@@ -310,6 +310,39 @@ final class PlatformAdaptationTests: XCTestCase {
         XCTAssertFalse(isVisible)
     }
 
+    func testPlayerPanelTabsClearTheCloseButton() {
+        let tabLeadingInset = PlayerPanelHeaderLayout.tabLeadingInset(
+            closeButtonHorizontalPadding: 20,
+            overlayHorizontalPadding: 28,
+            sharesHeaderRow: true
+        )
+
+        XCTAssertGreaterThanOrEqual(
+            28 + tabLeadingInset,
+            20 + PlayerPanelHeaderLayout.closeButtonSize
+                + PlayerPanelHeaderLayout.minimumSpacing
+        )
+        XCTAssertEqual(
+            PlayerPanelHeaderLayout.tabLeadingInset(
+                closeButtonHorizontalPadding: 16,
+                overlayHorizontalPadding: 20,
+                sharesHeaderRow: false
+            ),
+            0
+        )
+        XCTAssertEqual(
+            PlayerPanelHeaderLayout.closeButtonTopPadding(
+                usesCompactLayout: false,
+                usesCompactHeight: false,
+                isPanelVisible: true
+            ),
+            PlayerPanelHeaderLayout.panelTopPadding(
+                usesCompactLayout: false,
+                usesCompactHeight: false
+            )
+        )
+    }
+
 #if os(macOS)
     func testMacOSPlayerPlaybackShortcuts() {
         XCTAssertEqual(

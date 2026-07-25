@@ -32,6 +32,52 @@ enum PlayerNavigationPolicy {
     static let skipInterval: TimeInterval = 10
 }
 
+enum PlayerPanelHeaderLayout {
+    static let closeButtonSize: CGFloat = 44
+    static let minimumSpacing: CGFloat = 12
+
+    static func tabLeadingInset(
+        closeButtonHorizontalPadding: CGFloat,
+        overlayHorizontalPadding: CGFloat,
+        sharesHeaderRow: Bool
+    ) -> CGFloat {
+        guard sharesHeaderRow else { return 0 }
+        return max(
+            0,
+            closeButtonHorizontalPadding + closeButtonSize + minimumSpacing
+                - overlayHorizontalPadding
+        )
+    }
+
+    static func panelTopPadding(
+        usesCompactLayout: Bool,
+        usesCompactHeight: Bool
+    ) -> CGFloat {
+        if usesCompactHeight { return 8 }
+        return usesCompactLayout ? 72 : 26
+    }
+
+    static func closeButtonTopPadding(
+        usesCompactLayout: Bool,
+        usesCompactHeight: Bool,
+        isPanelVisible: Bool
+    ) -> CGFloat {
+        let defaultPadding: CGFloat
+        if usesCompactHeight {
+            defaultPadding = 8
+        } else {
+            defaultPadding = usesCompactLayout ? 12 : 20
+        }
+        guard isPanelVisible, usesCompactHeight || !usesCompactLayout else {
+            return defaultPadding
+        }
+        return panelTopPadding(
+            usesCompactLayout: usesCompactLayout,
+            usesCompactHeight: usesCompactHeight
+        )
+    }
+}
+
 enum HoldSeekVelocityPolicy {
     static let activationDelayMilliseconds = 350
     static let touchDeadZone: CGFloat = 16
@@ -498,7 +544,10 @@ struct PlaybackView: View {
                     Image(systemName: "xmark")
                         .font(.headline.bold())
                         .foregroundStyle(.white)
-                        .frame(width: 44, height: 44)
+                        .frame(
+                            width: PlayerPanelHeaderLayout.closeButtonSize,
+                            height: PlayerPanelHeaderLayout.closeButtonSize
+                        )
                         .background(.black.opacity(0.72), in: Circle())
                         .overlay {
                             Circle().strokeBorder(.white.opacity(0.18), lineWidth: 1)
@@ -508,7 +557,14 @@ struct PlaybackView: View {
                 .accessibilityLabel(chromeMode == .panel ? "Close Info" : "Close Player")
                 .keyboardShortcut(.cancelAction)
                 .padding(.horizontal, usesCompactLayout ? 16 : 20)
-                .padding(.vertical, usesCompactHeight ? 8 : (usesCompactLayout ? 12 : 20))
+                .padding(
+                    .vertical,
+                    PlayerPanelHeaderLayout.closeButtonTopPadding(
+                        usesCompactLayout: usesCompactLayout,
+                        usesCompactHeight: usesCompactHeight,
+                        isPanelVisible: chromeMode == .panel
+                    )
+                )
                 .frame(
                     maxWidth: .infinity,
                     maxHeight: .infinity,
@@ -2523,7 +2579,13 @@ private struct PlayerTabbedOverlay: View {
             )
         }
         .padding(.horizontal, overlayHorizontalPadding)
-        .padding(.top, usesCompactHeight ? 8 : (usesCompactLayout ? 72 : 26))
+        .padding(
+            .top,
+            PlayerPanelHeaderLayout.panelTopPadding(
+                usesCompactLayout: usesCompactLayout,
+                usesCompactHeight: usesCompactHeight
+            )
+        )
         .padding(.bottom, usesCompactHeight ? 10 : (usesCompactLayout ? 24 : 34))
         .frame(maxWidth: .infinity)
         .background(.black.opacity(0.92))
@@ -2570,7 +2632,7 @@ private struct PlayerTabbedOverlay: View {
                 .accessibilityValue(selectedTab == tab ? "Selected" : "")
             }
         }
-        .padding(.leading, usesCompactHeight ? 56 : 0)
+        .padding(.leading, tabLeadingInset)
 #endif
     }
 
@@ -2618,6 +2680,14 @@ private struct PlayerTabbedOverlay: View {
 #else
         return 48
 #endif
+    }
+
+    private var tabLeadingInset: CGFloat {
+        PlayerPanelHeaderLayout.tabLeadingInset(
+            closeButtonHorizontalPadding: usesCompactLayout ? 16 : 20,
+            overlayHorizontalPadding: overlayHorizontalPadding,
+            sharesHeaderRow: usesCompactHeight || !usesCompactLayout
+        )
     }
 
     private var panelMinimumHeight: CGFloat {
