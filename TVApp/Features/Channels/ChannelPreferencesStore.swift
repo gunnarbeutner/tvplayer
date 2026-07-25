@@ -20,6 +20,8 @@ final class ChannelPreferencesStore: ObservableObject {
     private var payload: StoredPayload
     private var activeServerIdentifier: String?
 
+    var activeSyncServerIdentifier: String? { activeServerIdentifier }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         if let data = defaults.data(forKey: Self.storageKey),
@@ -63,6 +65,26 @@ final class ChannelPreferencesStore: ObservableObject {
             favoriteChannelIDs.insert(channelID)
         }
         saveActiveProfile()
+    }
+
+    func setCloudFavorite(
+        _ isFavorite: Bool,
+        channelID: GuideChannel.ID,
+        serverIdentifier: String
+    ) {
+        var favorites = payload.profiles[serverIdentifier]?.favoriteChannelIDs ?? []
+        let changed: Bool
+        if isFavorite {
+            changed = favorites.insert(channelID).inserted
+        } else {
+            changed = favorites.remove(channelID) != nil
+        }
+        guard changed else { return }
+        payload.profiles[serverIdentifier] = StoredProfile(favoriteChannelIDs: favorites)
+        persist()
+        guard activeServerIdentifier == serverIdentifier else { return }
+        favoriteChannelIDs = favorites
+        revision &+= 1
     }
 
     /// Preserves TVHeadend's order within both groups while keeping favourites

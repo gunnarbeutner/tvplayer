@@ -2,8 +2,10 @@ import SwiftUI
 
 @main
 struct TVAppApp: App {
-#if os(tvOS)
+#if os(iOS) || os(tvOS)
     @UIApplicationDelegateAdaptor(TVAppDelegate.self) private var appDelegate
+#elseif os(macOS)
+    @NSApplicationDelegateAdaptor(MacAppDelegate.self) private var appDelegate
 #endif
 
     var body: some Scene {

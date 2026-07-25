@@ -104,6 +104,11 @@ struct TVHeadendConfiguration: Equatable, Sendable {
             ?? "\(baseURL?.absoluteString ?? "tvheadend")|\(username)"
     }
 
+    var cloudSyncServerIdentifier: String? {
+        guard let baseURL else { return nil }
+        return CloudSyncIdentity.normalizedServer(url: baseURL, username: username)
+    }
+
     var htspConnectionHosts: [String] {
         guard let logicalHost = baseURL?.host else { return [] }
         return Self.uniqueHosts([logicalHost] + usableResolvedAddresses)

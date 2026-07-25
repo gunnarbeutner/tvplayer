@@ -85,12 +85,18 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
         }
 
         let programmesByChannel: [String: [GuideProgram]]
+        let serverIdentifier = configuration.cloudSyncServerIdentifier
+            ?? configuration.dataStoreIdentifier
         if let guideCacheURL = configuration.guideCacheURL {
             let data = try await fetchConditionalGuideData(at: guideCacheURL)
             let document = try JSONDecoder().decode(TVPlayerGuideCacheDocument.self, from: data)
             guard document.version == 1 else { throw TVProviderError.invalidResponse }
+            let events = await EPGHistoryStore.shared.merging(
+                freshEvents: document.events,
+                serverIdentifier: serverIdentifier
+            )
             programmesByChannel = Self.mapEPG(
-                document.events,
+                events,
                 timeline: timeline,
                 artworkBaseURL: configuration.baseURL
             )
@@ -108,7 +114,6 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
                 path: "/api/epg/events/grid",
                 queryItems: [URLQueryItem(name: "start", value: "0"), URLQueryItem(name: "limit", value: "20000")]
             )
-            let serverIdentifier = configuration.dataStoreIdentifier
             let events = await EPGHistoryStore.shared.merging(
                 freshEvents: epgGrid.entries,
                 serverIdentifier: serverIdentifier

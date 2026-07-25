@@ -4,7 +4,7 @@ import OSLog
 import AVFAudio
 #endif
 
-enum PreferredAudioLanguage: String, CaseIterable, Identifiable {
+enum PreferredAudioLanguage: String, CaseIterable, Identifiable, Codable, Sendable {
     case system
     case german = "de"
     case english = "en"
@@ -32,7 +32,7 @@ enum PreferredAudioLanguage: String, CaseIterable, Identifiable {
     }
 }
 
-enum SubtitlePreference: String, CaseIterable, Identifiable {
+enum SubtitlePreference: String, CaseIterable, Identifiable, Codable, Sendable {
     case off
     case automatic
     case always
@@ -48,7 +48,7 @@ enum SubtitlePreference: String, CaseIterable, Identifiable {
     }
 }
 
-enum StartupBehavior: String, CaseIterable, Identifiable {
+enum StartupBehavior: String, CaseIterable, Identifiable, Codable, Sendable {
     case lastUsed
     case guide
     case channels
@@ -305,6 +305,13 @@ final class PlaybackCoordinator: ObservableObject {
             audioLanguageCode: preferredAudioLanguage.resolvedLanguageCode,
             subtitles: subtitlePreference
         )
+    }
+
+    func applyCloudPreferences(_ preferences: SyncedPlaybackPreferences) {
+        commercialDetectionMode = preferences.commercialDetectionMode
+        preferredAudioLanguage = preferences.preferredAudioLanguage
+        subtitlePreference = preferences.subtitlePreference
+        startupBehavior = preferences.startupBehavior
     }
 
     var isUserInitiatedLivePlayback: Bool {
@@ -904,7 +911,8 @@ final class PlaybackCoordinator: ObservableObject {
         let presentationID = presentation.id
         let channelID = presentation.channel.id
         let commercialContext = CommercialChannelContext(
-            serverIdentifier: htsp.configuration.dataStoreIdentifier,
+            serverIdentifier: htsp.configuration.cloudSyncServerIdentifier
+                ?? htsp.configuration.dataStoreIdentifier,
             channelID: channelID,
             channelIconURL: presentation.channel.iconURL,
             programmes: presentation.channel.programs

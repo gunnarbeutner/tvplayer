@@ -163,6 +163,35 @@ final class TVHeadendClientTests: XCTestCase {
         ))
     }
 
+    func testDiscoveryGuideCacheEventsArePublishedForCloudSync() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let engineStore = CloudSyncEngineStore(directoryURL: directory)
+        await CloudSyncBridge.shared.connect(engineStore)
+
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [PlaybackURLProtocol.self]
+        let configuration = TVHeadendConfiguration(
+            serverProfileID: "server-profile",
+            baseURL: URL(string: "http://tvheadend.test:9981")!,
+            username: "",
+            password: "",
+            streamProfile: "pass",
+            guideCacheURL: URL(string: "http://guide.test:49382/guide.json"),
+            xmltvURL: nil
+        )
+        let client = TVHeadendClient(
+            configuration: configuration,
+            sessionConfiguration: sessionConfiguration
+        )
+
+        _ = try await client.fetchGuide(for: GuideTimeline.surrounding(Date()))
+
+        let records = await engineStore.records(kind: .guideSlice)
+        XCTAssertFalse(records.isEmpty)
+    }
+
     func testClientIsReleasedAfterCompletingRequest() async throws {
         let sessionConfiguration = URLSessionConfiguration.ephemeral
         sessionConfiguration.protocolClasses = [PlaybackURLProtocol.self]
@@ -744,6 +773,15 @@ private final class PlaybackURLProtocol: URLProtocol, @unchecked Sendable {
         switch url.path {
         case "/api/serverinfo":
             data = Data(#"{"name":"TVHeadend","capabilities":["timeshift"]}"#.utf8)
+        case "/api/channel/grid":
+            data = Data(
+                #"{"entries":[{"uuid":"channel-1","number":1,"name":"Channel 1"}],"total":1}"#.utf8
+            )
+        case "/guide.json":
+            let now = Int64(Date().timeIntervalSince1970)
+            data = Data(
+                #"{"version":1,"events":[{"eventId":1,"channelUuid":"channel-1","title":"Programme","start":\#(now - 60),"stop":\#(now + 3600)}]}"#.utf8
+            )
         case "/playlist/ticket/channels":
             data = Data(
                 #"""

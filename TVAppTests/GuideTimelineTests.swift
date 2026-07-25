@@ -2,6 +2,68 @@ import XCTest
 @testable import TVApp
 
 final class GuideTimelineTests: XCTestCase {
+    @MainActor
+    func testBackgroundGuideRefreshSyncsOnlyAfterGuideFetchCompletes() async throws {
+        actor Events {
+            var values: [String] = []
+
+            func append(_ value: String) {
+                values.append(value)
+            }
+        }
+
+        let events = Events()
+        let result = try await BackgroundGuideRefreshWorkflow.run(
+            fetch: {
+                await events.append("fetch")
+                return 42
+            },
+            sync: {
+                await events.append("sync")
+            }
+        )
+        let recordedEvents = await events.values
+
+        XCTAssertEqual(result, 42)
+        XCTAssertEqual(recordedEvents, ["fetch", "sync"])
+    }
+
+    @MainActor
+    func testBackgroundGuideRefreshDoesNotSyncWhenGuideFetchFails() async {
+        enum ExpectedError: Error {
+            case failed
+        }
+
+        actor SyncCounter {
+            var value = 0
+
+            func increment() {
+                value += 1
+            }
+        }
+
+        let syncCounter = SyncCounter()
+
+        do {
+            let _: Int = try await BackgroundGuideRefreshWorkflow.run(
+                fetch: {
+                    throw ExpectedError.failed
+                },
+                sync: {
+                    await syncCounter.increment()
+                }
+            )
+            XCTFail("Expected guide fetch to fail")
+        } catch ExpectedError.failed {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let syncCount = await syncCounter.value
+        XCTAssertEqual(syncCount, 0)
+    }
+
     func testSurroundingTimelineIncludesAtLeastTheNext24Hours() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))

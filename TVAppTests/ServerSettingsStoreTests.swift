@@ -45,6 +45,33 @@ final class ServerSettingsStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testCloudProfileUpdatesMetadataWithoutReplacingLocalPassword() throws {
+        let store = makeStore()
+        store.baseURLText = "http://server.test:9981"
+        store.username = "viewer"
+        store.password = "local-secret"
+        try store.save()
+        let localID = try XCTUnwrap(store.activeProfileID)
+        let syncID = try XCTUnwrap(store.activeProfile?.cloudSyncIdentifier)
+
+        store.mergeCloudProfile(SyncedServerProfile(
+            syncIdentifier: syncID,
+            name: "Living Room",
+            baseURL: try XCTUnwrap(URL(string: "http://server.test:9981")),
+            username: "viewer",
+            streamProfile: "matroska",
+            htspPort: 9983,
+            guideCacheURL: nil,
+            xmltvURL: nil,
+            discoveryID: nil
+        ))
+
+        XCTAssertEqual(store.activeProfileID, localID)
+        XCTAssertEqual(store.activeProfile?.name, "Living Room")
+        XCTAssertEqual(store.configuration.password, "local-secret")
+    }
+
+    @MainActor
     func testDiscoveryAddsMultipleProfilesWithoutChangingExistingSelection() throws {
         let store = makeStore()
         store.handleDiscoveryEvent(.upsert(service(id: "one", name: "One", host: "one.test")))

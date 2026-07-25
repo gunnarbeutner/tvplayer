@@ -84,6 +84,47 @@ private struct LiveChannelOrderSynchronization: ViewModifier {
     }
 }
 
+private struct CloudSyncLifecycleModifier: ViewModifier {
+    @Environment(\.scenePhase) private var scenePhase
+    @ObservedObject var cloudSync: CloudSyncCoordinator
+    @ObservedObject var settings: ServerSettingsStore
+    @ObservedObject var channels: ChannelPreferencesStore
+    @ObservedObject var playback: PlaybackCoordinator
+
+    func body(content: Content) -> some View {
+        content
+            .task {
+                await cloudSync.connect(
+                    settings: settings,
+                    channels: channels,
+                    playback: playback
+                )
+            }
+            .onChange(of: settings.revision) { _, _ in
+                cloudSync.exportServers()
+            }
+            .onChange(of: channels.revision) { _, _ in
+                cloudSync.exportChannelPreferences()
+            }
+            .onChange(of: playback.commercialDetectionMode) { _, _ in
+                cloudSync.exportPlaybackPreferences()
+            }
+            .onChange(of: playback.preferredAudioLanguage) { _, _ in
+                cloudSync.exportPlaybackPreferences()
+            }
+            .onChange(of: playback.subtitlePreference) { _, _ in
+                cloudSync.exportPlaybackPreferences()
+            }
+            .onChange(of: playback.startupBehavior) { _, _ in
+                cloudSync.exportPlaybackPreferences()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                Task { await cloudSync.synchronizeNow() }
+            }
+    }
+}
+
 struct RootTabView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var selection: AppTab
@@ -92,6 +133,7 @@ struct RootTabView: View {
     @StateObject private var channelPreferences: ChannelPreferencesStore
     @StateObject private var recordings = RecordingStore()
     @StateObject private var playback: PlaybackCoordinator
+    @StateObject private var cloudSync: CloudSyncCoordinator
     @State private var playbackAlertMessage: String?
     @State private var recordingAlertMessage: String?
     @State private var pendingRoute: AppRoute?
@@ -114,6 +156,7 @@ struct RootTabView: View {
     init() {
         let playback = PlaybackCoordinator()
         _playback = StateObject(wrappedValue: playback)
+        _cloudSync = StateObject(wrappedValue: CloudSyncCoordinator())
 #if os(tvOS)
         _startupRoutePhase = State(initialValue: .awaitingOpenURL)
         _startupPlaybackRoute = State(initialValue: nil)
@@ -379,6 +422,13 @@ struct RootTabView: View {
         .environmentObject(channelPreferences)
         .environmentObject(recordings)
         .environmentObject(playback)
+        .environmentObject(cloudSync)
+        .modifier(CloudSyncLifecycleModifier(
+            cloudSync: cloudSync,
+            settings: settings,
+            channels: channelPreferences,
+            playback: playback
+        ))
         .modifier(LiveChannelOrderSynchronization(
             guide: guide,
             channelPreferences: channelPreferences,

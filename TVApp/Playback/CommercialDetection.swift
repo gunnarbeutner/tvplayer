@@ -6,7 +6,7 @@ import Network
 import OSLog
 @preconcurrency import VLCKit
 
-enum CommercialDetectionMode: String, CaseIterable, Identifiable, Sendable {
+enum CommercialDetectionMode: String, CaseIterable, Identifiable, Codable, Sendable {
     case automatic
     case always
     case off
@@ -996,6 +996,81 @@ actor CommercialLogoProfileStore {
         var updated = model
         updated.savedAt = Date()
         payload.profiles[key] = updated
+        persist()
+        Task {
+            await CloudSyncBridge.shared.publishCommercial(key: key, model: updated)
+        }
+    }
+
+    func mergeCloudProfile(_ profile: SyncedCommercialProfile) {
+        let merged = Self.merged(payload.profiles[profile.key], profile.model)
+        guard payload.profiles[profile.key] != merged else { return }
+        payload.profiles[profile.key] = merged
+        persist()
+        if merged != profile.model {
+            Task {
+                await CloudSyncBridge.shared.publishCommercial(
+                    key: profile.key,
+                    model: merged
+                )
+            }
+        }
+    }
+
+    static func merged(
+        _ local: CommercialLogoModel?,
+        _ remote: CommercialLogoModel
+    ) -> CommercialLogoModel {
+        guard let local, local.version == remote.version else { return remote }
+        var candidates = local.candidates
+        for remoteCandidate in remote.candidates {
+            if let index = candidates.firstIndex(where: {
+                $0.bounds == remoteCandidate.bounds
+                    && maskSimilarity($0.edgeMask, remoteCandidate.edgeMask) >= 0.8
+            }) {
+                candidates[index].observedSeconds = max(
+                    candidates[index].observedSeconds,
+                    remoteCandidate.observedSeconds
+                )
+                candidates[index].sceneCount = max(
+                    candidates[index].sceneCount,
+                    remoteCandidate.sceneCount
+                )
+                candidates[index].programmeIDs.formUnion(remoteCandidate.programmeIDs)
+                candidates[index].lastSeenAt = [
+                    candidates[index].lastSeenAt,
+                    remoteCandidate.lastSeenAt
+                ].compactMap { $0 }.max()
+                if remoteCandidate.role == .channelIdentity
+                    || candidates[index].role == .channelIdentity {
+                    candidates[index].role = .channelIdentity
+                } else if remoteCandidate.role == .auxiliary
+                    || candidates[index].role == .auxiliary {
+                    candidates[index].role = .auxiliary
+                }
+            } else {
+                candidates.append(remoteCandidate)
+            }
+        }
+        var model = CommercialLogoModel(candidates: candidates)
+        model.savedAt = max(local.savedAt, remote.savedAt)
+        return model
+    }
+
+    private static func maskSimilarity(_ first: [UInt8], _ second: [UInt8]) -> Double {
+        guard first.count == second.count, !first.isEmpty else { return 0 }
+        var intersection = 0
+        var union = 0
+        for index in first.indices {
+            let a = first[index] != 0
+            let b = second[index] != 0
+            if a || b { union += 1 }
+            if a && b { intersection += 1 }
+        }
+        return union == 0 ? 1 : Double(intersection) / Double(union)
+    }
+
+    private func persist() {
         do {
             try FileManager.default.createDirectory(
                 at: fileURL.deletingLastPathComponent(),

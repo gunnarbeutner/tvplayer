@@ -91,6 +91,7 @@ targets:
         UIBackgroundModes:
           - audio
           - fetch
+          - remote-notification
         BGTaskSchedulerPermittedIdentifiers:
           - de.beutner.TVPlayer.refresh-guide
         UILaunchScreen: {}
@@ -162,6 +163,10 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         UIBackgroundModes:
           - audio
+          - fetch
+          - remote-notification
+        BGTaskSchedulerPermittedIdentifiers:
+          - de.beutner.TVPlayer.refresh-guide
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon-Mobile

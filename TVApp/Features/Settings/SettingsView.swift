@@ -12,8 +12,10 @@ struct SettingsView: View {
 #endif
     @EnvironmentObject private var settings: ServerSettingsStore
     @EnvironmentObject private var playback: PlaybackCoordinator
+    @EnvironmentObject private var cloudSync: CloudSyncCoordinator
     @State private var showsServerEditor = false
     @State private var showsLicenses = false
+    @State private var confirmsCloudDeletion = false
     @FocusState private var focusedControl: FocusControl?
 
     private enum FocusControl: Hashable {
@@ -54,6 +56,53 @@ struct SettingsView: View {
                     }
 
                     serverList
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text("ICLOUD")
+                            .font(.caption.bold())
+                            .tracking(2.2)
+                            .foregroundStyle(AppTheme.accent)
+
+                        SettingsField(
+                            title: "Sync across devices",
+                            hint: cloudSync.availability.detail
+                                ?? "Synchronizes servers, favourites, guide history, playback preferences, and commercial learning."
+                        ) {
+                            Toggle("iCloud Sync", isOn: $cloudSync.isEnabled)
+                                .labelsHidden()
+                        }
+
+                        HStack(spacing: 12) {
+                            Label(
+                                cloudSync.availability.title,
+                                systemImage: cloudSyncStatusImage
+                            )
+                            .font(.headline)
+                            .foregroundStyle(cloudSyncStatusColor)
+
+                            Spacer()
+
+                            SettingsActionButton(
+                                title: "Sync Now",
+                                systemImage: "arrow.triangle.2.circlepath",
+                                style: .secondary,
+                                isEnabled: cloudSync.isEnabled
+                            ) {
+                                Task { await cloudSync.synchronizeNow() }
+                            }
+
+                            SettingsActionButton(
+                                title: "Delete iCloud Data",
+                                systemImage: "icloud.slash",
+                                style: .destructive,
+                                isEnabled: cloudSync.isEnabled
+                            ) {
+                                confirmsCloudDeletion = true
+                            }
+                        }
+                    }
 
                     Divider()
 
@@ -153,6 +202,18 @@ struct SettingsView: View {
         }
         .modifier(ServerEditorPresentationModifier(isPresented: $showsServerEditor))
         .modifier(LicensePresentationModifier(isPresented: $showsLicenses))
+        .confirmationDialog(
+            "Delete TV Player data from iCloud?",
+            isPresented: $confirmsCloudDeletion,
+            titleVisibility: .visible
+        ) {
+            Button("Delete from iCloud", role: .destructive) {
+                Task { await cloudSync.deleteCloudData() }
+            }
+            Button("Keep iCloud Data", role: .cancel) {}
+        } message: {
+            Text("Sync will be turned off. Settings and caches on this device will be kept.")
+        }
         .onChange(of: showsServerEditor) { wasPresented, isPresented in
             guard wasPresented, !isPresented,
                   settings.configuration.isComplete,
@@ -193,6 +254,24 @@ struct SettingsView: View {
         }
     }
 
+    private var cloudSyncStatusImage: String {
+        switch cloudSync.availability {
+        case .available: "checkmark.icloud"
+        case .syncing, .checking: "arrow.triangle.2.circlepath.icloud"
+        case .disabled: "icloud.slash"
+        case .unavailable, .failed: "exclamationmark.icloud"
+        }
+    }
+
+    private var cloudSyncStatusColor: Color {
+        switch cloudSync.availability {
+        case .available: .green
+        case .syncing, .checking: AppTheme.accent
+        case .disabled: AppTheme.secondaryText
+        case .unavailable, .failed: .orange
+        }
+    }
+
     private var serverList: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -224,6 +303,7 @@ struct SettingsView: View {
                                 profile: profile,
                                 isActive: settings.activeProfileID == profile.id,
                                 isOnline: settings.isOnline(profile),
+                                requiresPassword: !settings.hasPassword(for: profile),
                                 isFocused: focusedControl == .server(profile.id)
                             )
                         }
@@ -462,6 +542,7 @@ private struct ServerEditorView: View {
 #endif
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var settings: ServerSettingsStore
+    @EnvironmentObject private var cloudSync: CloudSyncCoordinator
     @State private var saveError: String?
     @State private var streamProfiles: [TVHeadendStreamProfile] = []
     @State private var isLoadingStreamProfiles = false
@@ -538,7 +619,11 @@ private struct ServerEditorView: View {
                 profileToForget = nil
             }
         } message: {
-            Text("The saved connection and its credentials will be removed from TV Player.")
+            Text(
+                cloudSync.isEnabled
+                    ? "The server will be removed from your synced devices. Its credentials are stored only on this device and will also be removed here."
+                    : "The saved connection and its credentials will be removed from TV Player."
+            )
         }
 #if os(tvOS)
         .onReceive(
@@ -1023,6 +1108,7 @@ private struct ServerProfileRow: View {
     let profile: TVHeadendServerProfile
     let isActive: Bool
     let isOnline: Bool
+    let requiresPassword: Bool
     let isFocused: Bool
 
     private var ownership: String {
@@ -1056,6 +1142,12 @@ private struct ServerProfileRow: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
                 .background(AppTheme.surface, in: Capsule())
+
+            if requiresPassword {
+                Label("Password Required", systemImage: "lock.fill")
+                    .font(.caption.bold())
+                    .foregroundStyle(isFocused ? .white : .orange)
+            }
 
             if profile.origin == .discovered {
                 Label(isOnline ? "Online" : "Offline", systemImage: isOnline ? "wifi" : "wifi.slash")

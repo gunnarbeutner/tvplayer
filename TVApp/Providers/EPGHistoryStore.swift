@@ -12,13 +12,17 @@ actor EPGHistoryStore {
     private let fileURL: URL?
     private var payload: Payload
 
-    private init() {
-        fileURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
+    init(fileURL: URL? = nil) {
+        let resolvedURL = fileURL ?? FileManager.default.urls(
+            for: .cachesDirectory,
+            in: .userDomainMask
+        )
             .first?
             .appending(path: "tvplayer-epg-history.json")
+        self.fileURL = resolvedURL
 
-        if let fileURL,
-           let data = try? Data(contentsOf: fileURL),
+        if let resolvedURL,
+           let data = try? Data(contentsOf: resolvedURL),
            let decoded = try? JSONDecoder().decode(Payload.self, from: data) {
             payload = decoded
         } else {
@@ -30,7 +34,7 @@ actor EPGHistoryStore {
         freshEvents: [TVHeadendEPGEvent],
         serverIdentifier: String,
         now: Date = Date()
-    ) -> [TVHeadendEPGEvent] {
+    ) async -> [TVHeadendEPGEvent] {
         let cachedEvents = payload.eventsByServer[serverIdentifier, default: []]
         let retainedHistory = Self.retainedCachedEvents(
             cachedEvents,
@@ -43,18 +47,34 @@ actor EPGHistoryStore {
             eventsByKey[key(for: event)] = event
         }
 
-        let oldest = Int64(now.addingTimeInterval(-21_600).timeIntervalSince1970)
+        let oldest = Int64(now.addingTimeInterval(-86_400).timeIntervalSince1970)
         let newest = Int64(now.addingTimeInterval(172_800).timeIntervalSince1970)
         let retained = eventsByKey.values
             .filter { $0.stop > oldest && $0.start < newest }
             .sorted { $0.start < $1.start }
 
         payload.eventsByServer[serverIdentifier] = retained
-        if let fileURL,
-           let data = try? JSONEncoder().encode(payload) {
-            try? data.write(to: fileURL, options: .atomic)
-        }
+        persist()
+        await CloudSyncBridge.shared.publishGuide(
+            events: retained,
+            serverIdentifier: serverIdentifier,
+            observedAt: now
+        )
         return retained
+    }
+
+    func mergeCloudSlice(_ slice: SyncedGuideSlice, now: Date = Date()) {
+        let existing = payload.eventsByServer[slice.serverIdentifier, default: []]
+        var byKey: [String: TVHeadendEPGEvent] = [:]
+        for event in existing + slice.events {
+            byKey[key(for: event)] = event
+        }
+        let oldest = Int64(now.addingTimeInterval(-86_400).timeIntervalSince1970)
+        let newest = Int64(now.addingTimeInterval(172_800).timeIntervalSince1970)
+        payload.eventsByServer[slice.serverIdentifier] = byKey.values
+            .filter { $0.stop > oldest && $0.start < newest }
+            .sorted { $0.start < $1.start }
+        persist()
     }
 
     static func retainedCachedEvents(
@@ -81,6 +101,17 @@ actor EPGHistoryStore {
     private func key(for event: TVHeadendEPGEvent) -> String {
         if let eventID = event.eventID { return "event-\(eventID)" }
         return "\(event.channelUUID ?? "unknown")-\(event.start)"
+    }
+
+    private func persist() {
+        guard let fileURL,
+              let data = try? JSONEncoder().encode(payload)
+        else { return }
+        try? FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try? data.write(to: fileURL, options: .atomic)
     }
 
     /// Identifies the same broadcast slot independent of TVHeadend's event

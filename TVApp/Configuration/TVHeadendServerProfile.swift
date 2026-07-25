@@ -72,6 +72,27 @@ struct TVHeadendServerProfile: Codable, Identifiable, Equatable, Sendable {
         )
     }
 
+    var cloudSyncIdentifier: String {
+        if let discoveryID, !discoveryID.isEmpty {
+            return "discovery-\(CloudSyncIdentity.digest(discoveryID))"
+        }
+        return CloudSyncIdentity.normalizedServer(url: baseURL, username: username)
+    }
+
+    var cloudRepresentation: SyncedServerProfile {
+        SyncedServerProfile(
+            syncIdentifier: cloudSyncIdentifier,
+            name: name,
+            baseURL: baseURL,
+            username: username,
+            streamProfile: streamProfile,
+            htspPort: htspPort,
+            guideCacheURL: guideCacheURL,
+            xmltvURL: xmltvURL,
+            discoveryID: discoveryID
+        )
+    }
+
     private enum CodingKeys: String, CodingKey {
         case id, name, baseURL, username, streamProfile, htspPort
         case guideCacheURL, xmltvURL, resolvedAddresses, guideResolvedAddresses

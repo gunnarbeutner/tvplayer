@@ -176,6 +176,73 @@ final class ServerSettingsStore: ObservableObject {
         return profile.configuration(password: passwords[profile.id] ?? "")
     }
 
+    func hasPassword(for profile: TVHeadendServerProfile) -> Bool {
+        !profile.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? !(passwords[profile.id] ?? "").isEmpty
+            : true
+    }
+
+    func mergeCloudProfile(_ cloud: SyncedServerProfile) {
+        guard !usesTransientEnvironmentProfile else { return }
+        let existingIndex = profiles.firstIndex {
+            $0.cloudSyncIdentifier == cloud.syncIdentifier
+        }
+        if let existingIndex {
+            let existing = profiles[existingIndex]
+            let updated = TVHeadendServerProfile(
+                id: existing.id,
+                name: cloud.name,
+                baseURL: cloud.baseURL,
+                username: cloud.username,
+                streamProfile: cloud.streamProfile,
+                htspPort: cloud.htspPort,
+                guideCacheURL: cloud.guideCacheURL,
+                xmltvURL: cloud.xmltvURL,
+                resolvedAddresses: Self.sameHost(existing.baseURL, cloud.baseURL)
+                    ? existing.resolvedAddresses : [],
+                guideResolvedAddresses: Self.sameHost(existing.guideCacheURL, cloud.guideCacheURL)
+                    ? existing.guideResolvedAddresses : [],
+                origin: existing.origin,
+                isEdited: existing.isEdited,
+                discoveryID: cloud.discoveryID ?? existing.discoveryID,
+                discoveryServiceIdentity: existing.discoveryServiceIdentity,
+                lastSeenAt: existing.lastSeenAt
+            )
+            guard updated != existing else { return }
+            profiles[existingIndex] = updated
+            if editingProfileID == existing.id, !draftIsDirty {
+                loadDraft(profile: updated)
+            }
+        } else {
+            let profile = TVHeadendServerProfile(
+                id: cloud.syncIdentifier,
+                name: cloud.name,
+                baseURL: cloud.baseURL,
+                username: cloud.username,
+                streamProfile: cloud.streamProfile,
+                htspPort: cloud.htspPort,
+                guideCacheURL: cloud.guideCacheURL,
+                xmltvURL: cloud.xmltvURL,
+                origin: .manual,
+                isEdited: true,
+                discoveryID: cloud.discoveryID
+            )
+            profiles.append(profile)
+            passwords[profile.id] = keychain.read(
+                account: Self.passwordAccount(for: profile.id)
+            )
+        }
+        persist()
+        revision &+= 1
+    }
+
+    func removeCloudProfile(syncIdentifier: String) {
+        guard let profile = profiles.first(where: {
+            $0.cloudSyncIdentifier == syncIdentifier
+        }) else { return }
+        removeProfile(profile)
+    }
+
     func isOnline(_ profile: TVHeadendServerProfile) -> Bool {
         onlineProfileIDs.contains(profile.id)
     }
@@ -301,6 +368,11 @@ final class ServerSettingsStore: ObservableObject {
 
     func forget(_ id: String) {
         guard let profile = profiles.first(where: { $0.id == id }), canForget(profile) else { return }
+        removeProfile(profile)
+    }
+
+    private func removeProfile(_ profile: TVHeadendServerProfile) {
+        let id = profile.id
         keychain.delete(account: Self.passwordAccount(for: id))
         profiles.removeAll { $0.id == id }
         passwords[id] = nil
@@ -318,8 +390,8 @@ final class ServerSettingsStore: ObservableObject {
             beginAddingServer()
         }
         persist()
+        revision &+= 1
         if activeChanged {
-            revision &+= 1
             syncSharedConfiguration()
             scheduleConnectionTest()
         }
