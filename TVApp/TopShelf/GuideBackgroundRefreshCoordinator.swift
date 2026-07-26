@@ -242,15 +242,18 @@ final class GuideBackgroundRefreshCoordinator {
         guard !isRegistered else { return }
         isRegistered = BGTaskScheduler.shared.register(
             forTaskWithIdentifier: Self.taskIdentifier,
-            using: nil
-        ) { task in
-            guard let refreshTask = task as? BGAppRefreshTask else {
-                task.setTaskCompleted(success: false)
-                return
-            }
-            Task { @MainActor in
-                self.handle(refreshTask)
-            }
+            using: nil,
+            launchHandler: Self.launch
+        )
+    }
+
+    nonisolated private static func launch(_ task: BGTask) {
+        guard let refreshTask = task as? BGAppRefreshTask else {
+            task.setTaskCompleted(success: false)
+            return
+        }
+        Task { @MainActor in
+            shared.handle(refreshTask)
         }
     }
 
