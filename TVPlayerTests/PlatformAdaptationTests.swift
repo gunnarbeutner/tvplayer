@@ -2,7 +2,7 @@ import XCTest
 #if os(macOS)
 import SwiftUI
 #endif
-@testable import TVApp
+@testable import TVPlayer
 
 final class PlatformAdaptationTests: XCTestCase {
     func testGuideHeaderBadgesRetainSingleLineIntrinsicWidth() {

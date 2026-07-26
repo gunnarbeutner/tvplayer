@@ -1,6 +1,6 @@
 #if os(tvOS)
 import XCTest
-@testable import TVApp
+@testable import TVPlayer
 
 final class RecordingTopShelfArtworkPolicyTests: XCTestCase {
     func testGuideArtworkWinsOverGeneratedAlternatives() {

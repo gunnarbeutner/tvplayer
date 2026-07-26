@@ -1,7 +1,7 @@
 # Generated Xcode project and build products
 .build/
 DerivedData/
-TVApp.xcodeproj/
+TVPlayer.xcodeproj/
 
 # Per-user Xcode state
 *.xcuserstate
@@ -20,7 +20,7 @@ __pycache__/
 
 # Dependency manager output
 Pods/
-TVApp.xcworkspace/
+TVPlayer.xcworkspace/
 
 # macOS
 .DS_Store

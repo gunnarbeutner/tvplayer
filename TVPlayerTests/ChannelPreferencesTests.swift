@@ -1,5 +1,5 @@
 import XCTest
-@testable import TVApp
+@testable import TVPlayer
 
 final class ChannelPreferencesTests: XCTestCase {
     private var suiteName: String!

@@ -56,8 +56,8 @@ do {
     print("Building the macOS VLC benchmark…")
     let buildArguments = [
         "xcodebuild", "build", "-quiet",
-        "-project", "TVApp.xcodeproj",
-        "-scheme", "TVApp-macOS",
+        "-project", "TVPlayer.xcodeproj",
+        "-scheme", "TVPlayer-macOS",
         "-destination", "platform=macOS",
     ]
     _ = try run(
@@ -68,8 +68,8 @@ do {
         "/usr/bin/xcrun",
         [
             "xcodebuild", "-showBuildSettings",
-            "-project", "TVApp.xcodeproj",
-            "-scheme", "TVApp-macOS",
+            "-project", "TVPlayer.xcodeproj",
+            "-scheme", "TVPlayer-macOS",
             "-destination", "platform=macOS",
         ]
     )
@@ -82,7 +82,7 @@ do {
     let app = URL(fileURLWithPath: targetBuildDirectory)
         .appending(path: wrapperName)
     print("Launching the player and event timeline…")
-    let executable = app.appending(path: "Contents/MacOS/TVApp")
+    let executable = app.appending(path: "Contents/MacOS/TVPlayer")
     let benchmark = Process()
     let benchmarkOutput = Pipe()
     benchmark.executableURL = executable
@@ -121,7 +121,7 @@ do {
         }
     }
     guard benchmark.terminationStatus == 0 else {
-        throw RunnerError.commandFailed("TVApp", benchmark.terminationStatus)
+        throw RunnerError.commandFailed("TVPlayer", benchmark.terminationStatus)
     }
     guard result?.hasPrefix("success") == true else {
         throw RunnerError.commandFailed("VLC timeshift benchmark", 1)

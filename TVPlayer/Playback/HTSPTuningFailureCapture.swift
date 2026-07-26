@@ -299,7 +299,7 @@ final class HTSPTuningFailureCaptureSpool: @unchecked Sendable {
         self.fileManager = fileManager
         self.metadataWriter = metadataWriter
         queue = DispatchQueue(
-            label: "TVApp.HTSPTuningFailureCaptureSpool.\(captureID.uuidString)",
+            label: "TVPlayer.HTSPTuningFailureCaptureSpool.\(captureID.uuidString)",
             qos: .utility
         )
         metadataURL = directory.appending(path: Self.metadataFile)
@@ -1782,7 +1782,7 @@ final class HTSPTuningFailureCaptureRegistry: @unchecked Sendable {
             if let sessionDirectory { return sessionDirectory }
             let id = UUID()
             let directory = parentDirectory.appending(
-                path: "TVApp-VLC-Tuning-Capture-Session-\(id.uuidString.lowercased())",
+                path: "TVPlayer-VLC-Tuning-Capture-Session-\(id.uuidString.lowercased())",
                 directoryHint: .isDirectory
             )
             let inProgress = directory.appending(

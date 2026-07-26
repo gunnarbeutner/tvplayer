@@ -184,7 +184,7 @@ private final class BackgroundGuideRefreshService {
 
 #if os(iOS) || os(tvOS)
 @MainActor
-final class TVAppDelegate: NSObject, UIApplicationDelegate {
+final class TVPlayerDelegate: NSObject, UIApplicationDelegate {
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil

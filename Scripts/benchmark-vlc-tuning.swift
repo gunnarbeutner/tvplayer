@@ -460,7 +460,7 @@ private func validatedCaptureSource(
         markerName = "manifest.json"
         isExpectedLocation = expectedTempDirectories.contains { temporaryDirectory in
             let captureRoot = temporaryDirectory.appending(
-                path: "TVApp-VLC-Tuning-Failure-Captures",
+                path: "TVPlayer-VLC-Tuning-Failure-Captures",
                 directoryHint: .isDirectory
             ).standardizedFileURL
             guard isNonSymlinkDirectory(captureRoot),
@@ -475,7 +475,7 @@ private func validatedCaptureSource(
             guard source.deletingLastPathComponent().standardizedFileURL
                     == temporaryDirectory.standardizedFileURL
             else { return false }
-            let prefix = "TVApp-VLC-Tuning-Capture-Session-"
+            let prefix = "TVPlayer-VLC-Tuning-Capture-Session-"
             let name = source.lastPathComponent
             return name.hasPrefix(prefix) && name.count > prefix.count
         }
@@ -751,21 +751,21 @@ do {
             "/usr/bin/xcrun",
             [
                 "xcodebuild", "build", "-quiet",
-                "-project", "TVApp.xcodeproj",
-                "-scheme", "TVApp-macOS",
+                "-project", "TVPlayer.xcodeproj",
+                "-scheme", "TVPlayer-macOS",
                 "-destination", "platform=macOS",
                 "-derivedDataPath", derivedData.path,
             ]
         )
     }
 
-    let app = derivedData.appending(path: "Build/Products/Debug/TVApp.app")
+    let app = derivedData.appending(path: "Build/Products/Debug/TVPlayer.app")
     // Kept as an environment-only integration-test seam so the runner's
     // crash/report lifecycle can be exercised without crashing a signed app.
     let executable = ProcessInfo.processInfo.environment[
-        "TVAPP_TUNING_BENCHMARK_EXECUTABLE"
+        "TVPLAYER_TUNING_BENCHMARK_EXECUTABLE"
     ].map(URL.init(fileURLWithPath:))
-        ?? app.appending(path: "Contents/MacOS/TVApp")
+        ?? app.appending(path: "Contents/MacOS/TVPlayer")
     let protocolNonce = UUID().uuidString.lowercased()
     let captureOutputRoot = options.failureCaptureOutput.map {
         URL(fileURLWithPath: $0, relativeTo: root).standardizedFileURL
@@ -818,7 +818,7 @@ do {
     try benchmark.run()
 
     let outputHandle = benchmarkOutput.fileHandleForReading
-    let outputDrainQueue = DispatchQueue(label: "TVApp.VLCTuningBenchmark.output-drain")
+    let outputDrainQueue = DispatchQueue(label: "TVPlayer.VLCTuningBenchmark.output-drain")
     let outputDrainCompletion = OutputDrainCompletion()
     outputHandle.readabilityHandler = { handle in
         let data = handle.availableData
@@ -835,7 +835,7 @@ do {
 
     let attemptTimeoutSeconds = options.attemptTimeoutSeconds
         ?? options.dwellSeconds + 30
-    let watchdogQueue = DispatchQueue(label: "TVApp.VLCTuningBenchmark.watchdog")
+    let watchdogQueue = DispatchQueue(label: "TVPlayer.VLCTuningBenchmark.watchdog")
     let watchdog = DispatchSource.makeTimerSource(queue: watchdogQueue)
     watchdog.schedule(deadline: .now() + .milliseconds(100), repeating: .milliseconds(100))
     watchdog.setEventHandler {
@@ -952,7 +952,7 @@ do {
             outputDrainError: outputDrainError,
             captureCollection: captureCollection
         )
-        throw RunnerError.commandFailed("TVApp", benchmark.terminationStatus)
+        throw RunnerError.commandFailed("TVPlayer", benchmark.terminationStatus)
     }
     if outputDrainTimedOut {
         try writeRunnerTerminationReport(

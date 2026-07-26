@@ -1,5 +1,5 @@
 import XCTest
-@testable import TVApp
+@testable import TVPlayer
 
 final class AppRouteTests: XCTestCase {
     func testGuideRouteRoundTrips() {

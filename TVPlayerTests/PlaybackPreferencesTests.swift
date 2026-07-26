@@ -1,5 +1,5 @@
 import XCTest
-@testable import TVApp
+@testable import TVPlayer
 
 @MainActor
 final class PlaybackPreferencesTests: XCTestCase {

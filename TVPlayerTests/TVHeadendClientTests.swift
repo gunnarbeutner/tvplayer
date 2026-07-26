@@ -1,7 +1,7 @@
 import Foundation
 import Darwin
 import XCTest
-@testable import TVApp
+@testable import TVPlayer
 
 final class TVHeadendClientTests: XCTestCase {
     override func setUp() {

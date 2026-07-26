@@ -2,7 +2,7 @@ import Darwin
 import Dispatch
 import Foundation
 import XCTest
-@testable import TVApp
+@testable import TVPlayer
 
 final class HTSPTimeshiftTests: XCTestCase {
     private static var candidateConfiguration: TVHeadendConfiguration {

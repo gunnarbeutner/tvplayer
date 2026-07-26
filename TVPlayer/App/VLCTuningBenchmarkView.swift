@@ -1558,7 +1558,7 @@ final class VLCTuningBenchmarkModel: ObservableObject {
         do {
             let benchmarkSample = try encoder.encode(sample)
             let temporaryRoot = FileManager.default.temporaryDirectory.appending(
-                path: "TVApp-VLC-Tuning-Failure-Captures",
+                path: "TVPlayer-VLC-Tuning-Failure-Captures",
                 directoryHint: .isDirectory
             )
             if let output = try HTSPTuningFailureCaptureRegistry.shared.persistSuspectAttempt(

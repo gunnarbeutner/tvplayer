@@ -2,7 +2,7 @@ import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
 import XCTest
-@testable import TVApp
+@testable import TVPlayer
 #if canImport(UIKit)
 import UIKit
 #elseif canImport(AppKit)

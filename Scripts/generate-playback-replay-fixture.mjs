@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 
 const repository = resolve(new URL("..", import.meta.url).pathname);
 const destination = resolve(
-  process.argv[2] ?? join(repository, "TVApp/Resources/playback-replay.jsonl"),
+  process.argv[2] ?? join(repository, "TVPlayer/Resources/playback-replay.jsonl"),
 );
 const temporaryDirectory = mkdtempSync(join(tmpdir(), "tvplayer-replay-"));
 const transportStream = join(temporaryDirectory, "playback-replay.ts");

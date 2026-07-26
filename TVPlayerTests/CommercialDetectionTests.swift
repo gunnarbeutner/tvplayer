@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import TVApp
+@testable import TVPlayer
 
 final class CommercialDetectionTests: XCTestCase {
     private let start = Date(timeIntervalSinceReferenceDate: 100_000)

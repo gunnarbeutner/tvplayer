@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import TVApp
+@testable import TVPlayer
 
 final class HTSPTuningFailureCaptureTests: XCTestCase {
     func testRecorderKeepsBoundedReplayableStartupPrefixAndSessionMetadata() {
@@ -1300,7 +1300,7 @@ final class HTSPTuningFailureCaptureTests: XCTestCase {
 
     private func temporaryURL(_ name: String) -> URL {
         FileManager.default.temporaryDirectory.appending(
-            path: "TVAppTests-\(name)-\(UUID().uuidString)",
+            path: "TVPlayerTests-\(name)-\(UUID().uuidString)",
             directoryHint: .isDirectory
         )
     }

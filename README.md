@@ -109,7 +109,7 @@ Build all application targets with:
 bash Scripts/build-all.sh
 ```
 
-`TVApp.xcodeproj` is generated from `project.yml` and is intentionally not
+`TVPlayer.xcodeproj` is generated from `project.yml` and is intentionally not
 tracked. The application bundle identifier is `de.beutner.TVPlayer`.
 
 ### Apple TV Simulator

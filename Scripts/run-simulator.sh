@@ -10,10 +10,10 @@ fi
 server_url="${1%/}"
 username="$2"
 simulator="${3:-booted}"
-app_path="${TVPLAYER_APP_PATH:-.build/DerivedData/Build/Products/Debug-appletvsimulator/TVApp.app}"
+app_path="${TVPLAYER_APP_PATH:-.build/DerivedData/Build/Products/Debug-appletvsimulator/TVPlayer.app}"
 
 if [[ ! -d "$app_path" ]]; then
-  echo "Build the TVApp scheme before running this script." >&2
+  echo "Build the TVPlayer scheme before running this script." >&2
   exit 1
 fi
 

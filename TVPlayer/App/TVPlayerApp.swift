@@ -1,9 +1,9 @@
 import SwiftUI
 
 @main
-struct TVAppApp: App {
+struct TVPlayerApp: App {
 #if os(iOS) || os(tvOS)
-    @UIApplicationDelegateAdaptor(TVAppDelegate.self) private var appDelegate
+    @UIApplicationDelegateAdaptor(TVPlayerDelegate.self) private var appDelegate
 #elseif os(macOS)
     @NSApplicationDelegateAdaptor(MacAppDelegate.self) private var appDelegate
 #endif

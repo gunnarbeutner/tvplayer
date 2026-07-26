@@ -39,20 +39,20 @@ test_filter=()
 case "$mode" in
   replay)
     test_filter=(
-      "-only-testing:TVAppPlaybackUITests/PlaybackAutomationUITests/testReplayTuneSwitchSeekAndPlayerLifecycle"
+      "-only-testing:TVPlayerPlaybackUITests/PlaybackAutomationUITests/testReplayTuneSwitchSeekAndPlayerLifecycle"
     )
     ;;
   live)
     test_filter=(
-      "-only-testing:TVAppPlaybackUITests/PlaybackAutomationUITests/testLiveTVHeadendTuneSwitchAndSeek"
+      "-only-testing:TVPlayerPlaybackUITests/PlaybackAutomationUITests/testLiveTVHeadendTuneSwitchAndSeek"
     )
     ;;
 esac
 
 xcodegen generate
 xcodebuild \
-  -project TVApp.xcodeproj \
-  -scheme TVApp \
+  -project TVPlayer.xcodeproj \
+  -scheme TVPlayer \
   -configuration Debug \
   -destination "platform=tvOS Simulator,id=$simulator" \
   test \

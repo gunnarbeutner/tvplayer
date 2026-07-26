@@ -1,4 +1,4 @@
-name: TVApp
+name: TVPlayer
 options:
   bundleIdPrefix: de.beutner
   deploymentTarget:
@@ -16,14 +16,14 @@ targetTemplates:
   SharedApp:
     type: application
     sources:
-      - path: TVApp
+      - path: TVPlayer
         excludes:
           - Resources/Info-tvOS.plist
           - Resources/Info-iOS.plist
           - Resources/Info-macOS.plist
-          - Resources/TVApp.entitlements
-          - Resources/TVApp-iOS.entitlements
-          - Resources/TVApp-macOS.entitlements
+          - Resources/TVPlayer.entitlements
+          - Resources/TVPlayer-iOS.entitlements
+          - Resources/TVPlayer-macOS.entitlements
           - Resources/playback-replay.jsonl
           - Resources/guide-focus-fixture.json
       - path: LICENSES/LGPL-2.1.txt
@@ -34,36 +34,36 @@ targetTemplates:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer
-        PRODUCT_MODULE_NAME: TVApp
-        PRODUCT_NAME: TVApp
+        PRODUCT_MODULE_NAME: TVPlayer
+        PRODUCT_NAME: TVPlayer
 
   SharedTests:
     type: bundle.unit-test
     sources:
-      - path: TVAppTests
+      - path: TVPlayerTests
     settings:
       base:
-        PRODUCT_MODULE_NAME: TVAppTests
+        PRODUCT_MODULE_NAME: TVPlayerTests
         GENERATE_INFOPLIST_FILE: true
 
 targets:
-  TVApp:
+  TVPlayer:
     templates:
       - SharedApp
     platform: tvOS
     dependencies:
       - framework: .build/VLCKit/VLCKit.xcframework
         embed: true
-      - target: TVAppTopShelf
+      - target: TVPlayerTopShelf
         embed: true
     sources:
-      - path: TVAppTVOSPlayback
-      - path: TVApp/Resources/playback-replay.jsonl
+      - path: TVPlayerTVOSPlayback
+      - path: TVPlayer/Resources/playback-replay.jsonl
         buildPhase: resources
-      - path: TVApp/Resources/guide-focus-fixture.json
+      - path: TVPlayer/Resources/guide-focus-fixture.json
         buildPhase: resources
     info:
-      path: TVApp/Resources/Info-tvOS.plist
+      path: TVPlayer/Resources/Info-tvOS.plist
       properties:
         CFBundleDisplayName: TV Player
         ITSAppUsesNonExemptEncryption: false
@@ -96,25 +96,25 @@ targets:
         UILaunchScreen: {}
     settings:
       base:
-        CODE_SIGN_ENTITLEMENTS: TVApp/Resources/TVApp.entitlements
-        SWIFT_OBJC_BRIDGING_HEADER: TVAppTVOSPlayback/TVApp-Bridging-Header.h
+        CODE_SIGN_ENTITLEMENTS: TVPlayer/Resources/TVPlayer.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: TVPlayerTVOSPlayback/TVPlayer-Bridging-Header.h
         HEADER_SEARCH_PATHS: "$(inherited) $(BUILT_PRODUCTS_DIR)/VLCKit.framework/Headers"
       configs:
         Release:
           EXCLUDED_SOURCE_FILE_NAMES: playback-replay.jsonl guide-focus-fixture.json
     scheme:
       testTargets:
-        - TVAppTests
-        - TVAppPlaybackUITests
+        - TVPlayerTests
+        - TVPlayerPlaybackUITests
 
-  TVAppTopShelf:
+  TVPlayerTopShelf:
     type: app-extension
     platform: tvOS
     sources:
-      - path: TVAppTopShelf
-      - path: TVApp/TopShelf/TopShelfSnapshot.swift
+      - path: TVPlayerTopShelf
+      - path: TVPlayer/TopShelf/TopShelfSnapshot.swift
     info:
-      path: TVAppTopShelf/Info.plist
+      path: TVPlayerTopShelf/Info.plist
       properties:
         CFBundleDisplayName: TV Player Top Shelf
         NSExtension:
@@ -123,22 +123,22 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer.TopShelf
-        CODE_SIGN_ENTITLEMENTS: TVApp/Resources/TVAppTopShelf.entitlements
+        CODE_SIGN_ENTITLEMENTS: TVPlayer/Resources/TVPlayerTopShelf.entitlements
         SKIP_INSTALL: true
         SWIFT_VERSION: "6.0"
 
-  TVApp-iOS:
+  TVPlayer-iOS:
     templates:
       - SharedApp
     platform: iOS
     sources:
-      - path: TVApp/Resources/playback-replay.jsonl
+      - path: TVPlayer/Resources/playback-replay.jsonl
         buildPhase: resources
     dependencies:
       - framework: .build/VLCKit/VLCKit.xcframework
         embed: true
     info:
-      path: TVApp/Resources/Info-iOS.plist
+      path: TVPlayer/Resources/Info-iOS.plist
       properties:
         CFBundleDisplayName: TV Player
         ITSAppUsesNonExemptEncryption: false
@@ -170,14 +170,14 @@ targets:
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon-Mobile
-        CODE_SIGN_ENTITLEMENTS: TVApp/Resources/TVApp-iOS.entitlements
+        CODE_SIGN_ENTITLEMENTS: TVPlayer/Resources/TVPlayer-iOS.entitlements
         TARGETED_DEVICE_FAMILY: "1,2"
     scheme:
       testTargets:
-        - TVAppTests-iOS
-        - TVAppPlaybackUITests-iOS
+        - TVPlayerTests-iOS
+        - TVPlayerPlaybackUITests-iOS
 
-  TVApp-macOS:
+  TVPlayer-macOS:
     templates:
       - SharedApp
     platform: macOS
@@ -185,7 +185,7 @@ targets:
       - framework: .build/VLCKit/VLCKit.xcframework
         embed: true
     info:
-      path: TVApp/Resources/Info-macOS.plist
+      path: TVPlayer/Resources/Info-macOS.plist
       properties:
         CFBundleDisplayName: TV Player
         CFBundleName: TV Player
@@ -202,66 +202,66 @@ targets:
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon-Mac
-        CODE_SIGN_ENTITLEMENTS: TVApp/Resources/TVApp-macOS.entitlements
+        CODE_SIGN_ENTITLEMENTS: TVPlayer/Resources/TVPlayer-macOS.entitlements
         ENABLE_HARDENED_RUNTIME: true
     scheme:
       testTargets:
-        - TVAppTests-macOS
+        - TVPlayerTests-macOS
 
-  TVAppTests:
+  TVPlayerTests:
     templates:
       - SharedTests
     platform: tvOS
     dependencies:
-      - target: TVApp
+      - target: TVPlayer
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer.tests
 
-  TVAppPlaybackUITests:
+  TVPlayerPlaybackUITests:
     type: bundle.ui-testing
     platform: tvOS
     sources:
-      - path: TVAppPlaybackUITests
+      - path: TVPlayerPlaybackUITests
     dependencies:
-      - target: TVApp
+      - target: TVPlayer
     settings:
       base:
         GENERATE_INFOPLIST_FILE: true
         PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer.playback-ui-tests
-        TEST_TARGET_NAME: TVApp
+        TEST_TARGET_NAME: TVPlayer
 
-  TVAppPlaybackUITests-iOS:
+  TVPlayerPlaybackUITests-iOS:
     type: bundle.ui-testing
     platform: iOS
     sources:
-      - path: TVAppIOSUITests
+      - path: TVPlayerIOSUITests
     dependencies:
-      - target: TVApp-iOS
+      - target: TVPlayer-iOS
     settings:
       base:
         GENERATE_INFOPLIST_FILE: true
         PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer.playback-ui-tests.ios
-        TEST_TARGET_NAME: TVApp-iOS
+        TEST_TARGET_NAME: TVPlayer-iOS
 
-  TVAppTests-iOS:
+  TVPlayerTests-iOS:
     templates:
       - SharedTests
     platform: iOS
     dependencies:
-      - target: TVApp-iOS
+      - target: TVPlayer-iOS
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer.tests.ios
-        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/TVApp.app/TVApp"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/TVPlayer.app/TVPlayer"
 
-  TVAppTests-macOS:
+  TVPlayerTests-macOS:
     templates:
       - SharedTests
     platform: macOS
     dependencies:
-      - target: TVApp-macOS
+      - target: TVPlayer-macOS
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.beutner.TVPlayer.tests.macos
-        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/TVApp.app/Contents/MacOS/TVApp"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/TVPlayer.app/Contents/MacOS/TVPlayer"

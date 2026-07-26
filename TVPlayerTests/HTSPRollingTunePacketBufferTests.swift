@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import TVApp
+@testable import TVPlayer
 
 final class HTSPRollingTunePacketBufferTests: XCTestCase {
     func testFreshAlignedWindowClaimsReadySnapshot() {
