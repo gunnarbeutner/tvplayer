@@ -100,7 +100,7 @@ struct PersistedGuideChannel: Codable, Sendable {
         // Timeline-sized placeholders are regenerated for each guide window
         // rather than surviving into a later launch.
         programs = channel.programs.filter {
-            !$0.id.hasPrefix("earlier-") && !$0.id.hasPrefix("unavailable-")
+            !$0.id.hasPrefix("earlier-") && !$0.isUnavailablePlaceholder
         }
     }
 }

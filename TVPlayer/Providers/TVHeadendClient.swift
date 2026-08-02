@@ -905,7 +905,7 @@ final class TVHeadendClient: TVProvider, @unchecked Sendable {
 
         if sorted.isEmpty {
             return [GuideProgram(
-                id: "unavailable-\(channelID)-\(Int(timeline.start.timeIntervalSince1970))",
+                id: "\(GuideProgram.unavailablePlaceholderIDPrefix)\(channelID)-\(Int(timeline.start.timeIntervalSince1970))",
                 channelID: channelID,
                 title: "No programme information",
                 subtitle: "Guide data unavailable",

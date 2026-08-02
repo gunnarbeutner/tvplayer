@@ -509,6 +509,59 @@ final class GuideGridLayoutTests: XCTestCase {
         )
     }
 
+    func testNativeFocusLeavesUnavailableGuidePlaceholderExplicitlyInBothDirections() throws {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let guideTimeline = timeline(around: now)
+        let unavailableProgram = try XCTUnwrap(
+            TVHeadendClient.programsFillingPastGap(
+                [],
+                channelID: "middle",
+                timeline: guideTimeline,
+                now: now
+            ).first
+        )
+        let snapshot = GuideGridSnapshot(
+            channels: [
+                channel(id: "first", programs: [
+                    program(id: "first-current", channelID: "first", around: now)
+                ]),
+                channel(id: "middle", programs: [
+                    unavailableProgram
+                ]),
+                channel(id: "third", programs: [
+                    program(id: "third-current", channelID: "third", around: now)
+                ]),
+            ],
+            timeline: guideTimeline,
+            revision: 1
+        )
+
+        XCTAssertEqual(
+            snapshot.nativeFocusResolution(
+                from: unavailableProgram.id,
+                to: "first-current",
+                nativeCandidateProgramID: "first-current"
+            ),
+            .requestExplicitly("first-current")
+        )
+        XCTAssertEqual(
+            snapshot.nativeFocusResolution(
+                from: unavailableProgram.id,
+                to: "third-current",
+                nativeCandidateProgramID: "third-current"
+            ),
+            .requestExplicitly("third-current")
+        )
+        XCTAssertEqual(
+            snapshot.nativeFocusResolution(
+                from: "first-current",
+                to: unavailableProgram.id,
+                nativeCandidateProgramID: unavailableProgram.id
+            ),
+            .acceptNative
+        )
+    }
+
     func testMovingDownSelectsCurrentProgrammeOnNextChannel() throws {
         let now = Date(timeIntervalSince1970: 10_000)
         let first = channel(

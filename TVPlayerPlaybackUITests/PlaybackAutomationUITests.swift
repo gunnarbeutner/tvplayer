@@ -1185,6 +1185,43 @@ final class GuideFocusAutomationUITests: XCTestCase {
         try assertNoMarkerViolations()
     }
 
+    func testUnavailableProgrammeCanBeExitedQuicklyInBothDirections() throws {
+        _ = try waitForProgram("guide-test-current-01")
+        for ordinal in 2...37 {
+            XCUIRemote.shared.press(.down)
+            _ = try waitForProgramOnChannel(
+                String(format: "guide-test-channel-%02d", ordinal),
+                timeout: 2
+            )
+        }
+
+        XCUIRemote.shared.press(.down)
+        _ = try waitForProgram("unavailable-guide-test-channel-38", timeout: 2)
+
+        let downStarted = Date()
+        XCUIRemote.shared.press(.down)
+        _ = try waitForProgramOnChannel("guide-test-channel-39", timeout: 5)
+        XCTAssertLessThan(
+            Date().timeIntervalSince(downStarted),
+            1,
+            "Leaving an unavailable programme downward should complete within one second."
+        )
+
+        XCUIRemote.shared.press(.up)
+        _ = try waitForProgram("unavailable-guide-test-channel-38", timeout: 2)
+
+        let upStarted = Date()
+        XCUIRemote.shared.press(.up)
+        _ = try waitForProgramOnChannel("guide-test-channel-37", timeout: 5)
+        XCTAssertLessThan(
+            Date().timeIntervalSince(upStarted),
+            1,
+            "Leaving an unavailable programme upward should complete within one second."
+        )
+
+        try assertNoMarkerViolations()
+    }
+
     func testRealGuideDataEveryShortVerticalPressMovesExactlyOneProgram() throws {
 #if targetEnvironment(simulator)
         throw XCTSkip("Requires the configured physical Apple TV guide data.")

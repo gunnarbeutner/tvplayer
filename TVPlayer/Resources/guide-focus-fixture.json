@@ -12599,7 +12599,16 @@
       "number": 38,
       "name": "Guide Test Channel 38",
       "monogram": "G38",
-      "programs": []
+      "programs": [
+        {
+          "id": "unavailable-guide-test-channel-38",
+          "title": "No programme information",
+          "subtitle": "Guide data unavailable",
+          "overview": "No programme metadata is currently available for this channel.",
+          "startOffset": -3600,
+          "endOffset": 90000
+        }
+      ]
     },
     {
       "id": "guide-test-channel-39",

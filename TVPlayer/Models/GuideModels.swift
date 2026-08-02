@@ -300,6 +300,8 @@ struct GuideProgramMetadata: Hashable, Codable, Sendable {
 }
 
 struct GuideProgram: Identifiable, Hashable, Codable, Sendable {
+    static let unavailablePlaceholderIDPrefix = "unavailable-"
+
     enum Phase: Equatable {
         case past
         case current
@@ -345,6 +347,10 @@ struct GuideProgram: Identifiable, Hashable, Codable, Sendable {
 
     var duration: TimeInterval {
         end.timeIntervalSince(start)
+    }
+
+    var isUnavailablePlaceholder: Bool {
+        id.hasPrefix(Self.unavailablePlaceholderIDPrefix)
     }
 
     func phase(at date: Date) -> Phase {

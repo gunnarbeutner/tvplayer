@@ -151,6 +151,36 @@ enum GuideFocusScrollPosition {
     }
 }
 
+enum GuideProgramPresentation {
+    static func frame(
+        itemFrame: CGRect,
+        isUnavailablePlaceholder: Bool,
+        contentOffset: CGPoint,
+        viewportSize: CGSize
+    ) -> CGRect {
+        guard isUnavailablePlaceholder,
+              GuideFocusScrollPosition.hasStableViewport(viewportSize)
+        else { return itemFrame }
+
+        // An unavailable programme semantically covers the complete timeline,
+        // but presenting that multi-thousand-point frame as one focusable view
+        // makes tvOS spend seconds animating focus away from it. Keep the model
+        // coverage intact while giving the focus engine only the visible slice.
+        let visibleLeadingEdge = contentOffset.x + GuideGridMetrics.channelWidth + 2
+        let visibleTrailingEdge = contentOffset.x + viewportSize.width - 8
+        let leadingEdge = max(itemFrame.minX, visibleLeadingEdge)
+        let trailingEdge = min(itemFrame.maxX, visibleTrailingEdge)
+        guard trailingEdge > leadingEdge else { return itemFrame }
+
+        return CGRect(
+            x: leadingEdge,
+            y: itemFrame.minY,
+            width: trailingEdge - leadingEdge,
+            height: itemFrame.height
+        )
+    }
+}
+
 enum GuideFocusPresentation {
     static func snapshotFocusTarget(
         requested: GuideProgram.ID?,
@@ -388,7 +418,8 @@ struct GuideGridSnapshot: Sendable {
         nativeCandidateProgramID: GuideProgram.ID?
     ) -> GuideNativeFocusResolution {
         guard let originLocation = locationByProgramID[originProgramID],
-              let destinationLocation = locationByProgramID[destinationProgramID]
+              let destinationLocation = locationByProgramID[destinationProgramID],
+              let originItem = rows[originLocation.row][safe: originLocation.item]
         else {
             return .requestExplicitly(destinationProgramID)
         }
@@ -398,7 +429,8 @@ struct GuideGridSnapshot: Sendable {
         // remote gesture into a visibly slow traversal of the empty row. Reject the
         // native update so the collection view can reveal and focus the logical
         // destination immediately instead.
-        if abs(destinationLocation.row - originLocation.row) > 1 {
+        if originItem.program.isUnavailablePlaceholder
+            || abs(destinationLocation.row - originLocation.row) > 1 {
             return .requestExplicitly(destinationProgramID)
         }
 
@@ -722,7 +754,10 @@ private final class GuideCollectionLayout: UICollectionViewLayout {
                     let itemAttributes = GuideTimelineLayoutAttributes(
                         forCellWith: IndexPath(item: item.itemIndex, section: row)
                     )
-                    itemAttributes.frame = item.frame
+                    itemAttributes.frame = presentationFrame(
+                        for: item,
+                        collectionView: collectionView
+                    )
                     itemAttributes.zIndex = 2
                     attributes.append(itemAttributes)
                 }
@@ -758,9 +793,9 @@ private final class GuideCollectionLayout: UICollectionViewLayout {
     }
 
     override func layoutAttributesForItem(at indexPath: IndexPath) -> UICollectionViewLayoutAttributes? {
-        guard let item = snapshot?.item(at: indexPath) else { return nil }
+        guard let collectionView, let item = snapshot?.item(at: indexPath) else { return nil }
         let attributes = GuideTimelineLayoutAttributes(forCellWith: indexPath)
-        attributes.frame = item.frame
+        attributes.frame = presentationFrame(for: item, collectionView: collectionView)
         attributes.zIndex = 2
         return attributes
     }
@@ -781,6 +816,18 @@ private final class GuideCollectionLayout: UICollectionViewLayout {
     override func shouldInvalidateLayout(forBoundsChange newBounds: CGRect) -> Bool {
         guard let oldBounds = collectionView?.bounds else { return true }
         return oldBounds.origin != newBounds.origin || oldBounds.size != newBounds.size
+    }
+
+    private func presentationFrame(
+        for item: GuideGridSnapshot.Item,
+        collectionView: UICollectionView
+    ) -> CGRect {
+        GuideProgramPresentation.frame(
+            itemFrame: item.frame,
+            isUnavailablePlaceholder: item.program.isUnavailablePlaceholder,
+            contentOffset: collectionView.contentOffset,
+            viewportSize: collectionView.bounds.size
+        )
     }
 
     private func supplementaryAttributes(
@@ -1371,7 +1418,7 @@ private final class GuideCollectionView: UICollectionView,
         // can exist while its reveal animation is still moving it. tvOS may
         // ignore that focus request or leave the grid without a focused item.
         guard let targetOffset = GuideFocusScrollPosition.targetOffset(
-            itemFrame: item.frame,
+            itemFrame: presentationFrame(for: item),
             currentOffset: contentOffset,
             viewportSize: bounds.size,
             contentSize: contentSize
@@ -1461,7 +1508,7 @@ private final class GuideCollectionView: UICollectionView,
 
     private func reveal(item: GuideGridSnapshot.Item, animated: Bool) -> Bool {
         guard let target = GuideFocusScrollPosition.targetOffset(
-            itemFrame: item.frame,
+            itemFrame: presentationFrame(for: item),
             currentOffset: contentOffset,
             viewportSize: bounds.size,
             contentSize: contentSize
@@ -1757,9 +1804,10 @@ private final class GuideCollectionView: UICollectionView,
               let indexPath = snapshot.indexPath(for: programID),
               let item = snapshot.item(at: indexPath)
         else { return }
+        let itemFrame = presentationFrame(for: item)
         let pinnedTrailingEdge = contentOffset.x + GuideGridMetrics.channelWidth + 8
-        if item.frame.minX < pinnedTrailingEdge {
-            let correctedX = max(0, item.frame.minX - GuideGridMetrics.channelWidth - 8)
+        if itemFrame.minX < pinnedTrailingEdge {
+            let correctedX = max(0, itemFrame.minX - GuideGridMetrics.channelWidth - 8)
             setContentOffset(CGPoint(x: correctedX, y: contentOffset.y), animated: true)
         }
     }
@@ -1846,9 +1894,19 @@ private final class GuideCollectionView: UICollectionView,
     }
 
     private func leadingOcclusion(for item: GuideGridSnapshot.Item) -> CGFloat {
-        min(
-            item.frame.width,
-            max(0, contentOffset.x + GuideGridMetrics.channelWidth - item.frame.minX)
+        let itemFrame = presentationFrame(for: item)
+        return min(
+            itemFrame.width,
+            max(0, contentOffset.x + GuideGridMetrics.channelWidth - itemFrame.minX)
+        )
+    }
+
+    private func presentationFrame(for item: GuideGridSnapshot.Item) -> CGRect {
+        GuideProgramPresentation.frame(
+            itemFrame: item.frame,
+            isUnavailablePlaceholder: item.program.isUnavailablePlaceholder,
+            contentOffset: contentOffset,
+            viewportSize: bounds.size
         )
     }
 
