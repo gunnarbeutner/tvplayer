@@ -338,6 +338,27 @@ final class GuideGridLayoutTests: XCTestCase {
         ))
     }
 
+    func testSnapshotFocusFallsBackToPreferredProgrammeWhenRetainedProgrammeExpired() {
+        let availableProgramIDs: Set<GuideProgram.ID> = ["current-programme"]
+
+        XCTAssertEqual(
+            GuideFocusPresentation.snapshotFocusTarget(
+                requested: "yesterdays-programme",
+                preferred: "current-programme",
+                isAvailable: availableProgramIDs.contains
+            ),
+            "current-programme"
+        )
+        XCTAssertEqual(
+            GuideFocusPresentation.snapshotFocusTarget(
+                requested: "retained-programme",
+                preferred: "current-programme",
+                isAvailable: { $0 == "retained-programme" }
+            ),
+            "retained-programme"
+        )
+    }
+
     func testProgramMarkerPresentationTruthTable() {
         for isUIKitFocused in [false, true] {
             for showsPendingFocus in [false, true] {

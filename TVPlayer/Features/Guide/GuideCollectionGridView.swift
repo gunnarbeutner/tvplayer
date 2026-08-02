@@ -152,6 +152,20 @@ enum GuideFocusScrollPosition {
 }
 
 enum GuideFocusPresentation {
+    static func snapshotFocusTarget(
+        requested: GuideProgram.ID?,
+        preferred: GuideProgram.ID?,
+        isAvailable: (GuideProgram.ID) -> Bool
+    ) -> GuideProgram.ID? {
+        if let requested, isAvailable(requested) {
+            return requested
+        }
+        if let preferred, isAvailable(preferred) {
+            return preferred
+        }
+        return nil
+    }
+
     static func selectionProgramID(
         requested: GuideProgram.ID?,
         pending: GuideProgram.ID?,
@@ -1244,8 +1258,16 @@ private final class GuideCollectionView: UICollectionView,
             return
         }
 
-        let focusID = requestedFocusedProgramID ?? preferredProgramID
-        if let focusID, snapshot.indexPath(for: focusID) != nil {
+        // A foreground refresh can replace the entire timeline after the
+        // retained programme ended. Do not let that stale, non-nil ID hide
+        // the current preferred programme and leave the reloaded grid without
+        // any focus target.
+        let focusID = GuideFocusPresentation.snapshotFocusTarget(
+            requested: requestedFocusedProgramID,
+            preferred: preferredProgramID,
+            isAvailable: { snapshot.indexPath(for: $0) != nil }
+        )
+        if let focusID {
             requestFocus(on: focusID, retriesRemaining: 4)
         }
     }
