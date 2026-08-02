@@ -458,6 +458,57 @@ final class GuideGridLayoutTests: XCTestCase {
         )
     }
 
+    func testNativeFocusUsesExplicitHandoffWhenAnEmptyGuideRowIsSkipped() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let snapshot = GuideGridSnapshot(
+            channels: [
+                channel(id: "first", programs: [
+                    program(id: "first-current", channelID: "first", around: now)
+                ]),
+                channel(id: "empty", programs: []),
+                channel(id: "third", programs: [
+                    program(id: "third-current", channelID: "third", around: now)
+                ]),
+            ],
+            timeline: timeline(around: now),
+            revision: 1
+        )
+
+        XCTAssertEqual(
+            snapshot.nativeFocusResolution(
+                from: "first-current",
+                to: "third-current",
+                nativeCandidateProgramID: "third-current"
+            ),
+            .requestExplicitly("third-current")
+        )
+    }
+
+    func testNativeFocusKeepsAdjacentGuideMovementNative() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let snapshot = GuideGridSnapshot(
+            channels: [
+                channel(id: "first", programs: [
+                    program(id: "first-current", channelID: "first", around: now)
+                ]),
+                channel(id: "second", programs: [
+                    program(id: "second-current", channelID: "second", around: now)
+                ]),
+            ],
+            timeline: timeline(around: now),
+            revision: 1
+        )
+
+        XCTAssertEqual(
+            snapshot.nativeFocusResolution(
+                from: "first-current",
+                to: "second-current",
+                nativeCandidateProgramID: "second-current"
+            ),
+            .acceptNative
+        )
+    }
+
     func testMovingDownSelectsCurrentProgrammeOnNextChannel() throws {
         let now = Date(timeIntervalSince1970: 10_000)
         let first = channel(

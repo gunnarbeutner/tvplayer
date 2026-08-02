@@ -262,6 +262,11 @@ enum GuideFocusNavigation {
     }
 }
 
+enum GuideNativeFocusResolution: Equatable {
+    case acceptNative
+    case requestExplicitly(GuideProgram.ID)
+}
+
 /// Immutable, indexed input for the collection view. Expensive date
 /// formatting and geometry are computed once per guide revision rather than
 /// while cells are scrolling on the main thread.
@@ -375,6 +380,31 @@ struct GuideGridSnapshot: Sendable {
     func indexPath(for programID: GuideProgram.ID) -> IndexPath? {
         guard let location = locationByProgramID[programID] else { return nil }
         return IndexPath(item: location.item, section: location.row)
+    }
+
+    func nativeFocusResolution(
+        from originProgramID: GuideProgram.ID,
+        to destinationProgramID: GuideProgram.ID,
+        nativeCandidateProgramID: GuideProgram.ID?
+    ) -> GuideNativeFocusResolution {
+        guard let originLocation = locationByProgramID[originProgramID],
+              let destinationLocation = locationByProgramID[destinationProgramID]
+        else {
+            return .requestExplicitly(destinationProgramID)
+        }
+
+        // UIKit's native focus scroll animates through every physical row between
+        // the focused cells. When a channel has no programmes, that turns a single
+        // remote gesture into a visibly slow traversal of the empty row. Reject the
+        // native update so the collection view can reveal and focus the logical
+        // destination immediately instead.
+        if abs(destinationLocation.row - originLocation.row) > 1 {
+            return .requestExplicitly(destinationProgramID)
+        }
+
+        return nativeCandidateProgramID == destinationProgramID
+            ? .acceptNative
+            : .requestExplicitly(destinationProgramID)
     }
 
     func items(inRow row: Int, intersecting horizontalRange: ClosedRange<CGFloat>) -> ArraySlice<Item> {
@@ -1653,7 +1683,13 @@ private final class GuideCollectionView: UICollectionView,
             return false
         }
 
-        if (context.nextFocusedItem as? GuideProgrammeCollectionCell)?.programID == destination {
+        let resolution = snapshot.nativeFocusResolution(
+            from: origin,
+            to: destination,
+            nativeCandidateProgramID:
+                (context.nextFocusedItem as? GuideProgrammeCollectionCell)?.programID
+        )
+        if resolution == .acceptNative {
             return true
         }
 
@@ -1665,8 +1701,9 @@ private final class GuideCollectionView: UICollectionView,
                   self.pendingFocusProgramID == nil,
                   self.currentlyFocusedProgramID == origin
             else { return }
+            guard case let .requestExplicitly(programID) = resolution else { return }
             self.requestFocus(
-                on: destination,
+                on: programID,
                 retriesRemaining: 8,
                 directly: true
             )
