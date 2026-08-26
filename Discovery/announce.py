@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TypeAlias
@@ -25,6 +26,15 @@ from guide_cache import GuideCache
 TVHEADEND_SERVICE_TYPE = "_tvplayer._tcp.local."
 GUIDE_SERVICE_TYPE = "_tvplayer-guide._tcp.local."
 IPAddress: TypeAlias = ipaddress.IPv4Address | ipaddress.IPv6Address
+
+
+@dataclass(frozen=True)
+class AdvertisedGuideEndpoint:
+    target: str
+    addresses: list[IPAddress]
+    port: int
+    scheme: str
+    path: str
 
 
 def required(name: str) -> str:
@@ -221,6 +231,51 @@ def guide_server_name() -> str:
     return f"{target}."
 
 
+def advertised_guide_endpoint(
+    *,
+    default_target: str,
+    default_addresses: list[IPAddress],
+    default_port: int,
+    stable_id: str,
+) -> AdvertisedGuideEndpoint:
+    configured = os.environ.get("TVPLAYER_GUIDE_PUBLIC_URL", "").strip()
+    if not configured:
+        return AdvertisedGuideEndpoint(
+            target=default_target,
+            addresses=default_addresses,
+            port=default_port,
+            scheme="http",
+            path="/guide.json",
+        )
+
+    parsed = urlparse(configured)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(
+            "TVPLAYER_GUIDE_PUBLIC_URL must be an absolute HTTP or HTTPS URL"
+        )
+    if parsed.username or parsed.password:
+        raise ValueError("TVPLAYER_GUIDE_PUBLIC_URL must not contain credentials")
+    if parsed.query or parsed.fragment or parsed.params:
+        raise ValueError(
+            "TVPLAYER_GUIDE_PUBLIC_URL must not contain parameters, query, or fragment"
+        )
+    if not parsed.path.startswith("/") or parsed.path == "/":
+        raise ValueError("TVPLAYER_GUIDE_PUBLIC_URL must contain the public guide path")
+
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as error:
+        raise ValueError("TVPLAYER_GUIDE_PUBLIC_URL contains an invalid port") from error
+
+    return AdvertisedGuideEndpoint(
+        target=service_target(parsed.hostname, stable_id),
+        addresses=resolved_addresses(parsed.hostname),
+        port=port,
+        scheme=parsed.scheme,
+        path=parsed.path,
+    )
+
+
 def discovery_id() -> str:
     configured = os.environ.get("TVPLAYER_MDNS_ID", "").strip()
     if configured:
@@ -324,18 +379,26 @@ def main() -> int:
         stable_id = discovery_id()
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         tvheadend_addresses = resolved_addresses(parsed.hostname)
-        guide_addresses = addresses_served_by_guide(
+        local_guide_addresses = addresses_served_by_guide(
             guide_bind,
             guide_advertised_addresses(tvheadend_addresses),
         )
-        guide_target = guide_server_name()
-        uses_shared_host = bool(set(guide_addresses) & set(tvheadend_addresses))
-        tvheadend_target = guide_target if uses_shared_host else service_target(
-            parsed.hostname,
-            stable_id,
+        guide_endpoint = advertised_guide_endpoint(
+            default_target=guide_server_name(),
+            default_addresses=local_guide_addresses,
+            default_port=guide_port,
+            stable_id=stable_id,
+        )
+        uses_shared_host = bool(
+            set(guide_endpoint.addresses) & set(tvheadend_addresses)
+        )
+        tvheadend_target = (
+            guide_endpoint.target
+            if uses_shared_host
+            else service_target(parsed.hostname, stable_id)
         )
         if uses_shared_host:
-            tvheadend_addresses = guide_addresses
+            tvheadend_addresses = guide_endpoint.addresses
 
         cache = GuideCache(
             base_url=url,
@@ -373,8 +436,8 @@ def main() -> int:
         guide_properties = {
             "txtvers": "1",
             "id": stable_id,
-            "scheme": "http",
-            "path": "/guide.json",
+            "scheme": guide_endpoint.scheme,
+            "path": guide_endpoint.path,
             "format": "tvplayer-json",
         }
 
@@ -389,10 +452,10 @@ def main() -> int:
         guide_info = ServiceInfo(
             GUIDE_SERVICE_TYPE,
             f"{instance}.{GUIDE_SERVICE_TYPE}",
-            addresses=[address.packed for address in guide_addresses],
-            port=guide_port,
+            addresses=[address.packed for address in guide_endpoint.addresses],
+            port=guide_endpoint.port,
             properties=guide_properties,
-            server=guide_target,
+            server=guide_endpoint.target,
         )
     except (OSError, ValueError) as error:
         print(f"Configuration error: {error}", file=sys.stderr, flush=True)

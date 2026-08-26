@@ -19,6 +19,7 @@ sys.modules.setdefault(
 sys.modules.setdefault("ifaddr", SimpleNamespace(get_adapters=lambda: []))
 
 from announce import (
+    advertised_guide_endpoint,
     addresses_served_by_guide,
     credential_txt_properties,
     discovery_id,
@@ -31,6 +32,35 @@ from announce import (
 
 
 class AnnounceTests(unittest.TestCase):
+    def test_public_guide_url_separates_advertised_https_from_private_bind(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "TVPLAYER_GUIDE_PUBLIC_URL": (
+                    "https://tvheadend.example.com/tvplayer-guide/guide.json"
+                ),
+            },
+            clear=False,
+        ), patch(
+            "announce.resolved_addresses",
+            return_value=[ipaddress.ip_address("192.168.3.5")],
+        ):
+            endpoint = advertised_guide_endpoint(
+                default_target="tvplayer.local.",
+                default_addresses=[ipaddress.ip_address("127.0.0.1")],
+                default_port=49382,
+                stable_id="550e8400-e29b-41d4-a716-446655440000",
+            )
+
+        self.assertEqual(endpoint.target, "tvheadend.example.com.")
+        self.assertEqual(
+            endpoint.addresses,
+            [ipaddress.ip_address("192.168.3.5")],
+        )
+        self.assertEqual(endpoint.port, 443)
+        self.assertEqual(endpoint.scheme, "https")
+        self.assertEqual(endpoint.path, "/tvplayer-guide/guide.json")
+
     def test_if_none_match_uses_weak_etag_comparison(self) -> None:
         current = 'W/"guide-content"'
 

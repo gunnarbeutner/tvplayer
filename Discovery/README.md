@@ -34,6 +34,9 @@ file accepts:
 - `TVPLAYER_TVH_HTSP_PORT` (default `9982`)
 - `TVPLAYER_GUIDE_PORT` (default `49382`)
 - `TVPLAYER_GUIDE_BIND` (default `::`, with dual-stack IPv4/IPv6 enabled)
+- `TVPLAYER_GUIDE_PUBLIC_URL` (optional absolute URL advertised instead of the
+  private guide listener, for example
+  `https://tvheadend.example.com/tvplayer-guide/guide.json`)
 - `TVPLAYER_GUIDE_REFRESH_SECONDS` (default `60`, minimum `15`)
 - `TVPLAYER_GUIDE_RETENTION_HOURS` (default `24`)
 - `TVPLAYER_GUIDE_FUTURE_HOURS` (default `72`)
@@ -59,16 +62,21 @@ to run their own mDNS responders.
 
 <name>._tvplayer-guide._tcp.local.
   SRV -> <discovery daemon host>:<guide port>
-  TXT -> txtvers=1, id=<same stable ID>, scheme=http, path=/guide.json,
+  TXT -> txtvers=1, id=<same stable ID>, scheme=<http|https>, path=<guide path>,
          format=tvplayer-json
 ```
+
+When `TVPLAYER_GUIDE_PUBLIC_URL` is set, its hostname, resolved addresses,
+port, scheme, and path are advertised independently of `TVPLAYER_GUIDE_BIND`
+and `TVPLAYER_GUIDE_PORT`. This permits the HTTP guide server to bind only to
+loopback while a TLS reverse proxy supplies the public endpoint.
 
 When both endpoints resolve to the same host, they share the daemon's SRV
 hostname and A/AAAA records. For a split-host deployment, the Tvheadend record
 targets the configured Tvheadend hostname (or a stable synthetic `.local` name
 for an IP literal), while the guide record continues to target the daemon.
 
-The generated guide is available at:
+Without a public URL, the generated guide is available directly at:
 
 - `http://<advertised-address>:49382/guide.json`
 - `http://<advertised-address>:49382/healthz`
