@@ -671,6 +671,58 @@ final class GuideTimelineTests: XCTestCase {
         XCTAssertEqual(model.loadState, .loaded(serverName: "New server", channelCount: 1))
     }
 
+    @MainActor
+    func testGuideModelSupersedesAnInFlightLoadForANewerTimeline() async {
+        let oldDate = Date(timeIntervalSince1970: 10_000)
+        let newDate = oldDate.addingTimeInterval(24 * 3_600)
+        let oldTimeline = GuideTimeline.surrounding(oldDate)
+        let newTimeline = GuideTimeline.surrounding(newDate)
+        let configuration = TVHeadendConfiguration(
+            baseURL: URL(string: "http://guide-timeline-race.test:9981")!,
+            username: "",
+            password: "",
+            streamProfile: "pass",
+            guideCacheURL: nil,
+            xmltvURL: nil
+        )
+        let oldLoadStarted = expectation(description: "Old timeline load started")
+        let model = GuideViewModel(now: oldDate) { _, timeline, _ in
+            if timeline == oldTimeline {
+                oldLoadStarted.fulfill()
+                try await Task.sleep(for: .seconds(30))
+                return TVProviderSnapshot(channels: [], serverName: "Old timeline")
+            }
+            return TVProviderSnapshot(
+                channels: [GuideChannel(
+                    id: "current-channel",
+                    number: 1,
+                    name: "Current channel",
+                    monogram: "CC",
+                    tint: .blue,
+                    iconURL: nil,
+                    programs: []
+                )],
+                serverName: "Current timeline"
+            )
+        }
+
+        let oldLoad = Task {
+            await model.load(configuration: configuration, at: oldDate, force: true)
+        }
+        await fulfillment(of: [oldLoadStarted], timeout: 1)
+
+        await model.load(configuration: configuration, at: newDate)
+        oldLoad.cancel()
+        await oldLoad.value
+
+        XCTAssertEqual(model.timeline, newTimeline)
+        XCTAssertEqual(model.channels.map(\.id), ["current-channel"])
+        XCTAssertEqual(
+            model.loadState,
+            .loaded(serverName: "Current timeline", channelCount: 1)
+        )
+    }
+
     func testOffsetsAreClampedToTimeline() {
         let start = Date(timeIntervalSince1970: 10_000)
         let timeline = GuideTimeline(start: start, end: start.addingTimeInterval(3_600))

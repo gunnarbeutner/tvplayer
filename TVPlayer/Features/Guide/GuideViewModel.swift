@@ -37,6 +37,7 @@ final class GuideViewModel: ObservableObject {
     private var lastLoadedAt: Date?
     private var activeSnapshotIdentifier: String?
     private var loadTask: Task<Void, Never>?
+    private var activeLoadTimeline: GuideTimeline?
     private var loadGeneration = 0
     private let fetchGuide: GuideFetch
     private var programByID: [GuideProgram.ID: GuideProgram] = [:]
@@ -138,8 +139,17 @@ final class GuideViewModel: ObservableObject {
 
         let isFresh = lastConfiguration == configuration
             && lastLoadedAt.map { date.timeIntervalSince($0) < Self.refreshInterval } == true
+            && timeline == refreshedTimeline
         guard force || !isFresh else { return }
-        guard loadTask == nil || force else { return }
+
+        // A request suspended with the app still carries the timeline from
+        // before suspension. Let equivalent periodic requests share it, but
+        // supersede it when foregrounding asks for a newer guide window.
+        if loadTask != nil,
+           !force,
+           activeLoadTimeline == refreshedTimeline {
+            return
+        }
 
         cancelActiveLoad()
         loadGeneration &+= 1
@@ -155,6 +165,7 @@ final class GuideViewModel: ObservableObject {
             )
         }
         loadTask = task
+        activeLoadTimeline = refreshedTimeline
         await withTaskCancellationHandler {
             await task.value
         } onCancel: {
@@ -162,6 +173,7 @@ final class GuideViewModel: ObservableObject {
         }
         if generation == loadGeneration {
             loadTask = nil
+            activeLoadTimeline = nil
         }
     }
 
@@ -267,6 +279,7 @@ final class GuideViewModel: ObservableObject {
         loadGeneration &+= 1
         loadTask.cancel()
         self.loadTask = nil
+        activeLoadTimeline = nil
     }
 
     func program(withID id: GuideProgram.ID?) -> GuideProgram? {
