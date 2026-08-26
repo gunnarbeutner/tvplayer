@@ -17,7 +17,7 @@ fi
 
 mkdir -p "$download_dir" "$install_dir"
 if [[ ! -f "$archive_path" ]]; then
-  curl -fL "https://download.videolan.org/cocoapods/prod/${archive_name}" -o "$archive_path"
+  curl -fL "https://download.videolan.org/cocoapods/unstable/${archive_name}" -o "$archive_path"
 fi
 
 actual_sha256="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
